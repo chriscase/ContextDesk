@@ -33,8 +33,9 @@ function renderProbe(
   gateway: InvestigationGateway,
   query: OperationsQueueLocationQuery = DEFAULT_OPERATIONS_QUEUE_QUERY,
   capabilities: readonly string[] = ["investigation:read"],
+  readOnly = true,
 ) {
-  return render(probeTree(gateway, query, capabilities));
+  return render(probeTree(gateway, query, capabilities, "identity-alice", "authority-v1", readOnly));
 }
 
 function probeTree(
@@ -43,6 +44,7 @@ function probeTree(
   capabilities: readonly string[] = ["investigation:read"],
   identityKey = "identity-alice",
   authorityKey = "authority-v1",
+  readOnly = true,
 ) {
   return (
     <InvestigationRuntimeGatewayHarness gateway={gateway}>
@@ -51,7 +53,7 @@ function probeTree(
         identity={{ id: identityKey, username: identityKey, displayName: identityKey }}
         authorityKey={authorityKey}
         capabilities={capabilities}
-        readOnly
+        readOnly={readOnly}
         active={false}
         focusCaseId={null}
         isInvestigationLocation={false}
@@ -103,6 +105,45 @@ describe("Operations Queue public-runtime adapter", () => {
     expect(presentation?.view.availability === "available"
       ? presentation.view.value.items.map((row) => row.investigation.title)
       : []).toEqual(page.items.map((row) => row.investigation.title));
+  });
+
+  it("bridges the public self-coordination command without adding a per-row read", async () => {
+    const page = makeOperationsQueuePage();
+    const applyCoordinationAction = vi.fn(async () => gatewayOk({
+      schemaId: "cd-collab.investigation_coordination_action_success.v1" as const,
+      investigationId: page.items[1]!.investigation.id,
+      action: "claim_self" as const,
+      targetIdentityId: null,
+      previousRevision: 0,
+      previousCoordinator: null,
+      applied: page.items[1]!.coordination,
+    }));
+    const getCoordination = vi.fn(async () => gatewayOk(page.items[0]!.coordination));
+    const queryOperationsQueue = vi.fn(async () => gatewayOk(page));
+    const gateway = createInvestigationGatewayDouble({
+      queryOperationsQueue,
+      getCoordination,
+      applyCoordinationAction,
+    });
+    renderProbe(
+      gateway,
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      ["investigation:read", "investigation:write", "investigation:coordinate"],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+    await act(async () => {
+      await expect(presentation?.selfCoordination.apply(
+        page.items[1]!.investigation.id,
+        "claim_self",
+      )).resolves.toMatchObject({ status: "succeeded" });
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledWith(
+      page.items[1]!.investigation.id,
+      expect.objectContaining({ action: "claim_self", expectedRevision: 0 }),
+      expect.objectContaining({ actorIdentityId: "identity-alice" }),
+    );
+    expect(getCoordination).not.toHaveBeenCalled();
   });
 
   it("withholds the previous query page as soon as location filters change", async () => {

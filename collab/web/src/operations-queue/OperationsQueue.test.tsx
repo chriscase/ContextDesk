@@ -40,6 +40,14 @@ function settled(overrides: Partial<OperationsQueuePresentation> = {}): Operatio
     requestGeneration: 1,
     refresh: vi.fn(),
     nextPage: vi.fn(),
+    selfCoordination: {
+      available: true,
+      targetInvestigationId: null,
+      action: null,
+      state: { status: "idle" },
+      apply: vi.fn(),
+      retry: vi.fn(),
+    },
     ...overrides,
   };
 }
@@ -90,6 +98,51 @@ describe("Operations Queue presentation", () => {
     expect(screen.getByRole("link", { name: /All visible 17/u })).toBeTruthy();
     expect(screen.getByRole("link", { name: /Mine 6/u })).toBeTruthy();
     expect(screen.getByRole("link", { name: /Unassigned 3/u })).toBeTruthy();
+  });
+
+  it("offers self claim/release controls without nesting actions in row links", () => {
+    const page = makeOperationsQueuePage();
+    const apply = vi.fn(async () => ({ status: "succeeded" as const, value: {} as never }));
+    renderQueue(settled({
+      identity: { id: "identity-alice", username: "alice", displayName: "Alice" },
+      view: { availability: "available", value: page, refresh: "settled" },
+      selfCoordination: {
+        available: true,
+        targetInvestigationId: null,
+        action: null,
+        state: { status: "idle" },
+        apply,
+        retry: vi.fn(),
+      },
+    }));
+
+    expect(screen.getByRole("button", { name: "Release me Checkout latency after 4.8.0 rollout" })).toBeTruthy();
+    const claim = screen.getByRole("button", { name: "Claim for me Imported investigation" });
+    expect(claim.closest("a")).toBeNull();
+    fireEvent.click(claim);
+    expect(apply).toHaveBeenCalledWith(page.items[1]!.investigation.id, "claim_self");
+  });
+
+  it("never offers mutation for another coordinator and preserves unknown-outcome retry", () => {
+    const page = makeOperationsQueuePage();
+    const retry = vi.fn(async () => ({ status: "succeeded" as const, value: {} as never }));
+    renderQueue(settled({
+      identity: BOB_IDENTITY,
+      view: { availability: "available", value: page, refresh: "settled" },
+      selfCoordination: {
+        available: true,
+        targetInvestigationId: page.items[1]!.investigation.id,
+        action: "claim_self",
+        state: { status: "failed", error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" } },
+        apply: vi.fn(),
+        retry,
+      },
+    }));
+
+    expect(screen.queryByRole("button", { name: /Release me Checkout latency/u })).toBeNull();
+    expect(screen.getByText(/server may have recorded this action/u)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry claim for me" }));
+    expect(retry).toHaveBeenCalledOnce();
   });
 
   it("saves, applies, and removes a private normalized queue view", async () => {

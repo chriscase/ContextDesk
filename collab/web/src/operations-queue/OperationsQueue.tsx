@@ -8,6 +8,7 @@ import type {
   InvestigationOperationsQueueCoordinationScopeV1,
   InvestigationOperationsQueueRowV1,
 } from "../investigations/runtime/public.js";
+import type { OperationsQueueSelfCoordinationPresentation } from "./useOperationsQueue.js";
 import { useOperationsQueue } from "./useOperationsQueue.js";
 import {
   loadOperationsQueueSavedViews,
@@ -60,34 +61,98 @@ function investigationHref(id: string): string {
   return `/investigations/${encodeURIComponent(id)}/situation`;
 }
 
+function selfCoordinationErrorCopy(error: { readonly kind: string; readonly reason?: string }): string {
+  if (error.kind === "auth_lost" || error.kind === "not_found") {
+    return "Your investigation access changed. No ownership change was assumed.";
+  }
+  if (error.kind === "coordination_changed" || error.kind === "coordination_refused") {
+    return "The server recorded a coordination change. Refresh the queue before trying again.";
+  }
+  if (error.kind === "unavailable" && error.reason === "commit_outcome_unknown") {
+    return "The server may have recorded this action. Retry the same action to confirm.";
+  }
+  return "The coordination action could not be completed. No ownership change was assumed.";
+}
+
 function QueueRow({
   row,
   onOpen,
+  identityId,
+  selfCoordination,
+  onSelfActionInitiated,
 }: {
   readonly row: InvestigationOperationsQueueRowV1;
   readonly onOpen: (id: string) => void;
+  readonly identityId: string;
+  readonly selfCoordination: OperationsQueueSelfCoordinationPresentation;
+  readonly onSelfActionInitiated: (button: HTMLButtonElement) => void;
 }) {
   const coordinator = row.coordination.coordinator?.username ?? null;
+  const isMine = row.coordination.coordinator?.identityId === identityId && identityId.length > 0;
+  const canClaim = row.coordination.coordinator === null && selfCoordination.available;
+  const canRelease = isMine && selfCoordination.available;
+  const action = canClaim ? "claim_self" : canRelease ? "release_self" : null;
+  const isTarget = selfCoordination.targetInvestigationId === row.investigation.id;
+  const mutation = isTarget ? selfCoordination.state : { status: "idle" as const };
+  const busy = mutation.status === "running";
+  const actionLabel = action === "claim_self" ? "Claim for me" : "Release me";
   const title = row.investigation.title.trim() || "Untitled investigation";
   return (
     <li className="operations-queue__row">
-      <a
-        className="operations-queue__row-link"
-        href={investigationHref(row.investigation.id)}
-        onClick={(event) => {
-          if (!isPlainPrimaryClick(event)) return;
-          event.preventDefault();
-          onOpen(row.investigation.id);
-        }}
-      >
-        <span className="operations-queue__row-title">{title}</span>
-        <span className="operations-queue__row-facts">
-          <span className={`operations-queue__status operations-queue__status--${row.investigation.status}`}>
-            {row.investigation.status}
+      <div className="operations-queue__row-shell">
+        <a
+          className="operations-queue__row-link"
+          href={investigationHref(row.investigation.id)}
+          onClick={(event) => {
+            if (!isPlainPrimaryClick(event)) return;
+            event.preventDefault();
+            onOpen(row.investigation.id);
+          }}
+        >
+          <span className="operations-queue__row-title">{title}</span>
+          <span className="operations-queue__row-facts">
+            <span className={`operations-queue__status operations-queue__status--${row.investigation.status}`}>
+              {row.investigation.status}
+            </span>
+            <span>Coordinator: {coordinator ?? "Not recorded"}</span>
           </span>
-          <span>Coordinator: {coordinator ?? "Not recorded"}</span>
-        </span>
-      </a>
+        </a>
+        <div className="operations-queue__row-actions">
+          {action !== null ? (
+            <button
+              type="button"
+              className="operations-queue__coordination-action"
+              disabled={busy}
+              aria-busy={busy}
+              aria-label={`${actionLabel} ${title}`}
+              onClick={(event) => {
+                onSelfActionInitiated(event.currentTarget);
+                void selfCoordination.apply(row.investigation.id, action);
+              }}
+            >
+              {busy ? "Saving…" : actionLabel}
+            </button>
+          ) : null}
+          {isTarget && mutation.status === "failed" ? (
+            <div className="operations-queue__coordination-feedback" role="alert">
+              <span>{selfCoordinationErrorCopy(mutation.error)}</span>
+              {mutation.error.kind === "unavailable" && mutation.error.reason === "commit_outcome_unknown" ? (
+                <button
+                  type="button"
+                  onClick={() => { void selfCoordination.retry(); }}
+                >
+                  Retry {actionLabel.toLocaleLowerCase()}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {isTarget && mutation.status === "succeeded" ? (
+            <span className="operations-queue__coordination-feedback" role="status" aria-live="polite">
+              Coordination updated; refreshing recorded queue data.
+            </span>
+          ) : null}
+        </div>
+      </div>
     </li>
   );
 }
@@ -128,6 +193,8 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const refreshRetryInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const loadMoreRef = useRef<HTMLButtonElement>(null);
   const continuationInitiatorRef = useRef<HTMLButtonElement | null>(null);
+  const selfActionInitiatorRef = useRef<HTMLButtonElement | null>(null);
+  const selfOutcomeRef = useRef("");
   const focusedOutcomeRef = useRef(0);
   const savedViewInitiatorRef = useRef<HTMLElement | null>(null);
   const saveButtonRef = useRef<HTMLButtonElement>(null);
@@ -159,6 +226,8 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     refreshRetryInitiatorRef.current = null;
     setUnavailableRetry(null);
     setRefreshRetry(null);
+    selfActionInitiatorRef.current = null;
+    selfOutcomeRef.current = "";
   }, [queryKey, queue.scopeToken]);
 
   const available = queue.view.availability === "available";
@@ -187,6 +256,16 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
       else completionRef.current?.focus();
     }
   }, [available, hasNextPage, queue.continuationFailed, queue.continuationOutcome, queue.view.availability, refreshState]);
+
+  useEffect(() => {
+    const mutation = queue.selfCoordination.state;
+    const outcomeKey = `${queue.requestGeneration}:${mutation.status}`;
+    if (mutation.status === "idle" || selfOutcomeRef.current === outcomeKey) return;
+    selfOutcomeRef.current = outcomeKey;
+    const activeElement = document.activeElement;
+    if (activeElement !== document.body && activeElement !== selfActionInitiatorRef.current) return;
+    selfActionInitiatorRef.current?.focus();
+  }, [queue.requestGeneration, queue.selfCoordination.state]);
 
   useEffect(() => {
     if (unavailableRetry === null) return;
@@ -617,6 +696,9 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
                   key={row.investigation.id}
                   row={row}
                   onOpen={onOpenInvestigation}
+                  identityId={queue.identity.id}
+                  selfCoordination={queue.selfCoordination}
+                  onSelfActionInitiated={(button) => { selfActionInitiatorRef.current = button; }}
                 />
               ))}
             </ul>
