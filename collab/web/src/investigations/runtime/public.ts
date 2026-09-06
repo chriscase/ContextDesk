@@ -8,6 +8,7 @@ export {
   useInvestigationRuntime,
   type InvestigationContributionCommand,
   type InvestigationCoordinationActionCommand,
+  type InvestigationNamedCoordinationSelfCommand,
   type InvestigationArtifactAnnotationCommand,
   type InvestigationArtifactAnnotationsBulkCommand,
   type InvestigationCreateInput,

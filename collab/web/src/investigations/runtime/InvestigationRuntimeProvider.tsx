@@ -42,6 +42,7 @@ import {
   useCreateArtifactAnnotationsBulk,
   useInvestigationList,
   useInvestigationCoordination,
+  useNamedCoordinationSelf,
   useLifecycleAction,
   useUpdateSituation,
   useUploadEvidence,
@@ -50,6 +51,7 @@ import {
   type CreateArtifactAnnotationsBulkCommand,
   type PreviewEvidenceCommand,
   type InvestigationCoordinationCommand,
+  type NamedCoordinationSelfCommand,
   type UpdateSituationCommand,
   type UploadEvidenceCommand,
 } from "./controllers/index.js";
@@ -90,6 +92,7 @@ export type InvestigationArtifactAnnotationCommand = CreateArtifactAnnotationCom
 export type InvestigationArtifactAnnotationsBulkCommand = CreateArtifactAnnotationsBulkCommand;
 export type InvestigationSituationCommand = UpdateSituationCommand;
 export type InvestigationCoordinationActionCommand = InvestigationCoordinationCommand;
+export type InvestigationNamedCoordinationSelfCommand = NamedCoordinationSelfCommand;
 
 export interface InvestigationRuntimeResources {
   readonly investigations: ResourceState<readonly CaseV1[]>;
@@ -114,6 +117,7 @@ export interface InvestigationRuntimeMutations {
   readonly updateSituation: MutationState<CaseV1>;
   readonly lifecycle: MutationState<InvestigationLifecycleActionSuccessV1>;
   readonly coordination: MutationState<InvestigationCoordinationActionSuccessV1>;
+  readonly namedCoordinationSelf: MutationState<InvestigationCoordinationActionSuccessV1>;
   readonly createArtifactAnnotation: MutationState<ArtifactAnnotationV1>;
   readonly createArtifactAnnotations: MutationState<ArtifactAnnotationBulkResultV1>;
 }
@@ -149,6 +153,9 @@ export interface InvestigationRuntimeCommands {
   ) => Promise<CommandOutcome<InvestigationLifecycleActionSuccessV1>>) | null;
   readonly applyCoordinationAction: ((
     command: InvestigationCoordinationActionCommand,
+  ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>) | null;
+  readonly applyNamedCoordinationSelf: ((
+    command: InvestigationNamedCoordinationSelfCommand,
   ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>) | null;
   readonly createArtifactAnnotation: ((
     command: InvestigationArtifactAnnotationCommand,
@@ -667,6 +674,20 @@ export function InvestigationRuntimeProvider({
     readOnly,
     onScopeDenied: activeInvestigation.denyScope,
   });
+  const namedCoordinationSelfController = useNamedCoordinationSelf({
+    gateway: coordinationGateway,
+    identityKey,
+    authorityKey,
+    actorIdentityId: identity.id,
+    canRead: capabilities.canRead,
+    canCoordinateSelf: canCoordinateSelf && !activeScopeUnavailable,
+    readOnly,
+    queue: operationsQueue.page,
+    query: operationsQueue.query,
+    requestGeneration: operationsQueue.latestRequestGeneration,
+    onRefreshQueue: operationsQueue.refresh,
+    onScopeDenied: activeInvestigation.denyScope,
+  });
   const refreshAll = useCallback(() => {
     activeInvestigation.refreshAll();
     coordinationController.refresh();
@@ -714,6 +735,7 @@ export function InvestigationRuntimeProvider({
       updateSituation: situationController.state,
       lifecycle: lifecycleController.state,
       coordination: coordinationController.state,
+      namedCoordinationSelf: namedCoordinationSelfController.state,
       createArtifactAnnotation: artifactAnnotationController.state,
       createArtifactAnnotations: artifactAnnotationsBulkController.state,
     },
@@ -768,6 +790,13 @@ export function InvestigationRuntimeProvider({
         && coordinationController.coordination.status === "ready"
         && !activeScopeUnavailable
         ? coordinationController.apply
+        : null,
+      applyNamedCoordinationSelf: capabilities.canRead
+        && canCoordinateSelf
+        && !activeScopeUnavailable
+        && identity.id.length > 0
+        && !readOnly
+        ? namedCoordinationSelfController.apply
         : null,
       createArtifactAnnotation: canContribute
         && activeReadyCaseId !== null
@@ -835,6 +864,9 @@ export function InvestigationRuntimeProvider({
     coordinationController.coordination,
     coordinationController.refresh,
     coordinationController.state,
+    namedCoordinationSelfController.apply,
+    namedCoordinationSelfController.state,
+    readOnly,
     situationCase,
     situationController.state,
     situationController.update,
