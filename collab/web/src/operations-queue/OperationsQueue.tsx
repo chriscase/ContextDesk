@@ -8,7 +8,10 @@ import type {
   InvestigationOperationsQueueCoordinationScopeV1,
   InvestigationOperationsQueueRowV1,
 } from "../investigations/runtime/public.js";
-import type { OperationsQueueSelfCoordinationPresentation } from "./useOperationsQueue.js";
+import type {
+  OperationsQueueParticipantCoordinationPresentation,
+  OperationsQueueSelfCoordinationPresentation,
+} from "./useOperationsQueue.js";
 import { useOperationsQueue } from "./useOperationsQueue.js";
 import {
   loadOperationsQueueSavedViews,
@@ -74,29 +77,76 @@ function selfCoordinationErrorCopy(error: { readonly kind: string; readonly reas
   return "The coordination action could not be completed. No ownership change was assumed.";
 }
 
+function participantCoordinationErrorCopy(error: { readonly kind: string; readonly reason?: string }): string {
+  if (error.kind === "auth_lost") {
+    return "Your investigation access changed. No ownership change was assumed.";
+  }
+  if (error.kind === "coordination_changed" || error.kind === "coordination_refused") {
+    return "The server recorded a coordination change. Refresh the queue before trying again.";
+  }
+  if (error.kind === "unavailable" && error.reason === "commit_outcome_unknown") {
+    return "The server may have recorded this action. Retry the same action to confirm.";
+  }
+  return "The coordination action could not be completed. No ownership change was assumed.";
+}
+
+function recordedIdentityLabel(person: { readonly username: string; readonly identityId: string }): string {
+  const name = person.username.trim();
+  return name.length > 0 ? `${name} (${person.identityId})` : person.identityId;
+}
+
 function QueueRow({
   row,
   onOpen,
   identityId,
   selfCoordination,
+  participantCoordination,
   onSelfActionInitiated,
+  onParticipantActionInitiated,
 }: {
   readonly row: InvestigationOperationsQueueRowV1;
   readonly onOpen: (id: string) => void;
   readonly identityId: string;
   readonly selfCoordination: OperationsQueueSelfCoordinationPresentation;
+  readonly participantCoordination: OperationsQueueParticipantCoordinationPresentation;
   readonly onSelfActionInitiated: (button: HTMLButtonElement) => void;
+  readonly onParticipantActionInitiated: (button: HTMLButtonElement) => void;
 }) {
-  const coordinator = row.coordination.coordinator?.username ?? null;
-  const isMine = row.coordination.coordinator?.identityId === identityId && identityId.length > 0;
-  const canClaim = row.coordination.coordinator === null && selfCoordination.available;
+  const coordinator = row.coordination.coordinator;
+  const coordinatorName = coordinator?.username ?? null;
+  const isMine = coordinator?.identityId === identityId && identityId.length > 0;
+  const canClaim = coordinator === null && selfCoordination.available;
   const canRelease = isMine && selfCoordination.available;
   const action = canClaim ? "claim_self" : canRelease ? "release_self" : null;
-  const isTarget = selfCoordination.targetInvestigationId === row.investigation.id;
-  const mutation = isTarget ? selfCoordination.state : { status: "idle" as const };
-  const busy = mutation.status === "running";
+  const isSelfTarget = selfCoordination.targetInvestigationId === row.investigation.id;
+  const selfMutation = isSelfTarget ? selfCoordination.state : { status: "idle" as const };
+  const selfBusy = selfMutation.status === "running";
   const actionLabel = action === "claim_self" ? "Claim for me" : "Release me";
   const title = row.investigation.title.trim() || "Untitled investigation";
+  const participants = row.investigation.participants;
+  const [selectedParticipantId, setSelectedParticipantId] = useState(participants[0]?.identityId ?? "");
+  useEffect(() => {
+    if (participants.some((participant) => participant.identityId === selectedParticipantId)) return;
+    setSelectedParticipantId(participants[0]?.identityId ?? "");
+  }, [participants, selectedParticipantId]);
+  const selectedParticipant = participants.find((participant) => participant.identityId === selectedParticipantId)
+    ?? null;
+  const isParticipantTarget = participantCoordination.targetInvestigationId === row.investigation.id;
+  const participantMutation = isParticipantTarget
+    ? participantCoordination.state
+    : { status: "idle" as const };
+  const participantBusy = participantMutation.status === "running";
+  const participantConcealed = isParticipantTarget
+    && participantMutation.status === "failed"
+    && participantMutation.error.kind === "not_found";
+  const showParticipantControl = participantCoordination.available && !participantConcealed;
+  const participantRetryAction = participantCoordination.action === "release_participant"
+    ? "release coordinator"
+    : "assign participant";
+  const participantRetryTarget = participantCoordination.targetIdentityId;
+  const participantRetryLabel = participantRetryTarget === null
+    ? participantRetryAction
+    : `${participantRetryAction} ${participantRetryTarget}`;
   return (
     <li className="operations-queue__row">
       <div className="operations-queue__row-shell">
@@ -114,7 +164,7 @@ function QueueRow({
             <span className={`operations-queue__status operations-queue__status--${row.investigation.status}`}>
               {row.investigation.status}
             </span>
-            <span>Coordinator: {coordinator ?? "Not recorded"}</span>
+            <span>Coordinator: {coordinatorName ?? "Not recorded"}</span>
           </span>
         </a>
         <div className="operations-queue__row-actions">
@@ -122,21 +172,21 @@ function QueueRow({
             <button
               type="button"
               className="operations-queue__coordination-action"
-              disabled={busy}
-              aria-busy={busy}
+              disabled={selfBusy}
+              aria-busy={selfBusy}
               aria-label={`${actionLabel} ${title}`}
               onClick={(event) => {
                 onSelfActionInitiated(event.currentTarget);
                 void selfCoordination.apply(row.investigation.id, action);
               }}
             >
-              {busy ? "Saving…" : actionLabel}
+              {selfBusy ? "Saving…" : actionLabel}
             </button>
           ) : null}
-          {isTarget && mutation.status === "failed" ? (
+          {isSelfTarget && selfMutation.status === "failed" ? (
             <div className="operations-queue__coordination-feedback" role="alert">
-              <span>{selfCoordinationErrorCopy(mutation.error)}</span>
-              {mutation.error.kind === "unavailable" && mutation.error.reason === "commit_outcome_unknown" ? (
+              <span>{selfCoordinationErrorCopy(selfMutation.error)}</span>
+              {selfMutation.error.kind === "unavailable" && selfMutation.error.reason === "commit_outcome_unknown" ? (
                 <button
                   type="button"
                   onClick={() => { void selfCoordination.retry(); }}
@@ -146,7 +196,105 @@ function QueueRow({
               ) : null}
             </div>
           ) : null}
-          {isTarget && mutation.status === "succeeded" ? (
+          {isSelfTarget && selfMutation.status === "succeeded" ? (
+            <span className="operations-queue__coordination-feedback" role="status" aria-live="polite">
+              Coordination updated; refreshing recorded queue data.
+            </span>
+          ) : null}
+          {showParticipantControl ? (
+            <div
+              className="operations-queue__participant-control"
+              role="group"
+              aria-label={`Participant coordination for ${title}`}
+            >
+              <label className="operations-queue__participant-select">
+                <span>Participant</span>
+                <select
+                  value={selectedParticipantId}
+                  disabled={participantBusy || participants.length === 0}
+                  aria-label={`Recorded participants for ${title}`}
+                  onChange={(event) => setSelectedParticipantId(event.target.value)}
+                >
+                  {participants.length === 0
+                    ? <option value="">No recorded participants</option>
+                    : participants.map((participant) => (
+                      <option key={participant.identityId} value={participant.identityId}>
+                        {recordedIdentityLabel(participant)}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <div className="operations-queue__participant-actions">
+                <button
+                  type="button"
+                  className="operations-queue__coordination-action"
+                  disabled={participantBusy || selectedParticipant === null}
+                  aria-busy={participantBusy && participantCoordination.action === "assign_participant"}
+                  aria-label={selectedParticipant === null
+                    ? `Assign participant to ${title}`
+                    : `Assign participant ${recordedIdentityLabel(selectedParticipant)} to ${title}`}
+                  onClick={(event) => {
+                    if (selectedParticipant === null) return;
+                    onParticipantActionInitiated(event.currentTarget);
+                    void participantCoordination.apply(
+                      row.investigation.id,
+                      "assign_participant",
+                      selectedParticipant.identityId,
+                    );
+                  }}
+                >
+                  {participantBusy && participantCoordination.action === "assign_participant"
+                    ? "Saving…"
+                    : "Assign participant"}
+                </button>
+                {coordinator !== null ? (
+                  <button
+                    type="button"
+                    className="operations-queue__coordination-action"
+                    disabled={participantBusy}
+                    aria-busy={participantBusy && participantCoordination.action === "release_participant"}
+                    aria-label={`Release coordinator ${recordedIdentityLabel(coordinator)} from ${title}`}
+                    onClick={(event) => {
+                      onParticipantActionInitiated(event.currentTarget);
+                      void participantCoordination.apply(
+                        row.investigation.id,
+                        "release_participant",
+                        coordinator.identityId,
+                      );
+                    }}
+                  >
+                    {participantBusy && participantCoordination.action === "release_participant"
+                      ? "Saving…"
+                      : "Release coordinator"}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          {participantConcealed ? (
+            <span className="operations-queue__coordination-feedback" role="status" aria-live="polite">
+              This investigation is no longer available for this coordination action. Previously loaded queue rows remain.
+            </span>
+          ) : null}
+          {isParticipantTarget && participantMutation.status === "failed" && !participantConcealed ? (
+            <div className="operations-queue__coordination-feedback" role="alert">
+              <span>{participantCoordinationErrorCopy(participantMutation.error)}</span>
+              {participantMutation.error.kind === "unavailable"
+                && participantMutation.error.reason === "commit_outcome_unknown" ? (
+                <button
+                  type="button"
+                  aria-label={`Retry ${participantRetryLabel} for ${title}`}
+                  onClick={(event) => {
+                    onParticipantActionInitiated(event.currentTarget);
+                    void participantCoordination.retry();
+                  }}
+                >
+                  Retry {participantRetryAction}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {isParticipantTarget && participantMutation.status === "succeeded" ? (
             <span className="operations-queue__coordination-feedback" role="status" aria-live="polite">
               Coordination updated; refreshing recorded queue data.
             </span>
@@ -195,6 +343,8 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const continuationInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const selfActionInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const selfOutcomeRef = useRef("");
+  const participantActionInitiatorRef = useRef<HTMLButtonElement | null>(null);
+  const participantOutcomeRef = useRef("");
   const focusedOutcomeRef = useRef(0);
   const savedViewInitiatorRef = useRef<HTMLElement | null>(null);
   const saveButtonRef = useRef<HTMLButtonElement>(null);
@@ -228,6 +378,8 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     setRefreshRetry(null);
     selfActionInitiatorRef.current = null;
     selfOutcomeRef.current = "";
+    participantActionInitiatorRef.current = null;
+    participantOutcomeRef.current = "";
   }, [queryKey, queue.scopeToken]);
 
   const available = queue.view.availability === "available";
@@ -266,6 +418,17 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     if (activeElement !== document.body && activeElement !== selfActionInitiatorRef.current) return;
     selfActionInitiatorRef.current?.focus();
   }, [queue.requestGeneration, queue.selfCoordination.state]);
+
+  useEffect(() => {
+    const mutation = queue.participantCoordination.state;
+    const outcomeKey = `${queue.requestGeneration}:${mutation.status}`;
+    if (mutation.status === "idle" || participantOutcomeRef.current === outcomeKey) return;
+    participantOutcomeRef.current = outcomeKey;
+    const initiator = participantActionInitiatorRef.current;
+    const activeElement = document.activeElement;
+    if (activeElement !== document.body && activeElement !== initiator) return;
+    if (initiator?.isConnected) initiator.focus();
+  }, [queue.requestGeneration, queue.participantCoordination.state]);
 
   useEffect(() => {
     if (unavailableRetry === null) return;
@@ -698,7 +861,9 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
                   onOpen={onOpenInvestigation}
                   identityId={queue.identity.id}
                   selfCoordination={queue.selfCoordination}
+                  participantCoordination={queue.participantCoordination}
                   onSelfActionInitiated={(button) => { selfActionInitiatorRef.current = button; }}
+                  onParticipantActionInitiated={(button) => { participantActionInitiatorRef.current = button; }}
                 />
               ))}
             </ul>

@@ -5,6 +5,7 @@ import {
   useInvestigationRuntime,
   type CommandOutcome,
   type InvestigationCoordinationActionSuccessV1,
+  type InvestigationNamedCoordinationParticipantCommand,
   type InvestigationNamedCoordinationSelfCommand,
   type InvestigationRuntimeIdentity,
   type InvestigationOperationsQueuePageV1,
@@ -29,6 +30,7 @@ export interface OperationsQueuePresentation {
   readonly refresh: () => void;
   readonly nextPage: () => void;
   readonly selfCoordination: OperationsQueueSelfCoordinationPresentation;
+  readonly participantCoordination: OperationsQueueParticipantCoordinationPresentation;
 }
 
 export interface OperationsQueueSelfCoordinationPresentation {
@@ -39,6 +41,20 @@ export interface OperationsQueueSelfCoordinationPresentation {
   readonly apply: (
     investigationId: string,
     action: InvestigationNamedCoordinationSelfCommand["action"],
+  ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>;
+  readonly retry: () => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>;
+}
+
+export interface OperationsQueueParticipantCoordinationPresentation {
+  readonly available: boolean;
+  readonly targetInvestigationId: string | null;
+  readonly action: InvestigationNamedCoordinationParticipantCommand["action"] | null;
+  readonly targetIdentityId: string | null;
+  readonly state: ReturnType<typeof useInvestigationRuntime>["mutations"]["namedCoordinationParticipant"];
+  readonly apply: (
+    investigationId: string,
+    action: InvestigationNamedCoordinationParticipantCommand["action"],
+    targetIdentityId: string,
   ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>;
   readonly retry: () => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>;
 }
@@ -77,6 +93,7 @@ export function useOperationsQueue(
   const runtime = useInvestigationRuntime();
   const command = runtime.commands.queryOperationsQueue;
   const selfCommand = runtime.commands.applyNamedCoordinationSelf;
+  const participantCommand = runtime.commands.applyNamedCoordinationParticipant;
   const commandAvailability: OperationsQueueCommandAvailability = command === undefined
     ? "absent"
     : command === null
@@ -110,6 +127,17 @@ export function useOperationsQueue(
   const [selfTarget, setSelfTarget] = useState<{
     readonly investigationId: string;
     readonly action: InvestigationNamedCoordinationSelfCommand["action"];
+  } | null>(null);
+  const participantIntentRef = useRef<{
+    readonly investigationId: string;
+    readonly action: InvestigationNamedCoordinationParticipantCommand["action"];
+    readonly targetIdentityId: string;
+    readonly idempotencyKey: string;
+  } | null>(null);
+  const [participantTarget, setParticipantTarget] = useState<{
+    readonly investigationId: string;
+    readonly action: InvestigationNamedCoordinationParticipantCommand["action"];
+    readonly targetIdentityId: string;
   } | null>(null);
   const activeQuery = runtime.resources.operationsQueueQuery;
   const requestGeneration = runtime.resources.operationsQueueRequestGeneration;
@@ -160,6 +188,8 @@ export function useOperationsQueue(
   useEffect(() => {
     selfIntentRef.current = null;
     setSelfTarget(null);
+    participantIntentRef.current = null;
+    setParticipantTarget(null);
   }, [inputKey, scopeToken]);
 
   const applySelf = useMemo(() => async (
@@ -200,6 +230,55 @@ export function useOperationsQueue(
     if (intent === null) return { status: "ignored", reason: "not_ready" };
     return applySelf(intent.investigationId, intent.action);
   }, [applySelf]);
+
+  const applyParticipant = useMemo(() => async (
+    investigationId: string,
+    action: InvestigationNamedCoordinationParticipantCommand["action"],
+    targetIdentityId: string,
+  ): Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>> => {
+    if (participantCommand === null) return { status: "ignored", reason: "not_ready" };
+    if (runtime.mutations.namedCoordinationParticipant.status === "running") {
+      return { status: "ignored", reason: "busy" };
+    }
+    const previous = participantIntentRef.current;
+    const sameIntent = previous?.investigationId === investigationId
+      && previous.action === action
+      && previous.targetIdentityId === targetIdentityId;
+    // Reuse a retained 503 key for the same investigation even when action or
+    // target differ so Runtime can reject the mismatch locally with zero POST.
+    const intent = sameIntent
+      ? previous
+      : {
+          investigationId,
+          action,
+          targetIdentityId,
+          idempotencyKey: previous?.investigationId === investigationId
+            ? previous.idempotencyKey
+            : typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+              ? crypto.randomUUID()
+              : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+        };
+    participantIntentRef.current = intent;
+    setParticipantTarget({ investigationId, action, targetIdentityId });
+    const outcome = await participantCommand({
+      investigationId,
+      action,
+      targetIdentityId,
+      idempotencyKey: intent.idempotencyKey,
+    });
+    if (outcome.status === "succeeded"
+      || (outcome.status === "failed"
+        && !(outcome.error.kind === "unavailable" && outcome.error.reason === "commit_outcome_unknown"))) {
+      participantIntentRef.current = null;
+    }
+    return outcome;
+  }, [participantCommand, runtime.mutations.namedCoordinationParticipant.status]);
+
+  const retryParticipant = useMemo(() => async (): Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>> => {
+    const intent = participantIntentRef.current;
+    if (intent === null) return { status: "ignored", reason: "not_ready" };
+    return applyParticipant(intent.investigationId, intent.action, intent.targetIdentityId);
+  }, [applyParticipant]);
 
   useEffect(() => {
     if (commandAvailability !== "available" || typeof command !== "function") {
@@ -280,6 +359,15 @@ export function useOperationsQueue(
       state: runtime.mutations.namedCoordinationSelf,
       apply: applySelf,
       retry: retrySelf,
+    },
+    participantCoordination: {
+      available: participantCommand !== null,
+      targetInvestigationId: participantTarget?.investigationId ?? null,
+      action: participantTarget?.action ?? null,
+      targetIdentityId: participantTarget?.targetIdentityId ?? null,
+      state: runtime.mutations.namedCoordinationParticipant,
+      apply: applyParticipant,
+      retry: retryParticipant,
     },
   };
 }
