@@ -160,6 +160,23 @@ export class CatalogService {
     }, this.audit);
   }
 
+  /**
+   * Strict-import source inspection under the catalog row lock. Unlike the
+   * legacy attribution helper, this intentionally returns missing, retired,
+   * and unversioned states so the strict protocol can map them without
+   * leaking raw store errors. When joined to a case transaction, no nested
+   * transaction or early unlock is introduced.
+   */
+  async inspectLockedSourceForImport<T>(
+    id: string,
+    operation: (source: SourceV1 | null) => Promise<T>,
+  ): Promise<T> {
+    return this.store.withAtomic(async () => {
+      const row = await this.store.lockSource(id);
+      return operation(row ? toSourceV1(row) : null);
+    }, this.audit);
+  }
+
   async create(
     actor: CatalogActor,
     input: {

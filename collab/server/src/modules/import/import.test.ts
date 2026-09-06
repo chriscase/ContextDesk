@@ -3,11 +3,18 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  EXTERNAL_RUN_IMPORT_REQUEST_SCHEMA_ID,
+  SOURCE_CREATE_REQUEST_SCHEMA_ID,
+  SOURCE_RETIRE_REQUEST_SCHEMA_ID,
   parseCase,
   parseExternalRun,
+  parseExternalRunImportRefused,
+  parseExternalRunImportSuccess,
   parseSource,
   parseSourceList,
+  parseSourceMutationSuccess,
   parseTimeline,
+  type ExternalRunImportRequestV1,
 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
@@ -34,9 +41,11 @@ import {
   CaseService,
   CaseStoreCommitOutcomeUnknownError,
   MemoryCaseStore,
+  runWithCaseQueryable,
 } from "../cases/index.js";
-import { ImportService, MemoryRunStore } from "./index.js";
+import { ImportService, MemoryRunStore, PgRunStore } from "./index.js";
 import { initialCorroborationState } from "./model.js";
+import type { ExternalRunImportSuccessIntent, FrozenRunRow } from "./store.js";
 
 const ALICE = "fixture-alice-secret";
 const TRANSCRIPT = "The mailer pool is exhausted; workers time out after 30s.";
@@ -188,19 +197,26 @@ async function withApp(
     app: Awaited<ReturnType<typeof buildApp>>;
     audit: MemoryAuditStore;
     store: FilesystemEvidenceStore;
+    caseStore: MemoryCaseStore;
+    runs: MemoryRunStore;
+    catalog: CatalogService;
+    imports: ImportService;
   }) => Promise<void>,
+  options: { caseStore?: MemoryCaseStore } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-import-"));
   const store = new FilesystemEvidenceStore({ rootDir: root });
   const audit = new MemoryAuditStore();
   const catalog = new CatalogService(undefined, audit);
-  const domain = new CaseService(store, audit, undefined, catalog);
+  const caseStore = options.caseStore ?? new MemoryCaseStore();
+  const runs = new MemoryRunStore();
+  const domain = new CaseService(store, audit, caseStore, catalog);
   const imports = new ImportService({
     evidence: store,
     audit,
     cases: domain,
     catalog,
-    runs: new MemoryRunStore(),
+    runs,
   });
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(roleMap));
   const app = await buildApp({
@@ -226,11 +242,70 @@ async function withApp(
     },
   });
   try {
-    await fn({ app, audit, store });
+    await fn({ app, audit, store, caseStore, runs, catalog, imports });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
   }
+}
+
+function strictImportRequest(
+  caseId: string,
+  sourceId: string,
+  overrides: Partial<ExternalRunImportRequestV1> = {},
+): ExternalRunImportRequestV1 {
+  return {
+    schemaId: EXTERNAL_RUN_IMPORT_REQUEST_SCHEMA_ID,
+    importMode: "manual",
+    caseId,
+    sourceId,
+    expectedSourceRevision: 1,
+    outputText: "strict imported output",
+    promptText: "strict imported prompt",
+    promptCompleteness: "exact",
+    outputCompleteness: "exact",
+    workflowCompleteness: "partial",
+    evidenceVisibility: "unknown",
+    evidenceArtifactIds: [],
+    snapshotBinding: null,
+    visibilityNote: null,
+    operator: null,
+    provider: "example-assistant",
+    model: "fixture-model",
+    version: "1",
+    claimedTraces: [],
+    uncertainty: null,
+    timing: null,
+    cost: null,
+    redacted: false,
+    privacyClass: "owner_only",
+    idempotencyKey: "strict-import-0001",
+    ...overrides,
+  };
+}
+
+async function createVersionedSource(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  adminCookie: string,
+  overrides: Record<string, unknown> = {},
+) {
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/catalog/sources",
+    headers: { cookie: adminCookie },
+    payload: {
+      schemaId: SOURCE_CREATE_REQUEST_SCHEMA_ID,
+      name: "Strict external assistant",
+      kind: "external-tool",
+      description: null,
+      identityId: null,
+      expectedRevision: 0,
+      idempotencyKey: "strict-source-0001",
+      ...overrides,
+    },
+  });
+  expect(response.statusCode).toBe(201);
+  return parseSourceMutationSuccess(JSON.parse(response.body)).applied;
 }
 
 function cookie(res: { headers: Record<string, unknown> }): string {
@@ -249,7 +324,553 @@ async function login(app: Awaited<ReturnType<typeof buildApp>>, username: string
   return cookie(res);
 }
 
+function storedRun(overrides: Partial<FrozenRunRow> = {}): FrozenRunRow {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    caseId: "11111111-1111-4111-8111-111111111111",
+    contributionId: "22222222-2222-4222-8222-222222222222",
+    sourceId: "00000000-0000-0000-0000-000000000001",
+    outputHash: "a".repeat(64),
+    outputText: "stored output",
+    promptHash: null,
+    promptText: null,
+    promptCompleteness: "unknown",
+    outputCompleteness: "exact",
+    workflowCompleteness: "unknown",
+    evidenceVisibility: "unknown",
+    snapshotBinding: null,
+    visibilityNote: null,
+    importerId: "local:alice",
+    importerUsername: "alice",
+    operatorId: "local:alice",
+    operatorUsername: "alice",
+    provider: null,
+    model: null,
+    version: null,
+    claimedTraces: [],
+    uncertainty: null,
+    timing: null,
+    cost: null,
+    redacted: false,
+    privacyClass: "owner_only",
+    createdAt: "2026-09-05T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function storedIntent(overrides: Partial<ExternalRunImportSuccessIntent> = {}): ExternalRunImportSuccessIntent {
+  return {
+    caseId: "11111111-1111-4111-8111-111111111111",
+    actorId: "local:alice",
+    idempotencyKey: "import-memory-01",
+    requestDigest: "b".repeat(64),
+    runId: "33333333-3333-4333-8333-333333333333",
+    successJson: "{\"schemaId\":\"cd-collab.external_run_import_success.v1\"}",
+    createdAt: "2026-09-05T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function storedDbRun(evidenceArtifactIds: unknown[]): Record<string, unknown> {
+  const row = storedRun({
+    importMode: "manual",
+    sourceRevision: 1,
+    evidenceArtifactIds: evidenceArtifactIds as string[],
+  });
+  return {
+    id: row.id,
+    case_id: row.caseId,
+    contribution_id: row.contributionId,
+    source_id: row.sourceId,
+    output_hash: row.outputHash,
+    output_text: row.outputText,
+    prompt_hash: row.promptHash,
+    prompt_text: row.promptText,
+    prompt_completeness: row.promptCompleteness,
+    output_completeness: row.outputCompleteness,
+    workflow_completeness: row.workflowCompleteness,
+    evidence_visibility: row.evidenceVisibility,
+    snapshot_binding: row.snapshotBinding,
+    visibility_note: row.visibilityNote,
+    importer_id: row.importerId,
+    importer_username: row.importerUsername,
+    operator_id: row.operatorId,
+    operator_username: row.operatorUsername,
+    provider: row.provider,
+    model: row.model,
+    version: row.version,
+    claimed_traces: row.claimedTraces,
+    uncertainty: row.uncertainty,
+    timing: row.timing,
+    cost: row.cost,
+    redacted: row.redacted,
+    privacy_class: row.privacyClass,
+    created_at: row.createdAt,
+    import_mode: row.importMode,
+    source_revision: row.sourceRevision,
+    evidence_artifact_ids: evidenceArtifactIds,
+  };
+}
+
+describe("external-run durable store", () => {
+  it("preserves legacy rows and isolates strict marker arrays", async () => {
+    const store = new MemoryRunStore();
+    await store.insert(storedRun());
+    const evidenceArtifactIds = ["44444444-4444-4444-8444-444444444444"];
+    await store.insert(storedRun({
+      id: "55555555-5555-4555-8555-555555555555",
+      importMode: "manual",
+      sourceRevision: 7,
+      evidenceArtifactIds,
+    }));
+    evidenceArtifactIds.push("66666666-6666-4666-8666-666666666666");
+
+    expect(await store.get("33333333-3333-4333-8333-333333333333")).not.toHaveProperty(
+      "importMode",
+    );
+    const strict = await store.get("55555555-5555-4555-8555-555555555555");
+    expect(strict?.evidenceArtifactIds).toEqual([
+      "44444444-4444-4444-8444-444444444444",
+    ]);
+    strict!.evidenceArtifactIds!.push("77777777-7777-4777-8777-777777777777");
+    expect((await store.get(strict!.id))?.evidenceArtifactIds).toHaveLength(1);
+  });
+
+  it("rejects partial strict markers and duplicate replay intents", async () => {
+    const store = new MemoryRunStore();
+    await expect(store.insert(storedRun({ importMode: "manual" }))).rejects.toThrow(
+      /markers must be present together/,
+    );
+    await expect(store.insert(storedRun({
+      importMode: "manual",
+      sourceRevision: 1,
+      evidenceArtifactIds: Array.from({ length: 65 }, (_, index) => `artifact-${index}`),
+    }))).rejects.toThrow(/evidence artifact ids/);
+    const intent = storedIntent();
+    await store.insertImportSuccessIntent(intent);
+    await expect(store.insertImportSuccessIntent(intent)).rejects.toThrow(
+      /success intent already exists/,
+    );
+  });
+
+  it("rejects malformed, duplicate, and non-canonical strict evidence identities", async () => {
+    const artifactA = "44444444-4444-4444-8444-444444444444";
+    const artifactB = "55555555-5555-4555-8555-555555555555";
+    const malformedLists: unknown[][] = [
+      ["not-a-uuid"],
+      [artifactA, artifactA],
+      [artifactB, artifactA],
+      ["AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"],
+      [42],
+    ];
+
+    for (const evidenceArtifactIds of malformedLists) {
+      const memory = new MemoryRunStore();
+      await expect(memory.insert(storedRun({
+        importMode: "manual",
+        sourceRevision: 1,
+        evidenceArtifactIds: evidenceArtifactIds as string[],
+      }))).rejects.toThrow(/evidence artifact id/);
+
+      const postgres = new PgRunStore({
+        async query() {
+          return { rows: [storedDbRun(evidenceArtifactIds)] };
+        },
+      } as never);
+      await expect(postgres.get("33333333-3333-4333-8333-333333333333"))
+        .rejects.toThrow(/evidence artifact id/);
+    }
+  });
+
+  it("captures and restores strict rows and replay intents", async () => {
+    const store = new MemoryRunStore();
+    const run = storedRun({
+      importMode: "manual",
+      sourceRevision: 4,
+      evidenceArtifactIds: [],
+    });
+    const intent = storedIntent();
+    await store.insert(run);
+    await store.insertImportSuccessIntent(intent);
+    const snapshot = store.capture();
+    await store.insert(storedRun({ id: "88888888-8888-4888-8888-888888888888" }));
+    store.restore(snapshot);
+
+    expect(await store.get(run.id)).toMatchObject({ importMode: "manual", sourceRevision: 4 });
+    expect(await store.get("88888888-8888-4888-8888-888888888888")).toBeNull();
+    expect(await store.lockImportSuccessIntent(
+      intent.caseId,
+      intent.actorId,
+      intent.idempotencyKey,
+    )).toEqual(intent);
+  });
+
+  it("requires the active case transaction for strict PostgreSQL writes and intent locks", async () => {
+    const queries: string[] = [];
+    const queryable = {
+      async query(sql: string) {
+        queries.push(sql);
+        return { rows: [] };
+      },
+    };
+    const store = new PgRunStore(queryable as never);
+    const strict = storedRun({
+      importMode: "manual",
+      sourceRevision: 1,
+      evidenceArtifactIds: [],
+    });
+    const intent = storedIntent();
+
+    await expect(store.insert(strict)).rejects.toThrow(/atomic case boundary/);
+    await expect(store.lockImportSuccessIntent(
+      intent.caseId,
+      intent.actorId,
+      intent.idempotencyKey,
+    )).rejects.toThrow(/atomic case boundary/);
+    await expect(store.insertImportSuccessIntent(intent)).rejects.toThrow(/atomic case boundary/);
+    expect(queries).toEqual([]);
+
+    await runWithCaseQueryable(queryable as never, async () => {
+      await store.insert(strict);
+      expect(await store.lockImportSuccessIntent(
+        intent.caseId,
+        intent.actorId,
+        intent.idempotencyKey,
+      )).toBeNull();
+      await store.insertImportSuccessIntent(intent);
+    });
+    expect(queries.some((sql) => sql.includes("INSERT INTO imported_runs"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("FOR UPDATE"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("external_run_import_success_intents"))).toBe(true);
+  });
+});
+
 describe("external-run import", () => {
+  it("atomically creates one strict import and replays the frozen intent without duplicate effects", async () => {
+    await withApp(async ({ app, audit, runs }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const source = await createVersionedSource(app, dave);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Strict import replay" },
+      })).body));
+      const payload = strictImportRequest(created.id, source.id);
+
+      const freshResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(freshResponse.statusCode).toBe(201);
+      const fresh = parseExternalRunImportSuccess(JSON.parse(freshResponse.body));
+      expect(fresh.replayed).toBe(false);
+      expect(fresh.applied.importMode).toBe("manual");
+      expect(fresh.applied.sourceRevision).toBe(source.revision);
+      expect(fresh.applied.evidenceArtifactIds).toEqual([]);
+      expect(fresh.contribution.caseId).toBe(created.id);
+
+      const replayResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload: {
+          ...payload,
+          expectedSourceRevision: source.revision + 99,
+          clientTime: "2026-09-05T12:00:00.000Z",
+        },
+      });
+      expect(replayResponse.statusCode).toBe(200);
+      const replay = parseExternalRunImportSuccess(JSON.parse(replayResponse.body));
+      expect(replay.replayed).toBe(true);
+      expect(replay.applied).toEqual(fresh.applied);
+      expect(replay.contribution).toEqual(fresh.contribution);
+      expect(await runs.listByCase(created.id)).toHaveLength(1);
+
+      const changedResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload: { ...payload, outputText: "different strict intent" },
+      });
+      expect(changedResponse.statusCode).toBe(409);
+      const changed = parseExternalRunImportRefused(JSON.parse(changedResponse.body));
+      expect(changed.reason).toBe("idempotency_intent_mismatch");
+      expect(changed.current).toBeNull();
+
+      const timeline = parseTimeline(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/timeline`,
+        headers: { cookie: alice },
+      })).body));
+      expect(timeline.events.filter((event) => event.kind === "external_run_imported")).toHaveLength(1);
+      expect((await audit.list({ action: "external_run_import" })).filter(
+        (event) => event.outcome === "success",
+      )).toHaveLength(1);
+    });
+  });
+
+  it("replays before mutable archive/source checks and returns typed strict refusals", async () => {
+    await withApp(async ({ app, caseStore }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const source = await createVersionedSource(app, dave, {
+        idempotencyKey: "strict-source-refusals",
+      });
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Strict import refusal ordering" },
+      })).body));
+      const payload = strictImportRequest(created.id, source.id, {
+        idempotencyKey: "strict-import-before-archive",
+      });
+      const first = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(first.statusCode).toBe(201);
+      await caseStore.updateCaseMeta({ id: created.id, status: "archived" });
+
+      const replay = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(replay.statusCode).toBe(200);
+      expect(parseExternalRunImportSuccess(JSON.parse(replay.body)).replayed).toBe(true);
+
+      const archived = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload: { ...payload, idempotencyKey: "strict-import-after-archive" },
+      });
+      expect(archived.statusCode).toBe(409);
+      expect(parseExternalRunImportRefused(JSON.parse(archived.body)).reason).toBe("case_archived");
+    });
+  });
+
+  it("returns typed source revision, lifecycle, kind, and legacy-version refusals", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Strict source refusals" },
+      })).body));
+      const active = await createVersionedSource(app, dave, {
+        idempotencyKey: "strict-source-active",
+      });
+      const request = strictImportRequest(created.id, active.id, {
+        expectedSourceRevision: active.revision + 1,
+        idempotencyKey: "strict-import-source-cas",
+      });
+      const mismatchResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload: request,
+      });
+      expect(mismatchResponse.statusCode).toBe(409);
+      const mismatch = parseExternalRunImportRefused(JSON.parse(mismatchResponse.body));
+      expect(mismatch.reason).toBe("source_revision_mismatch");
+      expect(mismatch.current?.revision).toBe(active.revision);
+
+      const retireResponse = await app.inject({
+        method: "POST",
+        url: `/api/catalog/sources/${active.id}/retire`,
+        headers: { cookie: dave },
+        payload: {
+          schemaId: SOURCE_RETIRE_REQUEST_SCHEMA_ID,
+          sourceId: active.id,
+          expectedRevision: active.revision,
+          idempotencyKey: "strict-source-retire",
+        },
+      });
+      expect(retireResponse.statusCode).toBe(200);
+      const retiredRequest = strictImportRequest(created.id, active.id, {
+        expectedSourceRevision: active.revision + 1,
+        idempotencyKey: "strict-import-source-retired",
+      });
+      const retiredResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload: retiredRequest,
+      });
+      expect(retiredResponse.statusCode).toBe(409);
+      expect(parseExternalRunImportRefused(JSON.parse(retiredResponse.body)).reason).toBe(
+        "source_retired",
+      );
+
+      const human = await createVersionedSource(app, dave, {
+        name: "Human observer",
+        kind: "human",
+        identityId: "uid=observer,ou=people,dc=example,dc=test",
+        idempotencyKey: "strict-source-human",
+      });
+      const kindResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload: strictImportRequest(created.id, human.id, {
+          idempotencyKey: "strict-import-source-human",
+        }),
+      });
+      expect(kindResponse.statusCode).toBe(409);
+      expect(parseExternalRunImportRefused(JSON.parse(kindResponse.body)).reason).toBe(
+        "source_kind_not_importable",
+      );
+
+      const legacy = parseSource(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/catalog/sources",
+        headers: { cookie: dave },
+        payload: { name: "Legacy source", kind: "external-tool" },
+      })).body));
+      const legacyResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload: strictImportRequest(created.id, legacy.id, {
+          idempotencyKey: "strict-import-source-legacy",
+        }),
+      });
+      expect(legacyResponse.statusCode).toBe(409);
+      expect(parseExternalRunImportRefused(JSON.parse(legacyResponse.body)).reason).toBe(
+        "source_not_versioned",
+      );
+    });
+  });
+
+  it("conceals cross-case evidence and sanitizes strict request failures", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const source = await createVersionedSource(app, dave, {
+        idempotencyKey: "strict-source-concealment",
+      });
+      const first = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Strict import evidence target" },
+      })).body));
+      const second = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Strict import other case" },
+      })).body));
+      const evidenceResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${second.id}/evidence`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "attachment",
+          filename: "other-case.txt",
+          mediaType: "text/plain",
+          contentBase64: Buffer.from("cross case evidence").toString("base64"),
+          summary: "Cross-case strict import evidence",
+        },
+      });
+      expect(evidenceResponse.statusCode).toBe(200);
+      const artifactId = (JSON.parse(evidenceResponse.body) as { artifact: { id: string } }).artifact.id;
+      const payload = strictImportRequest(first.id, source.id, {
+        evidenceArtifactIds: [artifactId],
+        evidenceVisibility: "importer_described",
+        visibilityNote: "Explicitly cited evidence package.",
+      });
+
+      const concealed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${first.id}/imports`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(concealed.statusCode).toBe(404);
+      expect(JSON.parse(concealed.body)).toEqual({ error: "not_found" });
+
+      const wrongPath = await app.inject({
+        method: "POST",
+        url: `/api/cases/${second.id}/imports`,
+        headers: { cookie: alice },
+        payload: { ...payload, evidenceArtifactIds: [] },
+      });
+      expect(wrongPath.statusCode).toBe(400);
+      expect(JSON.parse(wrongPath.body)).toEqual({ error: "invalid" });
+
+      const malformed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${first.id}/imports`,
+        headers: { cookie: alice },
+        payload: { schemaId: EXTERNAL_RUN_IMPORT_REQUEST_SCHEMA_ID, caseId: first.id },
+      });
+      expect(malformed.statusCode).toBe(400);
+      expect(JSON.parse(malformed.body)).toEqual({ error: "invalid" });
+
+      const oversized = await app.inject({
+        method: "POST",
+        url: `/api/cases/${first.id}/imports`,
+        headers: { cookie: alice },
+        payload: { ...strictImportRequest(first.id, source.id), outputText: "x".repeat(1_000_001) },
+      });
+      expect(oversized.statusCode).toBe(413);
+      expect(JSON.parse(oversized.body)).toEqual({ error: "payload_too_large" });
+    });
+  });
+
+  it("returns an exact unknown-outcome response and resolves a frozen retry from durable intent", async () => {
+    const unknownStore = new UnknownCommitStore();
+    await withApp(async ({ app, runs }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const source = await createVersionedSource(app, dave, {
+        idempotencyKey: "strict-source-unknown",
+      });
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Strict unknown commit" },
+      })).body));
+      const payload = strictImportRequest(created.id, source.id, {
+        idempotencyKey: "strict-import-unknown",
+      });
+      unknownStore.unknownCommit = true;
+      const uncertain = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(uncertain.statusCode).toBe(503);
+      expect(JSON.parse(uncertain.body)).toEqual({ error: "commit_outcome_unknown" });
+      expect(await runs.listByCase(created.id)).toHaveLength(1);
+
+      unknownStore.unknownCommit = false;
+      const retry = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(retry.statusCode).toBe(200);
+      expect(parseExternalRunImportSuccess(JSON.parse(retry.body)).replayed).toBe(true);
+      expect(await runs.listByCase(created.id)).toHaveLength(1);
+    }, { caseStore: unknownStore });
+  });
+
   it("imports a pasted transcript with hash round-trip, unknown fields, and distinct identities", async () => {
     await withApp(async ({ app, audit, store }) => {
       const alice = await login(app, "alice", ALICE);

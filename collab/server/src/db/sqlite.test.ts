@@ -16,7 +16,7 @@ import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } fro
 import { CatalogService } from "../modules/catalog/index.js";
 import { CaseService } from "../modules/cases/index.js";
 import { ExperimentService } from "../modules/experiments/index.js";
-import { ImportService } from "../modules/import/index.js";
+import { ImportService, type RunStore } from "../modules/import/index.js";
 import { TriageRunService } from "../modules/triage-runs/index.js";
 import { StrategyGovernanceService } from "../modules/strategy-governance/index.js";
 import { createSqliteRuntime } from "./sqlite.js";
@@ -24,6 +24,69 @@ import { createSqliteRuntime } from "./sqlite.js";
 const EXPERIMENT_SUMMARY = JSON.parse(
   readFileSync(new URL("../../../contracts/fixtures/experiment-summary.valid.json", import.meta.url), "utf8"),
 ) as unknown;
+
+type StoredRun = Parameters<RunStore["insert"]>[0];
+type StoredImportIntent = Parameters<RunStore["insertImportSuccessIntent"]>[0];
+
+function strictStoredRun(caseId: string, id: string): StoredRun {
+  return {
+    id,
+    caseId,
+    contributionId: "22222222-2222-4222-8222-222222222222",
+    sourceId: "00000000-0000-0000-0000-000000000001",
+    outputHash: "a".repeat(64),
+    outputText: "strict sqlite output",
+    promptHash: null,
+    promptText: null,
+    promptCompleteness: "unknown",
+    outputCompleteness: "exact",
+    workflowCompleteness: "unknown",
+    evidenceVisibility: "unknown",
+    snapshotBinding: null,
+    visibilityNote: null,
+    importerId: "local:lead",
+    importerUsername: "lead",
+    operatorId: "local:lead",
+    operatorUsername: "lead",
+    provider: null,
+    model: null,
+    version: null,
+    claimedTraces: [],
+    uncertainty: null,
+    timing: null,
+    cost: null,
+    redacted: false,
+    privacyClass: "owner_only",
+    createdAt: "2026-09-05T12:00:00.000Z",
+    importMode: "manual",
+    sourceRevision: 1,
+    evidenceArtifactIds: [],
+  };
+}
+
+function strictStoredIntent(
+  caseId: string,
+  runId: string,
+  idempotencyKey: string,
+): StoredImportIntent {
+  return {
+    caseId,
+    actorId: "local:lead",
+    idempotencyKey,
+    requestDigest: "b".repeat(64),
+    runId,
+    successJson: "{\"schemaId\":\"cd-collab.external_run_import_success.v1\"}",
+    createdAt: "2026-09-05T12:00:00.000Z",
+  };
+}
+
+function legacyStoredRun(caseId: string, id: string): StoredRun {
+  const row = strictStoredRun(caseId, id);
+  delete row.importMode;
+  delete row.sourceRevision;
+  delete row.evidenceArtifactIds;
+  return row;
+}
 
 describe("SQLite local runtime", () => {
   it("persists coordination projection and exact success replay across reopen", async () => {
@@ -131,6 +194,111 @@ describe("SQLite local runtime", () => {
       )).toHaveLength(0);
       expect(await second.audit.list({ action: "investigation_coordination_changed" })).toEqual([]);
       second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists and rolls back strict run markers and replay intents with the case transaction", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-strict-import-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const first = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const cases = new CaseService(
+        evidence,
+        first.audit,
+        first.cases,
+        new CatalogService(first.catalog, first.audit),
+      );
+      const created = await cases.createCase(actor, { title: "SQLite strict import" }, "test");
+      const durableRun = strictStoredRun(
+        created.id,
+        "33333333-3333-4333-8333-333333333333",
+      );
+      const durableIntent = strictStoredIntent(created.id, durableRun.id, "sqlite-import-01");
+      await cases.withAtomic(async () => {
+        await first.runs.insert(durableRun);
+        await first.runs.insertImportSuccessIntent(durableIntent);
+      });
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      expect(await second.runs.get(durableRun.id)).toMatchObject({
+        importMode: "manual",
+        sourceRevision: 1,
+        evidenceArtifactIds: [],
+      });
+      expect(await second.runs.lockImportSuccessIntent(
+        durableIntent.caseId,
+        durableIntent.actorId,
+        durableIntent.idempotencyKey,
+      )).toEqual(durableIntent);
+      const reopenedCases = new CaseService(
+        evidence,
+        second.audit,
+        second.cases,
+        new CatalogService(second.catalog, second.audit),
+      );
+      const rolledBackRun = strictStoredRun(
+        created.id,
+        "44444444-4444-4444-8444-444444444444",
+      );
+      const rolledBackIntent = strictStoredIntent(
+        created.id,
+        rolledBackRun.id,
+        "sqlite-import-rollback",
+      );
+      await expect(reopenedCases.withAtomic(async () => {
+        await second.runs.insert(rolledBackRun);
+        await second.runs.insertImportSuccessIntent(rolledBackIntent);
+        throw new Error("synthetic strict import rollback");
+      })).rejects.toThrow("synthetic strict import rollback");
+      second.state.close();
+
+      const third = createSqliteRuntime(path);
+      expect(await third.runs.get(durableRun.id)).not.toBeNull();
+      expect(await third.runs.get(rolledBackRun.id)).toBeNull();
+      expect(await third.runs.lockImportSuccessIntent(
+        rolledBackIntent.caseId,
+        rolledBackIntent.actorId,
+        rolledBackIntent.idempotencyKey,
+      )).toBeNull();
+      third.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reopens a pre-Phase-A encoded run store with no replay-intent map", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-legacy-run-"));
+    const path = join(root, "collab.sqlite");
+    const caseId = "11111111-1111-4111-8111-111111111111";
+    const run = legacyStoredRun(caseId, "33333333-3333-4333-8333-333333333333");
+    const encodedMap = (entries: unknown[][]) => ({
+      __cd_collab_state_type: "map",
+      entries,
+    });
+    try {
+      const seed = createSqliteRuntime(path);
+      const legacyPayload = {
+        runs: encodedMap([[run.id, run]]),
+        events: encodedMap([[run.id, []]]),
+      };
+      seed.state.db.prepare(
+        `INSERT INTO collab_state (key, payload, updated_at) VALUES (?, ?, ?)`,
+      ).run("runs", JSON.stringify(legacyPayload), "2026-09-05T12:00:00.000Z");
+      seed.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.runs.get(run.id)).toEqual(run);
+      expect(await reopened.runs.lockImportSuccessIntent(
+        caseId,
+        "local:lead",
+        "legacy-import-01",
+      )).toBeNull();
+      reopened.state.close();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

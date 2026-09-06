@@ -10,9 +10,10 @@ describe("migration versions", () => {
   // experiment row-lock privilege, the administrator model-use policy, the
   // investigation log workbench, structured context, UI strategy governance,
   // first-class artifact annotations, replay-safe singular writes, and one
-  // parent intent for each replay-safe bulk write, capability model v2, and
-  // the case-row-serialized investigation coordination projection.
-  it("pins the canonical PostgreSQL head at source catalog mutations", () => {
+  // parent intent for each replay-safe bulk write, capability model v2,
+  // case-row-serialized investigation coordination, source catalog CAS, and
+  // durable strict external-run import markers and replay intents.
+  it("pins the canonical PostgreSQL head at atomic external-run imports", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
@@ -30,7 +31,8 @@ describe("migration versions", () => {
     expect(versions).toContain("028_capability_model_v2");
     expect(versions).toContain("029_investigation_coordination");
     expect(versions).toContain("030_source_catalog_mutations");
-    expect(latestMigrationVersion()).toBe("030_source_catalog_mutations");
+    expect(versions).toContain("031_external_run_import_atomic");
+    expect(latestMigrationVersion()).toBe("031_external_run_import_atomic");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -40,7 +42,6 @@ describe("migration versions", () => {
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
     expect(versions.slice(-8)).toEqual([
-      "023_investigation_context",
       "024_ui_strategy_governance",
       "025_artifact_annotations",
       "026_artifact_annotation_write_intents",
@@ -48,7 +49,40 @@ describe("migration versions", () => {
       "028_capability_model_v2",
       "029_investigation_coordination",
       "030_source_catalog_mutations",
+      "031_external_run_import_atomic",
     ]);
+  });
+
+  it("keeps strict import markers paired and protects insert-only replay state", () => {
+    const migration = listMigrations().find(
+      (file) => file.version === "031_external_run_import_atomic",
+    );
+    expect(migration).toBeDefined();
+    const upSql = readFileSync(migration!.upPath, "utf8");
+    expect(upSql).toMatch(/num_nonnulls\(import_mode, source_revision, evidence_artifact_ids\) IN \(0, 3\)/);
+    expect(upSql).toContain("source_revision <= 9007199254740991");
+    expect(upSql).toContain("jsonb_array_length(evidence_artifact_ids) <= 64");
+    expect(upSql).toMatch(/PRIMARY KEY \(case_id, actor_id, idempotency_key\)/);
+    expect(upSql).toMatch(/BEFORE UPDATE OR DELETE ON external_run_import_success_intents/);
+    expect(upSql).toMatch(/GRANT SELECT, INSERT ON TABLE external_run_import_success_intents/);
+    expect(upSql).toMatch(/REVOKE UPDATE, DELETE ON TABLE external_run_import_success_intents/);
+
+    const downSql = readFileSync(migration!.downPath, "utf8");
+    const intentLock = downSql.indexOf(
+      "LOCK TABLE external_run_import_success_intents IN ACCESS EXCLUSIVE MODE",
+    );
+    const runLock = downSql.indexOf("LOCK TABLE imported_runs IN ACCESS EXCLUSIVE MODE");
+    const guard = downSql.indexOf(
+      "IF EXISTS (SELECT 1 FROM external_run_import_success_intents LIMIT 1)",
+    );
+    const drop = downSql.indexOf(
+      "DROP TRIGGER IF EXISTS external_run_import_success_intents_no_update",
+    );
+    expect(intentLock).toBeGreaterThanOrEqual(0);
+    expect(runLock).toBeGreaterThan(intentLock);
+    expect(guard).toBeGreaterThan(runLock);
+    expect(drop).toBeGreaterThan(guard);
+    expect(downSql).toMatch(/cannot roll back 031_external_run_import_atomic/);
   });
 
   it("replaces only the capability check with exact v2 and rollback enums", () => {
@@ -267,6 +301,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("028_capability_model_v2");
       expect(up.applied).toContain("029_investigation_coordination");
       expect(up.applied).toContain("030_source_catalog_mutations");
+      expect(up.applied).toContain("031_external_run_import_atomic");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -389,6 +424,30 @@ describe.skipIf(!adminUrl())("migrations", () => {
            AND column_name = 'revision'`,
       );
       expect(catalogRevision.rows).toEqual([{ column_name: "revision" }]);
+
+      const strictImportColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'imported_runs'
+           AND column_name IN ('import_mode', 'source_revision', 'evidence_artifact_ids')
+         ORDER BY column_name`,
+      );
+      expect(strictImportColumns.rows.map((row) => row.column_name)).toEqual([
+        "evidence_artifact_ids",
+        "import_mode",
+        "source_revision",
+      ]);
+      const importIntentTable = await client.query<{ to_regclass: string | null }>(
+        `SELECT to_regclass('public.external_run_import_success_intents') AS to_regclass`,
+      );
+      expect(importIntentTable.rows[0]?.to_regclass).not.toBeNull();
+
+      expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
+      const strictImportColumnsAfterRollback = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'imported_runs'
+           AND column_name IN ('import_mode', 'source_revision', 'evidence_artifact_ids')`,
+      );
+      expect(strictImportColumnsAfterRollback.rows).toHaveLength(0);
 
       await client.query(`
         UPDATE catalog_sources
@@ -626,9 +685,104 @@ describe.skipIf(!adminUrl())("migrations", () => {
     });
   });
 
+  it("enforces strict imported-run marker and replay-intent durability", async () => {
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      await client.query(`
+        INSERT INTO cases (id, title, severity, status, created_by, created_by_username)
+        VALUES (
+          '11111111-1111-4111-8111-111111111111', 'strict import migration',
+          'low', 'open', 'synthetic-actor', 'synthetic-actor'
+        )
+      `);
+      await client.query(`
+        INSERT INTO contributions (
+          id, case_id, kind, privacy_class, created_by, created_by_username
+        ) VALUES (
+          '22222222-2222-4222-8222-222222222222',
+          '11111111-1111-4111-8111-111111111111',
+          'external_run', 'owner_only', 'synthetic-actor', 'synthetic-actor'
+        )
+      `);
+      const insertRun = (markers: string) => client.query(`
+        INSERT INTO imported_runs (
+          id, case_id, contribution_id, source_id, output_hash, output_text,
+          prompt_completeness, output_completeness, workflow_completeness,
+          evidence_visibility, importer_id, importer_username, operator_id,
+          operator_username, claimed_traces, privacy_class${markers ? ", " : ""}${markers}
+        ) VALUES (
+          '33333333-3333-4333-8333-333333333333',
+          '11111111-1111-4111-8111-111111111111',
+          '22222222-2222-4222-8222-222222222222',
+          '00000000-0000-0000-0000-000000000001',
+          '${"a".repeat(64)}', 'strict output',
+          'unknown', 'exact', 'unknown', 'unknown',
+          'synthetic-actor', 'synthetic-actor', 'synthetic-actor',
+          'synthetic-actor', '[]'::jsonb, 'owner_only'
+          ${markers ? ", 'manual', 1, '[]'::jsonb" : ""}
+        )
+      `);
+
+      await expect(client.query(`
+        INSERT INTO imported_runs (
+          id, case_id, contribution_id, source_id, output_hash, output_text,
+          prompt_completeness, output_completeness, workflow_completeness,
+          evidence_visibility, importer_id, importer_username, operator_id,
+          operator_username, claimed_traces, privacy_class, import_mode
+        ) VALUES (
+          '44444444-4444-4444-8444-444444444444',
+          '11111111-1111-4111-8111-111111111111',
+          '22222222-2222-4222-8222-222222222222',
+          '00000000-0000-0000-0000-000000000001',
+          '${"b".repeat(64)}', 'partial markers',
+          'unknown', 'exact', 'unknown', 'unknown',
+          'synthetic-actor', 'synthetic-actor', 'synthetic-actor',
+          'synthetic-actor', '[]'::jsonb, 'owner_only', 'manual'
+        )
+      `)).rejects.toThrow(/imported_runs_strict_markers_together_check/);
+      await insertRun("import_mode, source_revision, evidence_artifact_ids");
+      const strict = await client.query<{
+        import_mode: string;
+        source_revision: string;
+        evidence_artifact_ids: unknown[];
+      }>(`
+        SELECT import_mode, source_revision::text, evidence_artifact_ids
+        FROM imported_runs WHERE id = '33333333-3333-4333-8333-333333333333'
+      `);
+      expect(strict.rows).toEqual([{
+        import_mode: "manual",
+        source_revision: "1",
+        evidence_artifact_ids: [],
+      }]);
+      await client.query(`
+        INSERT INTO external_run_import_success_intents (
+          case_id, actor_id, idempotency_key, request_digest, run_id,
+          success_json, created_at
+        ) VALUES (
+          '11111111-1111-4111-8111-111111111111', 'synthetic-actor',
+          'import-migration-01', '${"c".repeat(64)}',
+          '33333333-3333-4333-8333-333333333333', '{}', CURRENT_TIMESTAMP
+        )
+      `);
+      await expect(client.query(
+        `UPDATE external_run_import_success_intents SET success_json = '{"tampered":true}'`,
+      )).rejects.toThrow(/insert-only/);
+      await expect(client.query(
+        `DELETE FROM external_run_import_success_intents`,
+      )).rejects.toThrow(/insert-only/);
+      await expect(migrateDown(client)).rejects.toThrow(
+        /cannot roll back 031_external_run_import_atomic while strict import data or success intents exist/,
+      );
+      expect((await client.query(
+        `SELECT success_json FROM external_run_import_success_intents`,
+      )).rows).toEqual([{ success_json: "{}" }]);
+    });
+  });
+
   it("refuses catalog rollback when an immutable success intent exists without deleting it", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       await client.query(`
         INSERT INTO catalog_sources (
           id, name, kind, description, lifecycle, created_by, revision
@@ -662,6 +816,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("excludes concurrent writers from both coordination tables during the rollback guard", async () => {
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       const catalogRollback = await migrateDown(client);
       expect(catalogRollback.rolledBack).toBe("030_source_catalog_mutations");
       await client.query(`
@@ -765,6 +920,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("028_capability_model_v2");
       expect(dry.pending).toContain("029_investigation_coordination");
       expect(dry.pending).toContain("030_source_catalog_mutations");
+      expect(dry.pending).toContain("031_external_run_import_atomic");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

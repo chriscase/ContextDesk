@@ -347,6 +347,48 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
         await expect(
           app.query(`UPDATE source_catalog_success_intents SET success_json = '{}'`),
         ).rejects.toThrow(/insert-only|permission denied/);
+        await app.query(
+          `INSERT INTO imported_runs (
+             id, case_id, contribution_id, source_id, output_hash, output_text,
+             prompt_completeness, output_completeness, workflow_completeness,
+             evidence_visibility, importer_id, importer_username, operator_id,
+             operator_username, claimed_traces, privacy_class, import_mode,
+             source_revision, evidence_artifact_ids
+           ) VALUES (
+             $1, $2, $3, $4, $5, 'strict grant probe',
+             'unknown', 'exact', 'unknown', 'unknown', $6, 'alice', $6,
+             'alice', '[]'::jsonb, 'owner_only', 'manual', 1, '[]'::jsonb
+           )`,
+          [
+            "88888888-8888-4888-8888-888888888888",
+            "11111111-1111-1111-1111-111111111111",
+            "66666666-6666-4666-8666-666666666666",
+            "77777777-7777-4777-8777-777777777777",
+            "d".repeat(64),
+            "uid=alice,ou=people,dc=example,dc=test",
+          ],
+        );
+        await app.query(
+          `INSERT INTO external_run_import_success_intents (
+             case_id, actor_id, idempotency_key, request_digest, run_id,
+             success_json, created_at
+           ) VALUES ($1, $2, 'import-grant-01', $3, $4, '{}', CURRENT_TIMESTAMP)`,
+          [
+            "11111111-1111-1111-1111-111111111111",
+            "uid=alice,ou=people,dc=example,dc=test",
+            "e".repeat(64),
+            "88888888-8888-4888-8888-888888888888",
+          ],
+        );
+        expect((await app.query(
+          `SELECT success_json FROM external_run_import_success_intents`,
+        )).rows).toEqual([{ success_json: "{}" }]);
+        await expect(app.query(
+          `UPDATE external_run_import_success_intents SET success_json = '{"tampered":true}'`,
+        )).rejects.toThrow(/insert-only|permission denied/);
+        await expect(app.query(
+          `DELETE FROM external_run_import_success_intents`,
+        )).rejects.toThrow(/insert-only|permission denied/);
         await expect(app.query(`CREATE TABLE collab_app_should_not (id int)`)).rejects.toThrow(
           /permission denied/,
         );
