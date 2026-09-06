@@ -200,6 +200,7 @@ test.describe("Overview Activity Center cursor continuation", () => {
       "investigation_created",
     );
     expect(location.searchParams.has("cursor")).toBe(false);
+    expect(browserPage.url()).not.toContain(firstCursor);
     const firstFilteredRequestIndex = requests.findIndex(
       (request) =>
         request.searchParams.get("activityKind") === "investigation_created",
@@ -213,11 +214,10 @@ test.describe("Overview Activity Center cursor continuation", () => {
       ),
     ).toBe(true);
     expect(filteredRequests[0]?.searchParams.has("cursor")).toBe(false);
-    expect(
-      filteredRequests.some(
-        (request) => request.searchParams.get("cursor") === firstCursor,
-      ),
-    ).toBe(true);
+    const continuationRequestIndex = filteredRequests.findIndex(
+      (request) => request.searchParams.get("cursor") === firstCursor,
+    );
+    expect(continuationRequestIndex).toBe(filteredRequests.length - 1);
     await expect
       .poll(() =>
         responses.some(
@@ -334,6 +334,7 @@ test.describe("Overview Activity Center cursor continuation", () => {
     );
     expect(location.searchParams.get("stage")).toBe("situation");
     expect(location.searchParams.has("cursor")).toBe(false);
+    expect(browserPage.url()).not.toContain(firstCursor);
     const firstFilteredRequestIndex = requests.findIndex(
       (request) =>
         request.searchParams.get("activityKind") === "investigation_created",
@@ -342,7 +343,10 @@ test.describe("Overview Activity Center cursor continuation", () => {
     const filteredRequests = requests.slice(firstFilteredRequestIndex);
     expect(
       filteredRequests.every(
-        (request) => request.searchParams.get("stage") === "situation",
+        (request) =>
+          request.searchParams.get("activityKind") ===
+            "investigation_created" &&
+          request.searchParams.get("stage") === "situation",
       ),
     ).toBe(true);
     const staleCursorIndex = filteredRequests.findIndex(
