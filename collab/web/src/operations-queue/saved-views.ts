@@ -1,0 +1,112 @@
+import type { OperationsQueueLocationQuery } from "../app-location.js";
+import type { InvestigationRuntimeIdentity } from "../investigations/runtime/public.js";
+
+const STORAGE_PREFIX = "cd-operations-views:";
+const MAX_SAVED_VIEWS = 8;
+const MAX_VIEW_NAME = 64;
+const MAX_QUERY = 256;
+const VALID_STATUSES = new Set(["open", "monitoring", "resolved", "archived"]);
+const VALID_SCOPES = new Set(["all_visible", "mine", "unassigned"]);
+
+export interface OperationsQueueSavedView {
+  readonly id: string;
+  readonly name: string;
+  readonly query: OperationsQueueLocationQuery;
+}
+
+function identityStorageKey(identity: InvestigationRuntimeIdentity): string | null {
+  const stableIdentity = identity.id.trim() || identity.username.trim();
+  return stableIdentity ? `${STORAGE_PREFIX}${encodeURIComponent(stableIdentity)}` : null;
+}
+
+function normalizeQuery(raw: unknown): OperationsQueueLocationQuery | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const q = typeof record.q === "string" ? record.q : null;
+  const status = Array.isArray(record.status) ? record.status : null;
+  const coordinationScope = record.coordinationScope;
+  if (
+    q === null
+    || q.length > MAX_QUERY
+    || status === null
+    || status.some((item) => typeof item !== "string" || !VALID_STATUSES.has(item))
+    || new Set(status).size !== status.length
+    || typeof record.includeArchived !== "boolean"
+    || typeof coordinationScope !== "string"
+    || !VALID_SCOPES.has(coordinationScope)
+  ) return null;
+  return Object.freeze({
+    q,
+    status: Object.freeze([...status]) as OperationsQueueLocationQuery["status"],
+    includeArchived: record.includeArchived,
+    coordinationScope: coordinationScope as OperationsQueueLocationQuery["coordinationScope"],
+  });
+}
+
+function normalizeView(raw: unknown): OperationsQueueSavedView | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const id = typeof record.id === "string" ? record.id.trim() : "";
+  const name = typeof record.name === "string" ? record.name.trim() : "";
+  const query = normalizeQuery(record.query);
+  if (!id || !name || name.length > MAX_VIEW_NAME || query === null) return null;
+  return Object.freeze({ id, name, query });
+}
+
+function storageFor(identity: InvestigationRuntimeIdentity): Storage | null {
+  if (typeof window === "undefined" || identityStorageKey(identity) === null) return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function operationsQueueSavedViewsKey(identity: InvestigationRuntimeIdentity): string | null {
+  return identityStorageKey(identity);
+}
+
+export function loadOperationsQueueSavedViews(
+  identity: InvestigationRuntimeIdentity,
+): OperationsQueueSavedView[] {
+  const storage = storageFor(identity);
+  const key = identityStorageKey(identity);
+  if (storage === null || key === null) return [];
+  try {
+    const raw = storage.getItem(key);
+    if (raw === null) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    return parsed
+      .map(normalizeView)
+      .filter((view): view is OperationsQueueSavedView => view !== null)
+      .filter((view) => {
+        if (seen.has(view.id)) return false;
+        seen.add(view.id);
+        return true;
+      })
+      .slice(0, MAX_SAVED_VIEWS);
+  } catch {
+    return [];
+  }
+}
+
+export function writeOperationsQueueSavedViews(
+  identity: InvestigationRuntimeIdentity,
+  views: readonly OperationsQueueSavedView[],
+): boolean {
+  const storage = storageFor(identity);
+  const key = identityStorageKey(identity);
+  if (storage === null || key === null) return false;
+  try {
+    storage.setItem(key, JSON.stringify(views.slice(0, MAX_SAVED_VIEWS)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function operationsQueueSavedViewNameLimit(): number {
+  return MAX_VIEW_NAME;
+}

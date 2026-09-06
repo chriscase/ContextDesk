@@ -146,6 +146,99 @@
   grid-column: 1 / -1;
 }
 
+.operations-queue__saved {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.operations-queue__saved-heading h3,
+.operations-queue__saved-heading p,
+.operations-queue__saved-empty,
+.operations-queue__saved-notice {
+  margin: 0;
+}
+
+.operations-queue__saved-heading h3 {
+  color: var(--fg);
+  font-size: 0.98rem;
+}
+
+.operations-queue__saved-heading p,
+.operations-queue__saved-empty,
+.operations-queue__saved-notice {
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.operations-queue__saved-form {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) auto;
+  gap: 0.55rem;
+  align-items: end;
+}
+
+.operations-queue__saved-form label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.operations-queue__saved-form input {
+  min-height: 2.25rem;
+  padding: 0.42rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface-input);
+  color: var(--fg);
+}
+
+.operations-queue__saved-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.operations-queue__saved-list li {
+  display: inline-flex;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.operations-queue__saved-list button {
+  min-height: 2rem;
+  padding: 0.35rem 0.7rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg);
+}
+
+.operations-queue__saved-list button:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operations-queue__saved-list .operations-queue__saved-remove {
+  border-inline-start: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .operations-queue__scopes {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -297,11 +390,16 @@
   }
 
   .operations-queue__refresh,
-  .operations-queue__filters > button {
+  .operations-queue__filters > button,
+  .operations-queue__saved-form > button {
     width: 100%;
   }
 
   .operations-queue__filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .operations-queue__saved-form {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -332,6 +430,7 @@
 @media (forced-colors: active) {
   .operations-queue__header,
   .operations-queue__filters,
+  .operations-queue__saved,
   .operations-queue__scopes a,
   .operations-queue__message,
   .operations-queue__archive-note,
