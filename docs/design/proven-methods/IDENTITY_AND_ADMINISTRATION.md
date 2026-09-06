@@ -583,7 +583,7 @@ commissioned to satisfy:
    `applyNamedCoordinationSelf` (merged Operations Queue
    self-coordination slice on `main`), not a queue-query write and not a
    `investigation:coordinate` grant. PR #1152 is a qualification-only
-   e2e lane; hosted acceptance is not claimed while that lane is not
+   e2e lane; hosted acceptance is not claimed until that lane is
    accepted or closed. Named-row `assign_participant` / `release_participant` from an
    Operations row is accepted design on that same case route
    (`investigation:coordinate`); this chapter does not authorize that

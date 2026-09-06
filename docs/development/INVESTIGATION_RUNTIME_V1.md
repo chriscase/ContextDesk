@@ -22,8 +22,8 @@ read-only text preview. These additions keep provider credentials, byte
 integrity, authorization, and audit history on the server; the preview is an
 optional read seam so older strategy/test doubles remain valid.
 
-The Operations Queue UI is a **local integration** on the additive queue
-runtime seam of this product, not a separate local server. `/operations`
+The Operations Queue UI is **partial** on the additive queue runtime seam
+of this product, not a separate local server. `/operations`
 mounts the same public provider used by Investigations with
 `active=false`, `focusCaseId=null`, and `isInvestigationLocation=false`.
 It issues an explicit read-only queue command and consumes the runtime
@@ -39,8 +39,8 @@ envelope to `POST /api/cases/:id/coordination` from a visible queue row.
 It does not retarget the active case, does not GET coordination per row,
 and does not add an operations write endpoint or queue-side writer. PR
 [#1152](https://github.com/chriscase/ContextDesk/pull/1152) is a
-qualification-only e2e lane; hosted acceptance is not claimed while that
-lane is not green.
+qualification-only e2e lane; hosted acceptance is not claimed until that
+lane is accepted or closed.
 
 The next named-row privileged participant assign/release seam is
 **accepted design**, not a Runtime operation on this surface. A later
