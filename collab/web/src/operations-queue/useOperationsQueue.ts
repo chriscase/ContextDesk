@@ -3,6 +3,7 @@ import type { OperationsQueueLocationQuery } from "../app-location.js";
 import {
   selectResourceView,
   useInvestigationRuntime,
+  type InvestigationRuntimeIdentity,
   type InvestigationOperationsQueuePageV1,
   type InvestigationOperationsQueueQueryInput,
   type ResourceView,
@@ -11,6 +12,7 @@ import {
 export type OperationsQueueCommandAvailability = "available" | "absent" | "denied";
 
 export interface OperationsQueuePresentation {
+  readonly identity: InvestigationRuntimeIdentity;
   /** Opaque adapter scope; changes with Runtime identity/authority command identity. */
   readonly scopeToken: object;
   readonly commandAvailability: OperationsQueueCommandAvailability;
@@ -151,6 +153,7 @@ export function useOperationsQueue(
   }, [command, commandAvailability, input, inputKey, runtime.refresh.operationsQueue]);
 
   return {
+    identity: runtime.identity,
     scopeToken,
     commandAvailability,
     view,

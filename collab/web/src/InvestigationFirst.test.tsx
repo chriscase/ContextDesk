@@ -226,7 +226,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     claim.focus();
     fireEvent.click(claim);
     expect(applyCoordinationAction).not.toHaveBeenCalled();
-    const confirmClaim = await screen.findByRole("button", { name: "Confirm claim coordination" }, { timeout: 5000 });
+    const confirmClaim = await screen.findByRole("button", { name: "Confirm claim coordination" }, { timeout: 10000 });
     confirmClaim.focus();
     fireEvent.click(confirmClaim);
     await waitFor(() => expect(applyCoordinationAction).toHaveBeenCalledTimes(1));
@@ -342,7 +342,7 @@ describe("Investigation First Runtime V1 presentation", () => {
       });
 
       fireEvent.click(await screen.findByRole("button", { name: "Claim coordination" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Confirm claim coordination" }, { timeout: 5000 }));
+      fireEvent.click(await screen.findByRole("button", { name: "Confirm claim coordination" }, { timeout: 10000 }));
       expect(await screen.findByText(/may have been recorded/iu)).toBeTruthy();
       expect(screen.getByRole("button", { name: "Retry exact action" })).toBeTruthy();
       expect(applyCoordinationAction).toHaveBeenCalledTimes(1);

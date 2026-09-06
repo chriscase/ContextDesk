@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import {
   DEFAULT_OPERATIONS_QUEUE_QUERY,
   pathFor,
@@ -9,6 +9,13 @@ import type {
   InvestigationOperationsQueueRowV1,
 } from "../investigations/runtime/public.js";
 import { useOperationsQueue } from "./useOperationsQueue.js";
+import {
+  loadOperationsQueueSavedViews,
+  operationsQueueSavedViewNameLimit,
+  operationsQueueSavedViewsKey,
+  writeOperationsQueueSavedViews,
+  type OperationsQueueSavedView,
+} from "./saved-views.js";
 
 export interface OperationsQueueProps {
   readonly query: OperationsQueueLocationQuery;
@@ -86,6 +93,9 @@ function QueueRow({
 export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: OperationsQueueProps) {
   const queue = useOperationsQueue(query);
   const [searchDraft, setSearchDraft] = useState(query.q);
+  const [savedViewName, setSavedViewName] = useState("");
+  const [savedViews, setSavedViews] = useState<OperationsQueueSavedView[]>([]);
+  const [savedViewsNotice, setSavedViewsNotice] = useState("");
   const [continuationAttempt, setContinuationAttempt] = useState(0);
   const [unavailableRetry, setUnavailableRetry] = useState<{
     readonly error: unknown;
@@ -110,8 +120,19 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const continuationInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const focusedOutcomeRef = useRef(0);
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
+  const identityStorageKey = useMemo(
+    () => operationsQueueSavedViewsKey(queue.identity),
+    [queue.identity],
+  );
 
   useEffect(() => setSearchDraft(query.q), [query.q]);
+  useEffect(() => {
+    setSavedViews(loadOperationsQueueSavedViews(queue.identity));
+    setSavedViewName("");
+    setSavedViewsNotice(identityStorageKey === null
+      ? "Saved views become available after you sign in."
+      : "");
+  }, [identityStorageKey, queue.identity]);
   useEffect(() => {
     setContinuationAttempt(0);
     focusedOutcomeRef.current = 0;
@@ -243,6 +264,41 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     onQueryChange({ ...query, ...next });
   };
 
+  const saveCurrentView = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = savedViewName.trim();
+    if (!name || identityStorageKey === null) return;
+    const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const next = [
+      { id, name, query: Object.freeze({ ...query, status: Object.freeze([...query.status]) }) },
+      ...savedViews.filter((view) => view.name.toLocaleLowerCase() !== name.toLocaleLowerCase()),
+    ].slice(0, 8) as OperationsQueueSavedView[];
+    if (!writeOperationsQueueSavedViews(queue.identity, next)) {
+      setSavedViewsNotice("This browser could not save the view. Your current queue is unchanged.");
+      return;
+    }
+    setSavedViews(next);
+    setSavedViewName("");
+    setSavedViewsNotice(`Saved “${name}” for this account on this browser.`);
+  };
+
+  const applySavedView = (view: OperationsQueueSavedView) => {
+    onQueryChange(view.query);
+    setSavedViewsNotice(`Applied “${view.name}”.`);
+  };
+
+  const deleteSavedView = (view: OperationsQueueSavedView) => {
+    const next = savedViews.filter((current) => current.id !== view.id);
+    if (!writeOperationsQueueSavedViews(queue.identity, next)) {
+      setSavedViewsNotice("This browser could not remove the saved view.");
+      return;
+    }
+    setSavedViews(next);
+    setSavedViewsNotice(`Removed “${view.name}”.`);
+  };
+
   const counts = available ? queue.view.value.coordinationScopeCounts : null;
   const items = available ? queue.view.value.items : [];
   const hasFilters = query.q.trim().length > 0 || query.status.length > 0;
@@ -330,6 +386,51 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
               <span>Include archived</span>
             </label>
           </form>
+
+          <section className="operations-queue__saved" aria-labelledby="operations-queue-saved-title">
+            <div className="operations-queue__saved-heading">
+              <div>
+                <h3 id="operations-queue-saved-title">Saved views</h3>
+                <p>Private to this browser and account; never shared as server coordination.</p>
+              </div>
+            </div>
+            <form className="operations-queue__saved-form" onSubmit={saveCurrentView}>
+              <label>
+                <span>View name</span>
+                <input
+                  type="text"
+                  value={savedViewName}
+                  maxLength={operationsQueueSavedViewNameLimit()}
+                  onChange={(event) => setSavedViewName(event.target.value)}
+                  placeholder="e.g. My open handoffs"
+                  disabled={identityStorageKey === null}
+                />
+              </label>
+              <button type="submit" disabled={identityStorageKey === null || !savedViewName.trim()}>
+                Save current view
+              </button>
+            </form>
+            {savedViews.length > 0 ? (
+              <ul className="operations-queue__saved-list" aria-label="Saved Operations Queue views">
+                {savedViews.map((view) => (
+                  <li key={view.id}>
+                    <button type="button" onClick={() => applySavedView(view)}>{view.name}</button>
+                    <button
+                      type="button"
+                      className="operations-queue__saved-remove"
+                      aria-label={`Remove saved view ${view.name}`}
+                      onClick={() => deleteSavedView(view)}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="operations-queue__saved-empty">No saved views yet.</p>
+            )}
+            {savedViewsNotice ? <p className="operations-queue__saved-notice" role="status">{savedViewsNotice}</p> : null}
+          </section>
 
           <nav className="operations-queue__scopes" aria-label="Coordination scope">
             {SCOPE_OPTIONS.map((option) => (

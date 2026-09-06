@@ -558,9 +558,9 @@ describe("authenticated application shell", () => {
     expect(await screen.findByRole("heading", { name: "Operations Queue" })).toBeTruthy();
     expect(document.title).toBe("Operations · ContextDesk War Room");
     expect(window.location.pathname).toBe("/operations");
-    expect(window.location.search).toBe(
+    await waitFor(() => expect(window.location.search).toBe(
       "?q=checkout&status=open&includeArchived=true&coordinationScope=mine",
-    );
+    ));
     expect(window.history.state).not.toHaveProperty("uiStrategyId");
     const navLabels = within(screen.getByRole("navigation", { name: "Primary" }))
       .getAllByRole("button")

@@ -278,7 +278,7 @@ describe("Source Catalog Console", () => {
 
       const alert = await screen.findByRole("alert");
       expect(alert.textContent).toMatch(/may have completed/);
-      expect(document.activeElement).toBe(alert);
+      await waitFor(() => expect(document.activeElement).toBe(alert));
       expect((screen.getByRole("button", { name: "Add label" }) as HTMLButtonElement).disabled).toBe(true);
       fireEvent.click(within(alert).getByRole("button", { name: "Retry the same request" }));
       expect(await screen.findByText("Added Uncertain assistant.")).toBeTruthy();

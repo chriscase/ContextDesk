@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPERATIONS_QUEUE_QUERY, type OperationsQueueLocationQuery } from "../app-location.js";
 import { makeOperationsQueuePage } from "../investigations/runtime/testkit/index.js";
 import type { OperationsQueuePresentation } from "./useOperationsQueue.js";
@@ -12,14 +12,25 @@ vi.mock("./useOperationsQueue.js", () => ({
 import { OperationsQueue } from "./OperationsQueue.js";
 
 const TEST_SCOPE_TOKEN = Object.freeze({});
+const savedViewStorage = new Map<string, string>();
+
+beforeEach(() => {
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => savedViewStorage.get(key) ?? null,
+    setItem: (key: string, value: string) => void savedViewStorage.set(key, value),
+    removeItem: (key: string) => void savedViewStorage.delete(key),
+  });
+});
 
 afterEach(() => {
   cleanup();
+  savedViewStorage.clear();
   hook.current.mockReset();
 });
 
 function settled(overrides: Partial<OperationsQueuePresentation> = {}): OperationsQueuePresentation {
   return {
+    identity: { id: "alice", username: "alice", displayName: "Alice" },
     scopeToken: TEST_SCOPE_TOKEN,
     commandAvailability: "available",
     view: { availability: "available", value: makeOperationsQueuePage(), refresh: "settled" },
@@ -70,6 +81,48 @@ describe("Operations Queue presentation", () => {
     expect(screen.getByRole("link", { name: /All visible 17/u })).toBeTruthy();
     expect(screen.getByRole("link", { name: /Mine 6/u })).toBeTruthy();
     expect(screen.getByRole("link", { name: /Unassigned 3/u })).toBeTruthy();
+  });
+
+  it("saves, applies, and removes a private normalized queue view", async () => {
+    const query: OperationsQueueLocationQuery = {
+      q: " checkout ",
+      status: ["open"],
+      includeArchived: true,
+      coordinationScope: "mine",
+    };
+    const { onQueryChange } = renderQueue(settled(), query);
+    fireEvent.change(screen.getByRole("textbox", { name: "View name" }), {
+      target: { value: "My handoffs" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save current view" }));
+
+    expect(await screen.findByRole("button", { name: "My handoffs" })).toBeTruthy();
+    const saved = JSON.parse(window.localStorage.getItem("cd-operations-views:alice") ?? "[]") as Array<{ query: OperationsQueueLocationQuery }>;
+    expect(saved[0]?.query).toEqual({
+      q: " checkout ",
+      status: ["open"],
+      includeArchived: true,
+      coordinationScope: "mine",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "My handoffs" }));
+    expect(onQueryChange).toHaveBeenCalledWith(query);
+    fireEvent.click(screen.getByRole("button", { name: "Remove saved view My handoffs" }));
+    expect(JSON.parse(window.localStorage.getItem("cd-operations-views:alice") ?? "[]")).toEqual([]);
+  });
+
+  it("keeps saved views isolated by identity and drops malformed entries", async () => {
+    window.localStorage.setItem("cd-operations-views:bob", JSON.stringify([
+      { id: "bad", name: "", query: {} },
+      {
+        id: "good",
+        name: "Bob queue",
+        query: { q: "checkout", status: ["open"], includeArchived: false, coordinationScope: "all_visible" },
+      },
+    ]));
+    renderQueue(settled({ identity: { id: "bob", username: "bob", displayName: "Bob" } }));
+    expect(await screen.findByRole("button", { name: "Bob queue" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "My handoffs" })).toBeNull();
   });
 
   it("gives sparse imported rows a useful title", () => {
