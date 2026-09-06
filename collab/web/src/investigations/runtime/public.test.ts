@@ -61,6 +61,7 @@ describe("investigation runtime public surface", () => {
         updateSituation: null,
         applyLifecycle: null,
         applyCoordinationAction: null,
+        applyNamedCoordinationSelf: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
       },

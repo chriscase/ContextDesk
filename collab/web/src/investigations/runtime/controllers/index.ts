@@ -39,6 +39,13 @@ export {
   type UseInvestigationCoordinationOptions,
 } from "./use-investigation-coordination.js";
 export {
+  useNamedCoordinationSelf,
+  type NamedCoordinationSelfAction,
+  type NamedCoordinationSelfCommand,
+  type NamedCoordinationSelfController,
+  type UseNamedCoordinationSelfOptions,
+} from "./use-named-coordination-self.js";
+export {
   useInvestigationList,
   type InvestigationListController,
   type UseInvestigationListOptions,
