@@ -103,6 +103,7 @@ function QueueRow({
   participantCoordination,
   onSelfActionInitiated,
   onParticipantActionInitiated,
+  onParticipantConcealmentTarget,
 }: {
   readonly row: InvestigationOperationsQueueRowV1;
   readonly onOpen: (id: string) => void;
@@ -111,6 +112,7 @@ function QueueRow({
   readonly participantCoordination: OperationsQueueParticipantCoordinationPresentation;
   readonly onSelfActionInitiated: (button: HTMLButtonElement) => void;
   readonly onParticipantActionInitiated: (button: HTMLButtonElement) => void;
+  readonly onParticipantConcealmentTarget: (investigationId: string, element: HTMLSpanElement | null) => void;
 }) {
   const coordinator = row.coordination.coordinator;
   const coordinatorName = coordinator?.username ?? null;
@@ -135,10 +137,15 @@ function QueueRow({
   const participantMutation = isParticipantTarget
     ? participantCoordination.state
     : { status: "idle" as const };
-  const participantBusy = participantMutation.status === "running";
-  const participantConcealed = isParticipantTarget
-    && participantMutation.status === "failed"
-    && participantMutation.error.kind === "not_found";
+  const participantMutationBusy = participantCoordination.state.status === "running";
+  const unknownOutcomeLocked = participantCoordination.state.status === "failed"
+    && participantCoordination.state.error.kind === "unavailable"
+    && participantCoordination.state.error.reason === "commit_outcome_unknown";
+  const participantControlsLocked = participantMutationBusy || unknownOutcomeLocked;
+  const participantConcealed = participantCoordination.concealedInvestigationIds.includes(row.investigation.id)
+    || (isParticipantTarget
+      && participantMutation.status === "failed"
+      && participantMutation.error.kind === "not_found");
   const showParticipantControl = participantCoordination.available && !participantConcealed;
   const participantRetryAction = participantCoordination.action === "release_participant"
     ? "release coordinator"
@@ -205,13 +212,15 @@ function QueueRow({
             <div
               className="operations-queue__participant-control"
               role="group"
+              aria-busy={participantMutationBusy}
               aria-label={`Participant coordination for ${title}`}
             >
               <label className="operations-queue__participant-select">
                 <span>Participant</span>
                 <select
                   value={selectedParticipantId}
-                  disabled={participantBusy || participants.length === 0}
+                  disabled={participantControlsLocked || participants.length === 0}
+                  aria-busy={participantMutationBusy}
                   aria-label={`Recorded participants for ${title}`}
                   onChange={(event) => setSelectedParticipantId(event.target.value)}
                 >
@@ -228,13 +237,15 @@ function QueueRow({
                 <button
                   type="button"
                   className="operations-queue__coordination-action"
-                  disabled={participantBusy || selectedParticipant === null}
-                  aria-busy={participantBusy && participantCoordination.action === "assign_participant"}
+                  disabled={participantControlsLocked || selectedParticipant === null}
+                  aria-busy={participantMutationBusy && (
+                    !isParticipantTarget || participantCoordination.action === "assign_participant"
+                  )}
                   aria-label={selectedParticipant === null
                     ? `Assign participant to ${title}`
                     : `Assign participant ${recordedIdentityLabel(selectedParticipant)} to ${title}`}
                   onClick={(event) => {
-                    if (selectedParticipant === null) return;
+                    if (selectedParticipant === null || participantControlsLocked) return;
                     onParticipantActionInitiated(event.currentTarget);
                     void participantCoordination.apply(
                       row.investigation.id,
@@ -243,7 +254,8 @@ function QueueRow({
                     );
                   }}
                 >
-                  {participantBusy && participantCoordination.action === "assign_participant"
+                  {participantMutationBusy && isParticipantTarget
+                    && participantCoordination.action === "assign_participant"
                     ? "Saving…"
                     : "Assign participant"}
                 </button>
@@ -251,10 +263,13 @@ function QueueRow({
                   <button
                     type="button"
                     className="operations-queue__coordination-action"
-                    disabled={participantBusy}
-                    aria-busy={participantBusy && participantCoordination.action === "release_participant"}
+                    disabled={participantControlsLocked}
+                    aria-busy={participantMutationBusy && (
+                      !isParticipantTarget || participantCoordination.action === "release_participant"
+                    )}
                     aria-label={`Release coordinator ${recordedIdentityLabel(coordinator)} from ${title}`}
                     onClick={(event) => {
+                      if (participantControlsLocked) return;
                       onParticipantActionInitiated(event.currentTarget);
                       void participantCoordination.apply(
                         row.investigation.id,
@@ -263,7 +278,8 @@ function QueueRow({
                       );
                     }}
                   >
-                    {participantBusy && participantCoordination.action === "release_participant"
+                    {participantMutationBusy && isParticipantTarget
+                      && participantCoordination.action === "release_participant"
                       ? "Saving…"
                       : "Release coordinator"}
                   </button>
@@ -272,7 +288,13 @@ function QueueRow({
             </div>
           ) : null}
           {participantConcealed ? (
-            <span className="operations-queue__coordination-feedback" role="status" aria-live="polite">
+            <span
+              ref={(element) => onParticipantConcealmentTarget(row.investigation.id, element)}
+              tabIndex={-1}
+              className="operations-queue__coordination-feedback"
+              role="status"
+              aria-live="polite"
+            >
               This investigation is no longer available for this coordination action. Previously loaded queue rows remain.
             </span>
           ) : null}
@@ -344,6 +366,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const selfActionInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const selfOutcomeRef = useRef("");
   const participantActionInitiatorRef = useRef<HTMLButtonElement | null>(null);
+  const participantConcealmentRefs = useRef(new Map<string, HTMLSpanElement>());
   const participantOutcomeRef = useRef("");
   const focusedOutcomeRef = useRef(0);
   const savedViewInitiatorRef = useRef<HTMLElement | null>(null);
@@ -426,9 +449,22 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     participantOutcomeRef.current = outcomeKey;
     const initiator = participantActionInitiatorRef.current;
     const activeElement = document.activeElement;
+    if (initiator === null) return;
     if (activeElement !== document.body && activeElement !== initiator) return;
-    if (initiator?.isConnected) initiator.focus();
-  }, [queue.requestGeneration, queue.participantCoordination.state]);
+    if (mutation.status === "failed" && mutation.error.kind === "not_found") {
+      const targetId = queue.participantCoordination.targetInvestigationId;
+      const recovery = targetId === null ? undefined : participantConcealmentRefs.current.get(targetId);
+      if (recovery?.isConnected) {
+        recovery.focus();
+        return;
+      }
+    }
+    if (initiator.isConnected) initiator.focus();
+  }, [
+    queue.participantCoordination.state,
+    queue.participantCoordination.targetInvestigationId,
+    queue.requestGeneration,
+  ]);
 
   useEffect(() => {
     if (unavailableRetry === null) return;
@@ -864,6 +900,10 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
                   participantCoordination={queue.participantCoordination}
                   onSelfActionInitiated={(button) => { selfActionInitiatorRef.current = button; }}
                   onParticipantActionInitiated={(button) => { participantActionInitiatorRef.current = button; }}
+                  onParticipantConcealmentTarget={(investigationId, element) => {
+                    if (element === null) participantConcealmentRefs.current.delete(investigationId);
+                    else participantConcealmentRefs.current.set(investigationId, element);
+                  }}
                 />
               ))}
             </ul>

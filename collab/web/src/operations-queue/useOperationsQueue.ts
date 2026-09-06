@@ -50,6 +50,8 @@ export interface OperationsQueueParticipantCoordinationPresentation {
   readonly targetInvestigationId: string | null;
   readonly action: InvestigationNamedCoordinationParticipantCommand["action"] | null;
   readonly targetIdentityId: string | null;
+  /** Investigation ids whose participant actions were concealed for this query/scope. */
+  readonly concealedInvestigationIds: readonly string[];
   readonly state: ReturnType<typeof useInvestigationRuntime>["mutations"]["namedCoordinationParticipant"];
   readonly apply: (
     investigationId: string,
@@ -58,6 +60,16 @@ export interface OperationsQueueParticipantCoordinationPresentation {
   ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>;
   readonly retry: () => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>;
 }
+
+const EMPTY_CONCEALED_INVESTIGATION_IDS: readonly string[] = Object.freeze([]);
+const PARTICIPANT_INTENT_MISMATCH = Object.freeze({
+  status: "failed" as const,
+  error: Object.freeze({
+    kind: "input" as const,
+    field: "idempotencyKey" as const,
+    reason: "intent_mismatch" as const,
+  }),
+});
 
 interface ContinuationAttempt {
   readonly id: number;
@@ -139,6 +151,9 @@ export function useOperationsQueue(
     readonly action: InvestigationNamedCoordinationParticipantCommand["action"];
     readonly targetIdentityId: string;
   } | null>(null);
+  const [concealedInvestigationIds, setConcealedInvestigationIds] = useState<readonly string[]>(
+    EMPTY_CONCEALED_INVESTIGATION_IDS,
+  );
   const activeQuery = runtime.resources.operationsQueueQuery;
   const requestGeneration = runtime.resources.operationsQueueRequestGeneration;
   const activeQueryMatches = activeQuery !== null && baseKey(activeQuery) === inputKey;
@@ -190,6 +205,7 @@ export function useOperationsQueue(
     setSelfTarget(null);
     participantIntentRef.current = null;
     setParticipantTarget(null);
+    setConcealedInvestigationIds(EMPTY_CONCEALED_INVESTIGATION_IDS);
   }, [inputKey, scopeToken]);
 
   const applySelf = useMemo(() => async (
@@ -241,22 +257,24 @@ export function useOperationsQueue(
       return { status: "ignored", reason: "busy" };
     }
     const previous = participantIntentRef.current;
-    const sameIntent = previous?.investigationId === investigationId
+    const sameIntent = previous !== null
+      && previous.investigationId === investigationId
       && previous.action === action
       && previous.targetIdentityId === targetIdentityId;
-    // Reuse a retained 503 key for the same investigation even when action or
-    // target differ so Runtime can reject the mismatch locally with zero POST.
+    // A retained 503 freeze must keep its exact body and key. Alternate
+    // action/target (including another row) is a local mismatch with zero POST.
+    if (previous !== null && !sameIntent) {
+      return PARTICIPANT_INTENT_MISMATCH;
+    }
     const intent = sameIntent
       ? previous
       : {
           investigationId,
           action,
           targetIdentityId,
-          idempotencyKey: previous?.investigationId === investigationId
-            ? previous.idempotencyKey
-            : typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-              ? crypto.randomUUID()
-              : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+          idempotencyKey: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
         };
     participantIntentRef.current = intent;
     setParticipantTarget({ investigationId, action, targetIdentityId });
@@ -266,7 +284,15 @@ export function useOperationsQueue(
       targetIdentityId,
       idempotencyKey: intent.idempotencyKey,
     });
-    if (outcome.status === "succeeded"
+    if (outcome.status === "failed" && outcome.error.kind === "not_found") {
+      setConcealedInvestigationIds((current) => (
+        current.includes(investigationId)
+          ? current
+          : Object.freeze([...current, investigationId])
+      ));
+    }
+    if (outcome.status === "ignored"
+      || outcome.status === "succeeded"
       || (outcome.status === "failed"
         && !(outcome.error.kind === "unavailable" && outcome.error.reason === "commit_outcome_unknown"))) {
       participantIntentRef.current = null;
@@ -365,6 +391,7 @@ export function useOperationsQueue(
       targetInvestigationId: participantTarget?.investigationId ?? null,
       action: participantTarget?.action ?? null,
       targetIdentityId: participantTarget?.targetIdentityId ?? null,
+      concealedInvestigationIds,
       state: runtime.mutations.namedCoordinationParticipant,
       apply: applyParticipant,
       retry: retryParticipant,

@@ -425,6 +425,22 @@
   line-height: 1.35;
 }
 
+.operations-queue__coordination-feedback[tabindex] {
+  display: inline-block;
+  max-width: 18rem;
+}
+
+.operations-queue__participant-control button:disabled,
+.operations-queue__participant-control select:disabled {
+  cursor: not-allowed;
+  opacity: 0.66;
+}
+
+.operations-queue__participant-control button:disabled:hover,
+.operations-queue__participant-control select:disabled:hover {
+  border-color: var(--border);
+}
+
 .operations-queue__coordination-feedback[role="alert"] {
   color: var(--danger);
 }

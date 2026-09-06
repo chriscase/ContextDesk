@@ -53,6 +53,7 @@ function settled(overrides: Partial<OperationsQueuePresentation> = {}): Operatio
       targetInvestigationId: null,
       action: null,
       targetIdentityId: null,
+      concealedInvestigationIds: [],
       state: { status: "idle" },
       apply: vi.fn(),
       retry: vi.fn(),
@@ -69,6 +70,7 @@ function participantAvailable(
     targetInvestigationId: null,
     action: null,
     targetIdentityId: null,
+    concealedInvestigationIds: [],
     state: { status: "idle" },
     apply: vi.fn(),
     retry: vi.fn(),
@@ -1298,23 +1300,74 @@ describe("Operations Queue presentation", () => {
       .toHaveProperty("disabled", false);
   });
 
+  it("disables participant controls across rows while any participant mutation is running", () => {
+    const page = makeOperationsQueuePage();
+    const twoRows = {
+      ...page,
+      items: [
+        page.items[0]!,
+        {
+          ...page.items[1]!,
+          investigation: {
+            ...page.items[1]!.investigation,
+            participants: page.items[0]!.investigation.participants,
+          },
+        },
+      ],
+    };
+    const participantApply = vi.fn();
+    renderQueue(settled({
+      identity: { id: "identity-alice", username: "alice", displayName: "Alice" },
+      view: { availability: "available", value: twoRows, refresh: "settled" },
+      participantCoordination: participantAvailable({
+        targetInvestigationId: twoRows.items[0]!.investigation.id,
+        action: "assign_participant",
+        targetIdentityId: "identity-ravi",
+        state: { status: "running" },
+        apply: participantApply,
+      }),
+    }));
+    const rowATitle = twoRows.items[0]!.investigation.title;
+    const rowBTitle = twoRows.items[1]!.investigation.title;
+    const rowAAssign = screen.getByRole("button", {
+      name: `Assign participant alice (identity-alice) to ${rowATitle}`,
+    });
+    const rowBAssign = screen.getByRole("button", {
+      name: `Assign participant alice (identity-alice) to ${rowBTitle}`,
+    });
+    expect(rowAAssign).toHaveProperty("disabled", true);
+    expect(rowAAssign.getAttribute("aria-busy")).toBe("true");
+    expect(rowBAssign).toHaveProperty("disabled", true);
+    expect(rowBAssign.getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByRole("combobox", { name: `Recorded participants for ${rowBTitle}` }))
+      .toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: `Claim for me ${rowBTitle}` }))
+      .toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: `Release me ${rowATitle}` }))
+      .toHaveProperty("disabled", false);
+    fireEvent.click(rowBAssign);
+    expect(participantApply).not.toHaveBeenCalled();
+  });
+
   it("shows truthful auth-loss copy without claiming success and conceals a 404 row action", () => {
     const page = makeOperationsQueuePage();
     const title = page.items[0]!.investigation.title;
-    const authLoss = renderQueue(settled({
-      view: { availability: "available", value: page, refresh: "settled" },
-      participantCoordination: participantAvailable({
-        targetInvestigationId: page.items[0]!.investigation.id,
-        action: "assign_participant",
-        targetIdentityId: "identity-ravi",
-        state: { status: "failed", error: { kind: "auth_lost", status: 401 } },
-      }),
-    }));
-    expect(screen.getByText("Your investigation access changed. No ownership change was assumed.")).toBeTruthy();
-    expect(screen.queryByText(/Coordination updated/u)).toBeNull();
-    expect(screen.getByRole("button", { name: `Assign participant alice (identity-alice) to ${title}` })).toBeTruthy();
-    expect(screen.getByRole("list", { name: "Operations queue investigations" })).toBeTruthy();
-    authLoss.unmount();
+    for (const status of [401, 403] as const) {
+      const authLoss = renderQueue(settled({
+        view: { availability: "available", value: page, refresh: "settled" },
+        participantCoordination: participantAvailable({
+          targetInvestigationId: page.items[0]!.investigation.id,
+          action: "assign_participant",
+          targetIdentityId: "identity-ravi",
+          state: { status: "failed", error: { kind: "auth_lost", status } },
+        }),
+      }));
+      expect(screen.getByText("Your investigation access changed. No ownership change was assumed.")).toBeTruthy();
+      expect(screen.queryByText(/Coordination updated/u)).toBeNull();
+      expect(screen.getByRole("button", { name: `Assign participant alice (identity-alice) to ${title}` })).toBeTruthy();
+      expect(screen.getByRole("list", { name: "Operations queue investigations" })).toBeTruthy();
+      authLoss.unmount();
+    }
 
     renderQueue(settled({
       view: { availability: "available", value: page, refresh: "settled" },
@@ -1328,11 +1381,104 @@ describe("Operations Queue presentation", () => {
     expect(screen.queryByRole("combobox", { name: `Recorded participants for ${title}` })).toBeNull();
     expect(screen.queryByRole("button", { name: /Assign participant .*Checkout latency/u })).toBeNull();
     expect(screen.queryByRole("button", { name: /Release coordinator .*Checkout latency/u })).toBeNull();
-    expect(screen.getByText(/no longer available for this coordination action/u)).toBeTruthy();
+    const recovery = screen.getByText(/no longer available for this coordination action/u);
+    expect(recovery.getAttribute("tabindex")).toBe("-1");
+    expect(screen.queryByText(/Coordination updated/u)).toBeNull();
     expect(screen.getByRole("list", { name: "Operations queue investigations" })).toBeTruthy();
     expect(screen.getByRole("combobox", {
       name: `Recorded participants for ${page.items[1]!.investigation.title}`,
     })).toBeTruthy();
+  });
+
+  it("keeps a 404-concealed row hidden after another row is targeted", () => {
+    const page = makeOperationsQueuePage();
+    const rowA = page.items[0]!;
+    const rowB = page.items[1]!;
+    const rendered = renderQueue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      participantCoordination: participantAvailable({
+        targetInvestigationId: rowA.investigation.id,
+        action: "assign_participant",
+        targetIdentityId: "identity-ravi",
+        state: { status: "failed", error: { kind: "not_found", status: 404 } },
+      }),
+    }));
+    expect(screen.queryByRole("combobox", {
+      name: `Recorded participants for ${rowA.investigation.title}`,
+    })).toBeNull();
+
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      participantCoordination: participantAvailable({
+        targetInvestigationId: rowB.investigation.id,
+        action: "assign_participant",
+        targetIdentityId: "identity-ravi",
+        concealedInvestigationIds: [rowA.investigation.id],
+        state: { status: "idle" },
+      }),
+    }));
+    rendered.rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={rendered.onQueryChange}
+        onOpenInvestigation={rendered.onOpenInvestigation}
+      />,
+    );
+    expect(screen.queryByRole("combobox", {
+      name: `Recorded participants for ${rowA.investigation.title}`,
+    })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Assign participant .*Checkout latency/u })).toBeNull();
+    expect(screen.getByText(/no longer available for this coordination action/u)).toBeTruthy();
+    expect(screen.queryByText(/Coordination updated/u)).toBeNull();
+    expect(screen.getByRole("combobox", {
+      name: `Recorded participants for ${rowB.investigation.title}`,
+    })).toBeTruthy();
+    expect(screen.getByRole("button", {
+      name: `Assign participant to ${rowB.investigation.title}`,
+    })).toBeTruthy();
+  });
+
+  it("returns focus to the 404 recovery status after concealing the row action", async () => {
+    const page = makeOperationsQueuePage();
+    const apply = vi.fn(async () => ({
+      status: "failed" as const,
+      error: { kind: "not_found" as const, status: 404 as const },
+    }));
+    const state = settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      participantCoordination: participantAvailable({ apply }),
+    });
+    const rendered = renderQueue(state);
+    const assign = screen.getByRole("button", {
+      name: `Assign participant alice (identity-alice) to ${page.items[0]!.investigation.title}`,
+    });
+    assign.focus();
+    fireEvent.click(assign);
+
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      requestGeneration: 2,
+      participantCoordination: participantAvailable({
+        targetInvestigationId: page.items[0]!.investigation.id,
+        action: "assign_participant",
+        targetIdentityId: "identity-alice",
+        concealedInvestigationIds: [page.items[0]!.investigation.id],
+        state: { status: "failed", error: { kind: "not_found", status: 404 } },
+        apply,
+      }),
+    }));
+    rendered.rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={rendered.onQueryChange}
+        onOpenInvestigation={rendered.onOpenInvestigation}
+      />,
+    );
+    const recovery = screen.getByText(/no longer available for this coordination action/u);
+    await waitFor(() => expect(document.activeElement).toBe(recovery));
+    expect(screen.queryByText(/Coordination updated/u)).toBeNull();
+    expect(rendered.onOpenInvestigation).not.toHaveBeenCalled();
+    expect(rendered.onQueryChange).not.toHaveBeenCalled();
   });
 
   it("asks for a queue refresh after a recorded coordination change or refusal", () => {
@@ -1377,6 +1523,12 @@ describe("Operations Queue presentation", () => {
     const retryButton = screen.getByRole("button", {
       name: `Retry assign participant identity-ravi for ${page.items[0]!.investigation.title}`,
     });
+    expect(screen.getByRole("button", {
+      name: `Assign participant alice (identity-alice) to ${page.items[0]!.investigation.title}`,
+    })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", {
+      name: `Release coordinator alice (identity-alice) from ${page.items[0]!.investigation.title}`,
+    })).toHaveProperty("disabled", true);
     fireEvent.click(retryButton);
     expect(retry).toHaveBeenCalledOnce();
   });
