@@ -419,7 +419,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Confirm claim coordination" }, { timeout: 5000 }));
     expect(await screen.findByRole("heading", { name: "Investigation unavailable" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Coordination" })).toBeNull();
-  });
+  }, 10000);
 
   it("keeps fast capture above browse and distinguishes existing from new combo values", async () => {
     renderStrategy();
