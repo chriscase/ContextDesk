@@ -61,6 +61,15 @@ function renderQueue(
   return { ...rendered, onQueryChange, onOpenInvestigation };
 }
 
+function savedViewsStatus() {
+  const section = screen.getByRole("heading", { name: "Saved views" }).closest("section");
+  if (section === null) throw new Error("missing saved views section");
+  return within(section).getByRole("status");
+}
+
+const UNSIGNED_IDENTITY = { id: "", username: "", displayName: "" };
+const BOB_IDENTITY = { id: "bob", username: "bob", displayName: "Bob" };
+
 describe("Operations Queue presentation", () => {
   it("renders server rows, counts, and recorded coordination facts without recounting", () => {
     const page = makeOperationsQueuePage({
@@ -86,7 +95,13 @@ describe("Operations Queue presentation", () => {
   it("saves, applies, and removes a private normalized queue view", async () => {
     const query: OperationsQueueLocationQuery = {
       q: " checkout ",
-      status: ["open"],
+      status: ["archived", "open"],
+      includeArchived: true,
+      coordinationScope: "mine",
+    };
+    const canonical = {
+      q: "checkout",
+      status: ["open", "archived"],
       includeArchived: true,
       coordinationScope: "mine",
     };
@@ -96,17 +111,19 @@ describe("Operations Queue presentation", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save current view" }));
 
-    expect(await screen.findByRole("button", { name: "My handoffs" })).toBeTruthy();
-    const saved = JSON.parse(window.localStorage.getItem("cd-operations-views:alice") ?? "[]") as Array<{ query: OperationsQueueLocationQuery }>;
-    expect(saved[0]?.query).toEqual({
-      q: " checkout ",
-      status: ["open"],
-      includeArchived: true,
-      coordinationScope: "mine",
-    });
+    expect(await screen.findByRole("button", { name: "Apply saved view My handoffs" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove saved view My handoffs" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "My handoffs" })).toBeNull();
+    expect((screen.getByRole("searchbox", { name: "Search" }) as HTMLInputElement).value)
+      .toBe(" checkout ");
+    const saved = JSON.parse(window.localStorage.getItem("cd-operations-views:alice") ?? "[]") as Array<{
+      query: OperationsQueueLocationQuery;
+    }>;
+    expect(saved[0]?.query).toEqual(canonical);
+    expect(saved[0]?.query).not.toHaveProperty("cursor");
 
-    fireEvent.click(screen.getByRole("button", { name: "My handoffs" }));
-    expect(onQueryChange).toHaveBeenCalledWith(query);
+    fireEvent.click(screen.getByRole("button", { name: "Apply saved view My handoffs" }));
+    expect(onQueryChange).toHaveBeenCalledWith(canonical);
     fireEvent.click(screen.getByRole("button", { name: "Remove saved view My handoffs" }));
     expect(JSON.parse(window.localStorage.getItem("cd-operations-views:alice") ?? "[]")).toEqual([]);
   });
@@ -120,9 +137,238 @@ describe("Operations Queue presentation", () => {
         query: { q: "checkout", status: ["open"], includeArchived: false, coordinationScope: "all_visible" },
       },
     ]));
-    renderQueue(settled({ identity: { id: "bob", username: "bob", displayName: "Bob" } }));
-    expect(await screen.findByRole("button", { name: "Bob queue" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "My handoffs" })).toBeNull();
+    renderQueue(settled({ identity: BOB_IDENTITY }));
+    expect(await screen.findByRole("button", { name: "Apply saved view Bob queue" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Apply saved view My handoffs" })).toBeNull();
+  });
+
+  it("refuses unsigned saved-view writes with an explicit sign-in notice", () => {
+    const { onQueryChange } = renderQueue(settled({ identity: UNSIGNED_IDENTITY }));
+    const notice = savedViewsStatus();
+    expect(notice.getAttribute("aria-live")).toBe("polite");
+    expect(notice.getAttribute("aria-atomic")).toBe("true");
+    expect(notice.textContent).toBe("Saved views become available after you sign in.");
+    expect((screen.getByRole("textbox", { name: "View name" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Save current view" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(screen.getByRole("textbox", { name: "View name" }).closest("form")!);
+    expect(window.localStorage.getItem("cd-operations-views:")).toBeNull();
+    expect(onQueryChange).not.toHaveBeenCalled();
+  });
+
+  it("reloads the matching identity key after a mounted account switch", async () => {
+    window.localStorage.setItem("cd-operations-views:alice", JSON.stringify([
+      {
+        id: "alice-view",
+        name: "Alice queue",
+        query: { q: "alice", status: ["open"], includeArchived: false, coordinationScope: "mine" },
+      },
+    ]));
+    window.localStorage.setItem("cd-operations-views:bob", JSON.stringify([
+      {
+        id: "bob-view",
+        name: "Bob queue",
+        query: { q: "bob", status: ["monitoring"], includeArchived: false, coordinationScope: "unassigned" },
+      },
+    ]));
+    const alice = settled();
+    const { rerender, onQueryChange, onOpenInvestigation } = renderQueue(alice);
+    expect(await screen.findByRole("button", { name: "Apply saved view Alice queue" })).toBeTruthy();
+
+    hook.current.mockReturnValue(settled({ identity: BOB_IDENTITY }));
+    rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={onQueryChange}
+        onOpenInvestigation={onOpenInvestigation}
+      />,
+    );
+    expect(await screen.findByRole("button", { name: "Apply saved view Bob queue" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Apply saved view Alice queue" })).toBeNull();
+    expect(savedViewsStatus().textContent).toBe("");
+
+    hook.current.mockReturnValue(settled({ identity: UNSIGNED_IDENTITY }));
+    rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={onQueryChange}
+        onOpenInvestigation={onOpenInvestigation}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Apply saved view Bob queue" })).toBeNull();
+    expect(savedViewsStatus().textContent).toBe("Saved views become available after you sign in.");
+    expect((screen.getByRole("button", { name: "Save current view" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("announces save, apply, remove, and storage failure through one polite live status", async () => {
+    const state = settled();
+    const { onQueryChange, onOpenInvestigation, rerender } = renderQueue(state);
+    const live = savedViewsStatus();
+    expect(live.className).toBe("sr-only");
+    expect(live.getAttribute("aria-live")).toBe("polite");
+    expect(live.getAttribute("aria-atomic")).toBe("true");
+    expect(within(live.closest("section") as HTMLElement).getAllByRole("status")).toHaveLength(1);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "View name" }), {
+      target: { value: "My handoffs" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save current view" }));
+    expect(savedViewsStatus().textContent).toBe("Saved “My handoffs” for this account on this browser.");
+    expect(savedViewsStatus().className).toBe("operations-queue__saved-notice");
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply saved view My handoffs" }));
+    expect(savedViewsStatus().textContent).toBe("Applied “My handoffs”.");
+    const applied = onQueryChange.mock.calls[0]?.[0] as OperationsQueueLocationQuery;
+    hook.current.mockReturnValue(state);
+    rerender(
+      <OperationsQueue
+        query={applied}
+        onQueryChange={onQueryChange}
+        onOpenInvestigation={onOpenInvestigation}
+      />,
+    );
+    expect(savedViewsStatus().textContent).toBe("Applied “My handoffs”.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove saved view My handoffs" }));
+    expect(savedViewsStatus().textContent).toBe("Removed “My handoffs”.");
+
+    fireEvent.change(screen.getByRole("textbox", { name: "View name" }), {
+      target: { value: "Retry later" },
+    });
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => savedViewStorage.get(key) ?? null,
+      setItem: () => {
+        throw new Error("quota");
+      },
+      removeItem: (key: string) => void savedViewStorage.delete(key),
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save current view" }));
+    expect(savedViewsStatus().textContent)
+      .toBe("This browser could not save the view. Your current queue is unchanged.");
+    expect(JSON.parse(window.localStorage.getItem("cd-operations-views:alice") ?? "[]")).toEqual([]);
+    expect(onQueryChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps existing views and rows when remove or an oversized query cannot be persisted", async () => {
+    const page = makeOperationsQueuePage();
+    window.localStorage.setItem("cd-operations-views:alice", JSON.stringify([
+      {
+        id: "first",
+        name: "First view",
+        query: { q: "first", status: ["open"], includeArchived: false, coordinationScope: "all_visible" },
+      },
+      {
+        id: "second",
+        name: "Second view",
+        query: { q: "second", status: ["monitoring"], includeArchived: false, coordinationScope: "mine" },
+      },
+    ]));
+    const rendered = renderQueue(settled({ view: { availability: "available", value: page, refresh: "settled" } }));
+    const queueRows = () => within(screen.getByRole("list", { name: "Operations queue investigations" })).getAllByRole("listitem");
+    expect(queueRows()).toHaveLength(page.items.length);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => savedViewStorage.get(key) ?? null,
+      setItem: () => { throw new Error("quota"); },
+      removeItem: (key: string) => void savedViewStorage.delete(key),
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Remove saved view First view" }));
+    expect(savedViewsStatus().textContent).toBe("This browser could not remove the saved view.");
+    expect(screen.getByRole("button", { name: "Apply saved view First view" })).toBeTruthy();
+    expect(queueRows()).toHaveLength(page.items.length);
+
+    rendered.unmount();
+    savedViewStorage.clear();
+    const oversized: OperationsQueueLocationQuery = {
+      q: "x".repeat(257),
+      status: [],
+      includeArchived: false,
+      coordinationScope: "all_visible",
+    };
+    renderQueue(settled(), oversized);
+    fireEvent.change(screen.getByRole("textbox", { name: "View name" }), { target: { value: "Too long" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save current view" }));
+    expect(savedViewsStatus().textContent)
+      .toBe("This browser could not save the view. Your current queue is unchanged.");
+    expect(window.localStorage.getItem("cd-operations-views:alice")).toBeNull();
+  });
+
+  it("restores save, apply, and remove focus only while the initiator still owns it", async () => {
+    const query: OperationsQueueLocationQuery = {
+      q: "checkout",
+      status: ["open"],
+      includeArchived: false,
+      coordinationScope: "all_visible",
+    };
+    const state = settled();
+    const { onQueryChange, onOpenInvestigation, rerender } = renderQueue(state, query);
+    fireEvent.change(screen.getByRole("textbox", { name: "View name" }), {
+      target: { value: "Keep mine" },
+    });
+    const save = screen.getByRole("button", { name: "Save current view" });
+    save.focus();
+    fireEvent.click(save);
+    const apply = await screen.findByRole("button", { name: "Apply saved view Keep mine" });
+    await waitFor(() => expect(document.activeElement).toBe(apply));
+
+    apply.focus();
+    fireEvent.click(apply);
+    const applied = onQueryChange.mock.calls[0]?.[0] as OperationsQueueLocationQuery;
+    hook.current.mockReturnValue(state);
+    rerender(
+      <OperationsQueue
+        query={applied}
+        onQueryChange={onQueryChange}
+        onOpenInvestigation={onOpenInvestigation}
+      />,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(apply));
+
+    const remove = screen.getByRole("button", { name: "Remove saved view Keep mine" });
+    remove.focus();
+    fireEvent.click(remove);
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole("textbox", { name: "View name" }),
+    ));
+  });
+
+  it("does not steal saved-view focus after the operator moves or identity changes", async () => {
+    window.localStorage.setItem("cd-operations-views:alice", JSON.stringify([
+      {
+        id: "alice-view",
+        name: "Alice queue",
+        query: { q: "checkout", status: ["open"], includeArchived: false, coordinationScope: "mine" },
+      },
+    ]));
+    const state = settled();
+    const { onQueryChange, onOpenInvestigation, rerender } = renderQueue(state);
+    const apply = await screen.findByRole("button", { name: "Apply saved view Alice queue" });
+    apply.focus();
+    fireEvent.click(apply);
+    const search = screen.getByRole("searchbox", { name: "Search" });
+    search.focus();
+    const applied = onQueryChange.mock.calls[0]?.[0] as OperationsQueueLocationQuery;
+    hook.current.mockReturnValue(state);
+    rerender(
+      <OperationsQueue
+        query={applied}
+        onQueryChange={onQueryChange}
+        onOpenInvestigation={onOpenInvestigation}
+      />,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(search));
+
+    apply.focus();
+    fireEvent.click(apply);
+    hook.current.mockReturnValue(settled({ identity: BOB_IDENTITY }));
+    rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={onQueryChange}
+        onOpenInvestigation={onOpenInvestigation}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Apply saved view Alice queue" })).toBeNull();
+    expect(document.activeElement).not.toBe(screen.getByRole("textbox", { name: "View name" }));
+    expect(savedViewsStatus().textContent).toBe("");
   });
 
   it("gives sparse imported rows a useful title", () => {
