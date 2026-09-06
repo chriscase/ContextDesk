@@ -98,7 +98,9 @@ record or issue coordination actions. Priority, SLA, due dates, ranking,
 leases, presence locks, automatic assignment/membership, and automatic
 status changes remain explicit non-goals.
 
-#### Named-row self-action seam (local integration)
+<a id="named-row-self-action-seam-local-integration"></a>
+
+#### Named-row self-action seam (partial; merged on main, qualification pending)
 
 Named-row `claim_self` / `release_self` controls are now integrated in
 Operations Queue as a separate write seam from the read-only queue
