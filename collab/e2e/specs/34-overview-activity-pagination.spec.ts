@@ -11,6 +11,7 @@ const PAGE_SCHEMA = "cd-collab.investigation_activity_page.v1";
 const ERROR_SCHEMA = "cd-collab.investigation_activity_error.v1";
 const ACTIVITY_A = "a".repeat(64);
 const ACTIVITY_B = "b".repeat(64);
+const ACTIVITY_C = "c".repeat(64);
 const FILTER_FINGERPRINT = "c".repeat(64);
 const ROUTE = `/investigations/${INVESTIGATION_ID}/situation?section=stage-situation#stage-situation`;
 
@@ -153,6 +154,12 @@ test.describe("Overview Activity Center cursor continuation", () => {
       const responseBody = page(
         [
           item(
+            ACTIVITY_C,
+            "2025-12-30T23:00:00.000Z",
+            "captured prior page context",
+            3,
+          ),
+          item(
             ACTIVITY_A,
             "2026-01-01T00:00:00.000Z",
             "opened the investigation",
@@ -170,12 +177,16 @@ test.describe("Overview Activity Center cursor continuation", () => {
     });
 
     await loginAs(browserPage, FIXTURE_USERS.dave);
+    const requestCountBeforeFilteredGoto = requests.length;
     await browserPage.goto("/?activityKind=investigation_created");
     await expect(
       browserPage.getByRole("heading", { name: "Operating picture" }),
     ).toBeVisible();
     await expect(
       browserPage.getByRole("link", { name: /opened the investigation/ }),
+    ).toHaveCount(1);
+    await expect(
+      browserPage.getByRole("link", { name: /captured prior page context/ }),
     ).toHaveCount(1);
     await expect(
       browserPage.getByRole("button", { name: "Load more activity" }),
@@ -191,6 +202,9 @@ test.describe("Overview Activity Center cursor continuation", () => {
       browserPage.getByRole("link", { name: /opened the investigation/ }),
     ).toHaveCount(1);
     await expect(
+      browserPage.getByRole("link", { name: /captured prior page context/ }),
+    ).toHaveCount(1);
+    await expect(
       browserPage.getByRole("button", { name: "Load more activity" }),
     ).toHaveCount(0);
     const location = new URL(browserPage.url());
@@ -201,12 +215,13 @@ test.describe("Overview Activity Center cursor continuation", () => {
     );
     expect(location.searchParams.has("cursor")).toBe(false);
     expect(browserPage.url()).not.toContain(firstCursor);
-    const firstFilteredRequestIndex = requests.findIndex(
+    const postGotoRequests = requests.slice(requestCountBeforeFilteredGoto);
+    const firstFilteredRequestIndex = postGotoRequests.findIndex(
       (request) =>
         request.searchParams.get("activityKind") === "investigation_created",
     );
     expect(firstFilteredRequestIndex).toBeGreaterThanOrEqual(0);
-    const filteredRequests = requests.slice(firstFilteredRequestIndex);
+    const filteredRequests = postGotoRequests.slice(firstFilteredRequestIndex);
     expect(
       filteredRequests.every(
         (request) =>
@@ -302,6 +317,7 @@ test.describe("Overview Activity Center cursor continuation", () => {
     });
 
     await loginAs(browserPage, FIXTURE_USERS.dave);
+    const requestCountBeforeFilteredGoto = requests.length;
     await browserPage.goto(
       "/?activityKind=investigation_created&stage=situation",
     );
@@ -335,12 +351,13 @@ test.describe("Overview Activity Center cursor continuation", () => {
     expect(location.searchParams.get("stage")).toBe("situation");
     expect(location.searchParams.has("cursor")).toBe(false);
     expect(browserPage.url()).not.toContain(firstCursor);
-    const firstFilteredRequestIndex = requests.findIndex(
+    const postGotoRequests = requests.slice(requestCountBeforeFilteredGoto);
+    const firstFilteredRequestIndex = postGotoRequests.findIndex(
       (request) =>
         request.searchParams.get("activityKind") === "investigation_created",
     );
     expect(firstFilteredRequestIndex).toBeGreaterThanOrEqual(0);
-    const filteredRequests = requests.slice(firstFilteredRequestIndex);
+    const filteredRequests = postGotoRequests.slice(firstFilteredRequestIndex);
     expect(
       filteredRequests.every(
         (request) =>
