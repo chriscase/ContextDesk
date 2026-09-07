@@ -327,6 +327,7 @@ test.describe("Operations Queue participant-coordination browser qualification",
         name: `Assign participant ${label} to ${title}`,
       });
       await assign.press("Enter");
+      await expect.poll(() => writesOf(requests).length).toBe(1);
       expect(writesOf(requests)).toHaveLength(1);
       expectParticipantWrite(writesOf(requests)[0]!, caseId, "assign_participant", participant.identityId, 0);
       // A 403 is an authentication/access-loss boundary: protected API
@@ -363,6 +364,7 @@ test.describe("Operations Queue participant-coordination browser qualification",
     page.on("request", listener);
     try {
       await page.goto(`/operations?q=${encodeURIComponent(title)}`);
+      const initialUrl = page.url();
       await expect(page.getByRole("heading", { name: "Operations Queue", exact: true })).toBeVisible();
       await expect(page.getByRole("link", { name: title })).toBeVisible();
       expect(requests.some((request) => {
@@ -382,7 +384,7 @@ test.describe("Operations Queue participant-coordination browser qualification",
       })).toEqual([]);
       expectNoPerRowReads(requests, caseId);
       expectNoLegacyCaseList(requests);
-      expectCanonicalQueueLocation(page, page.url());
+      expectCanonicalQueueLocation(page, initialUrl);
     } finally {
       page.off("request", listener);
     }
