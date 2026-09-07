@@ -1097,15 +1097,16 @@ export class CaseService {
       const stored = await this.store.getInvestigationCoordination(routeCaseId);
       const current = this.coordinationProjection(row, stored);
 
+      // Membership and eligibility come from the locked CaseV1.participants
+      // set, not from a queue projection. Privileged cleanup may still name a
+      // recorded holder who is no longer in that set; eligibleParticipant is
+      // true only when the locked participant row exists.
       const actorParticipant = row.participants.find(
         (participant) => participant.identityId === actor.id,
       );
       const targetParticipant = targetIdentityId === null
         ? null
         : row.participants.find((participant) => participant.identityId === targetIdentityId) ?? null;
-      // Privileged cleanup remains possible after the holder ceased to be an
-      // eligible participant: the recorded coordinator supplies identity,
-      // while eligibility still comes only from the locked participant set.
       const targetIdentity = targetIdentityId === null
         ? null
         : targetParticipant ?? (
