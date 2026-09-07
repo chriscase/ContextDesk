@@ -64,8 +64,20 @@ async function addRecordedParticipant(
 
 function writesOf(
   capture: ReturnType<typeof captureCoordinationRequests>,
-): ParticipantCoordinationWrite[] {
-  return capture.bodies as unknown as ParticipantCoordinationWrite[];
+): readonly ParticipantCoordinationWrite[] {
+  return capture.bodies.map((body): ParticipantCoordinationWrite => {
+    const write: ParticipantCoordinationWrite = {
+      schemaId: body.schemaId,
+      investigationId: body.investigationId,
+      action: body.action,
+      expectedRevision: body.expectedRevision,
+      idempotencyKey: body.idempotencyKey,
+    };
+    if ("targetIdentityId" in body && typeof body.targetIdentityId === "string") {
+      return { ...write, targetIdentityId: body.targetIdentityId };
+    }
+    return write;
+  });
 }
 
 function expectParticipantWrite(
@@ -100,6 +112,12 @@ function expectNoStrategyPreference(requests: readonly Request[]): void {
   })).toBe(false);
 }
 
+async function expectNoHistoryUiStrategyId(page: Page): Promise<void> {
+  expect(
+    await page.evaluate(() => Object.prototype.hasOwnProperty.call(history.state ?? {}, "uiStrategyId")),
+  ).toBe(false);
+}
+
 function expectNoLegacyCaseList(requests: readonly Request[]): void {
   for (const request of requests) {
     const url = new URL(request.url());
@@ -112,14 +130,20 @@ function expectNoLegacyCaseList(requests: readonly Request[]): void {
   }
 }
 
-async function expectQueueUsableAtNarrowViewport(page: Page, title: string): Promise<void> {
-  const group = page.getByRole("group", { name: `Participant coordination for ${title}` });
-  await expect(group).toBeVisible();
+const NARROW_VIEWPORT = { width: 320, height: 720 } as const;
+
+async function expectNoHorizontalOverflow(page: Page): Promise<void> {
   const dimensions = await page.evaluate(() => ({
     documentWidth: document.documentElement.scrollWidth,
     viewportWidth: document.documentElement.clientWidth,
   }));
   expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
+}
+
+async function expectQueueUsableAtNarrowViewport(page: Page, title: string): Promise<void> {
+  const group = page.getByRole("group", { name: `Participant coordination for ${title}` });
+  await expect(group).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 }
 
 test.describe("Operations Queue participant-coordination browser qualification", () => {
@@ -132,7 +156,7 @@ test.describe("Operations Queue participant-coordination browser qualification",
     await addRecordedParticipant(page, caseId, participant);
     const label = recordedIdentityLabel(participant);
     const requests = captureCoordinationRequests(page, caseId);
-    await page.setViewportSize({ width: 320, height: 720 });
+    await page.setViewportSize(NARROW_VIEWPORT);
 
     try {
       await page.goto(`/operations?q=${encodeURIComponent(title)}`);
@@ -200,9 +224,7 @@ test.describe("Operations Queue participant-coordination browser qualification",
 
       expectCanonicalQueueLocation(page, initialUrl);
       expectNoStrategyPreference(requests.allRequests);
-      expect(
-        await page.evaluate(() => Object.prototype.hasOwnProperty.call(history.state ?? {}, "uiStrategyId")),
-      ).toBe(false);
+      await expectNoHistoryUiStrategyId(page);
       expectNoPerRowReads(requests.allRequests, caseId);
       expectOnlyPublicCoordinationWrites(requests.allRequests, caseId);
       expectNoLegacyCaseList(requests.allRequests);
@@ -240,12 +262,14 @@ test.describe("Operations Queue participant-coordination browser qualification",
       }
       await route.continue();
     });
+    await page.setViewportSize(NARROW_VIEWPORT);
 
     try {
       await page.goto(`/operations?q=${encodeURIComponent(title)}`);
       const initialUrl = page.url();
       const select = page.getByRole("combobox", { name: `Recorded participants for ${title}` });
       await expect(select).toBeVisible();
+      await expectQueueUsableAtNarrowViewport(page, title);
       await select.selectOption(participant.identityId);
       expect(writesOf(requests)).toHaveLength(0);
       const assign = page.getByRole("button", {
@@ -284,6 +308,7 @@ test.describe("Operations Queue participant-coordination browser qualification",
       expectNoPerRowReads(requests.allRequests, caseId);
       expectOnlyPublicCoordinationWrites(requests.allRequests, caseId);
       expectNoLegacyCaseList(requests.allRequests);
+      await expectQueueUsableAtNarrowViewport(page, title);
     } finally {
       await page.unroute(`**/api/cases/${caseId}/coordination`);
       requests.stop();
@@ -316,12 +341,14 @@ test.describe("Operations Queue participant-coordination browser qualification",
       }
       await route.continue();
     });
+    await page.setViewportSize(NARROW_VIEWPORT);
 
     try {
       await page.goto(`/operations?q=${encodeURIComponent(title)}`);
       const initialUrl = page.url();
       const select = page.getByRole("combobox", { name: `Recorded participants for ${title}` });
       await expect(select).toBeVisible();
+      await expectQueueUsableAtNarrowViewport(page, title);
       await select.selectOption(participant.identityId);
       const assign = page.getByRole("button", {
         name: `Assign participant ${label} to ${title}`,
@@ -341,6 +368,7 @@ test.describe("Operations Queue participant-coordination browser qualification",
       expectOnlyPublicCoordinationWrites(requests.allRequests, caseId);
       expectNoLegacyCaseList(requests.allRequests);
       expectNoStrategyPreference(requests.allRequests);
+      await expectNoHorizontalOverflow(page);
     } finally {
       await page.unroute(`**/api/cases/${caseId}/coordination`);
       requests.stop();
@@ -362,11 +390,13 @@ test.describe("Operations Queue participant-coordination browser qualification",
       requests.push(request);
     };
     page.on("request", listener);
+    await page.setViewportSize(NARROW_VIEWPORT);
     try {
       await page.goto(`/operations?q=${encodeURIComponent(title)}`);
       const initialUrl = page.url();
       await expect(page.getByRole("heading", { name: "Operations Queue", exact: true })).toBeVisible();
       await expect(page.getByRole("link", { name: title })).toBeVisible();
+      await expectNoHorizontalOverflow(page);
       expect(requests.some((request) => {
         const url = new URL(request.url());
         return request.method() === "GET"
@@ -385,6 +415,9 @@ test.describe("Operations Queue participant-coordination browser qualification",
       expectNoPerRowReads(requests, caseId);
       expectNoLegacyCaseList(requests);
       expectCanonicalQueueLocation(page, initialUrl);
+      expectNoStrategyPreference(requests);
+      await expectNoHistoryUiStrategyId(page);
+      await expectNoHorizontalOverflow(page);
     } finally {
       page.off("request", listener);
     }
