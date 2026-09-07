@@ -10,6 +10,7 @@ import {
   createInvestigationGatewayDouble,
   gatewayOk,
   makeOperationsQueuePage,
+  makePopulatedCase,
   type InvestigationGateway,
 } from "../investigations/runtime/testkit/index.js";
 import { useOperationsQueue } from "./useOperationsQueue.js";
@@ -320,5 +321,656 @@ describe("Operations Queue public-runtime adapter", () => {
     act(() => presentation?.refresh());
     await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(3));
     expect(queryOperationsQueue.mock.calls[2]?.[0].cursor).toBeNull();
+  });
+});
+
+const PARTICIPANT_WRITE = ["investigation:read", "investigation:coordinate"] as const;
+const UNKNOWN_COMMIT = Object.freeze({
+  kind: "unavailable" as const,
+  status: 503 as const,
+  reason: "commit_outcome_unknown" as const,
+});
+
+function coordinationSuccess(
+  page: ReturnType<typeof makeOperationsQueuePage>,
+  action: "assign_participant" | "release_participant",
+  targetIdentityId: string,
+) {
+  const row = page.items[0]!;
+  return {
+    schemaId: "cd-collab.investigation_coordination_action_success.v1" as const,
+    investigationId: row.investigation.id,
+    action,
+    targetIdentityId,
+    previousRevision: row.coordination.revision,
+    previousCoordinator: row.coordination.coordinator,
+    applied: row.coordination,
+  };
+}
+
+function pageWithCoordinatorOutsideParticipants() {
+  const page = makeOperationsQueuePage();
+  const populated = makePopulatedCase();
+  return makeOperationsQueuePage({
+    items: [
+      {
+        investigation: {
+          ...populated,
+          participants: populated.participants.filter(
+            (participant) => participant.identityId !== "identity-alice",
+          ),
+        },
+        coordination: page.items[0]!.coordination,
+      },
+      page.items[1],
+    ],
+  });
+}
+
+describe("Operations Queue participant-coordination presentation", () => {
+  it("returns not_ready with zero writes when the participant command is absent, denied, or read-only", async () => {
+    const page = makeOperationsQueuePage();
+    const applyCoordinationAction = vi.fn();
+    const getCoordination = vi.fn();
+    const queryOperationsQueue = vi.fn(async () => gatewayOk(page));
+    const row = page.items[0]!;
+    const assign = async () => presentation?.participantCoordination.apply(
+      row.investigation.id,
+      "assign_participant",
+      "identity-ravi",
+    );
+
+    renderProbe(
+      createInvestigationGatewayDouble({ queryOperationsQueue, getCoordination, applyCoordinationAction }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      ["investigation:read"],
+      true,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+    expect(presentation?.participantCoordination.available).toBe(false);
+    await act(async () => {
+      await expect(assign()).resolves.toEqual({ status: "ignored", reason: "not_ready" });
+    });
+
+    cleanup();
+    renderProbe(
+      createInvestigationGatewayDouble({ queryOperationsQueue, getCoordination, applyCoordinationAction }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      ["investigation:read", "investigation:write"],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+    expect(presentation?.participantCoordination.available).toBe(false);
+    expect(presentation?.selfCoordination.available).toBe(true);
+    await act(async () => {
+      await expect(assign()).resolves.toEqual({ status: "ignored", reason: "not_ready" });
+    });
+
+    cleanup();
+    renderProbe(
+      createInvestigationGatewayDouble({ queryOperationsQueue, getCoordination, applyCoordinationAction }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      true,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+    expect(presentation?.participantCoordination.available).toBe(false);
+    await act(async () => {
+      await expect(assign()).resolves.toEqual({ status: "ignored", reason: "not_ready" });
+    });
+
+    expect(applyCoordinationAction).not.toHaveBeenCalled();
+    expect(getCoordination).not.toHaveBeenCalled();
+  });
+
+  it("assigns a recorded participant through the runtime command using the visible row revision", async () => {
+    const page = makeOperationsQueuePage();
+    const row = page.items[0]!;
+    const applyCoordinationAction = vi.fn(async () => gatewayOk(
+      coordinationSuccess(page, "assign_participant", "identity-ravi"),
+    ));
+    const getCoordination = vi.fn();
+    const queryOperationsQueue = vi.fn(async () => gatewayOk(page));
+    renderProbe(
+      createInvestigationGatewayDouble({ queryOperationsQueue, getCoordination, applyCoordinationAction }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+    expect(presentation?.participantCoordination.available).toBe(true);
+    expect(presentation?.selfCoordination.available).toBe(false);
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toMatchObject({ status: "succeeded" });
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledWith(
+      row.investigation.id,
+      expect.objectContaining({
+        action: "assign_participant",
+        targetIdentityId: "identity-ravi",
+        expectedRevision: row.coordination.revision,
+      }),
+      expect.objectContaining({ actorIdentityId: "identity-alice" }),
+    );
+    expect(getCoordination).not.toHaveBeenCalled();
+    await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(2));
+  });
+
+  it("returns not_ready with zero writes for an unlisted assign, a non-coordinator release, and an off-page row", async () => {
+    const page = makeOperationsQueuePage();
+    const row = page.items[0]!;
+    const applyCoordinationAction = vi.fn();
+    const getCoordination = vi.fn();
+    renderProbe(
+      createInvestigationGatewayDouble({
+        queryOperationsQueue: vi.fn(async () => gatewayOk(page)),
+        getCoordination,
+        applyCoordinationAction,
+      }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-eve",
+      )).resolves.toEqual({ status: "ignored", reason: "not_ready" });
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "release_participant",
+        "identity-ravi",
+      )).resolves.toEqual({ status: "ignored", reason: "not_ready" });
+      await expect(presentation?.participantCoordination.apply(
+        "missing-investigation",
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toEqual({ status: "ignored", reason: "not_ready" });
+    });
+    expect(applyCoordinationAction).not.toHaveBeenCalled();
+    expect(getCoordination).not.toHaveBeenCalled();
+  });
+
+  it("releases the recorded coordinator even when they are absent from participants", async () => {
+    const page = pageWithCoordinatorOutsideParticipants();
+    const row = page.items[0]!;
+    expect(row.coordination.coordinator?.identityId).toBe("identity-alice");
+    expect(row.investigation.participants.map((participant) => participant.identityId))
+      .not.toContain("identity-alice");
+    const applyCoordinationAction = vi.fn(async () => gatewayOk(
+      coordinationSuccess(page, "release_participant", "identity-alice"),
+    ));
+    const getCoordination = vi.fn();
+    renderProbe(
+      createInvestigationGatewayDouble({
+        queryOperationsQueue: vi.fn(async () => gatewayOk(page)),
+        getCoordination,
+        applyCoordinationAction,
+      }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "release_participant",
+        "identity-alice",
+      )).resolves.toMatchObject({ status: "succeeded" });
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledWith(
+      row.investigation.id,
+      expect.objectContaining({
+        action: "release_participant",
+        targetIdentityId: "identity-alice",
+        expectedRevision: row.coordination.revision,
+      }),
+      expect.objectContaining({ actorIdentityId: "identity-alice" }),
+    );
+    expect(getCoordination).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["succeeded", (page: ReturnType<typeof makeOperationsQueuePage>) => gatewayOk(
+      coordinationSuccess(page, "assign_participant", "identity-ravi"),
+    )],
+    ["coordination_changed", (page: ReturnType<typeof makeOperationsQueuePage>) => ({
+      ok: false as const,
+      error: {
+        kind: "coordination_changed" as const,
+        status: 409 as const,
+        investigationId: page.items[0]!.investigation.id,
+        action: "assign_participant" as const,
+        targetIdentityId: "identity-ravi",
+        current: page.items[0]!.coordination,
+      },
+    })],
+    ["coordination_refused", (page: ReturnType<typeof makeOperationsQueuePage>) => ({
+      ok: false as const,
+      error: {
+        kind: "coordination_refused" as const,
+        status: 409 as const,
+        investigationId: page.items[0]!.investigation.id,
+        action: "assign_participant" as const,
+        targetIdentityId: "identity-ravi",
+        reason: "already_coordinator" as const,
+        detail: "The investigation already has a coordinator.",
+        current: page.items[0]!.coordination,
+      },
+    })],
+  ])("refreshes the server queue on %s without a per-row coordination read", async (_label, response) => {
+    const page = makeOperationsQueuePage();
+    const applyCoordinationAction = vi.fn(async () => response(page));
+    const getCoordination = vi.fn();
+    const queryOperationsQueue = vi.fn(async () => gatewayOk(page));
+    renderProbe(
+      createInvestigationGatewayDouble({ queryOperationsQueue, getCoordination, applyCoordinationAction }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+
+    await act(async () => {
+      await presentation?.participantCoordination.apply(
+        page.items[0]!.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      );
+    });
+    await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(2));
+    expect(getCoordination).not.toHaveBeenCalled();
+  });
+
+  it("retries an unknown 503 with the exact frozen payload and key", async () => {
+    const page = makeOperationsQueuePage();
+    const applyCoordinationAction = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: UNKNOWN_COMMIT })
+      .mockResolvedValueOnce(gatewayOk(coordinationSuccess(page, "assign_participant", "identity-ravi")));
+    const getCoordination = vi.fn();
+    const queryOperationsQueue = vi.fn(async () => gatewayOk(page));
+    renderProbe(
+      createInvestigationGatewayDouble({ queryOperationsQueue, getCoordination, applyCoordinationAction }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        page.items[0]!.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toMatchObject({ status: "failed", error: UNKNOWN_COMMIT });
+    });
+    expect(queryOperationsQueue).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await expect(presentation?.participantCoordination.retry())
+        .resolves.toMatchObject({ status: "succeeded" });
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledTimes(2);
+    expect(applyCoordinationAction.mock.calls[0]?.[1]).toBe(applyCoordinationAction.mock.calls[1]?.[1]);
+    expect(Object.isFrozen(applyCoordinationAction.mock.calls[0]?.[1])).toBe(true);
+    expect(applyCoordinationAction.mock.calls[0]?.[1]).toEqual({
+      action: "assign_participant",
+      targetIdentityId: "identity-ravi",
+      expectedRevision: page.items[0]!.coordination.revision,
+      idempotencyKey: applyCoordinationAction.mock.calls[0]?.[1].idempotencyKey,
+    });
+    expect(getCoordination).not.toHaveBeenCalled();
+    await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(2));
+  });
+
+  it("rejects same-key target or action mismatch with zero additional POSTs", async () => {
+    const page = makeOperationsQueuePage();
+    const row = page.items[0]!;
+    const applyCoordinationAction = vi.fn()
+      .mockResolvedValue({ ok: false as const, error: UNKNOWN_COMMIT });
+    const getCoordination = vi.fn();
+    renderProbe(
+      createInvestigationGatewayDouble({
+        queryOperationsQueue: vi.fn(async () => gatewayOk(page)),
+        getCoordination,
+        applyCoordinationAction,
+      }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+
+    await act(async () => {
+      await presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      );
+    });
+    let targetMismatch;
+    await act(async () => {
+      targetMismatch = await presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-alice",
+      );
+    });
+    expect(targetMismatch).toEqual({
+      status: "failed",
+      error: { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      await presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      );
+    });
+    let actionMismatch;
+    await act(async () => {
+      actionMismatch = await presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "release_participant",
+        "identity-alice",
+      );
+    });
+    expect(actionMismatch).toEqual({
+      status: "failed",
+      error: { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledTimes(2);
+    expect(applyCoordinationAction.mock.calls[0]?.[1]).toBe(applyCoordinationAction.mock.calls[1]?.[1]);
+    expect(getCoordination).not.toHaveBeenCalled();
+  });
+
+  it("keeps the frozen 503 retry after a different target or action without posting", async () => {
+    const page = makeOperationsQueuePage();
+    const row = page.items[0]!;
+    const other = page.items[1]!;
+    const applyCoordinationAction = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: UNKNOWN_COMMIT })
+      .mockResolvedValueOnce(gatewayOk(coordinationSuccess(page, "assign_participant", "identity-ravi")));
+    const getCoordination = vi.fn();
+    renderProbe(
+      createInvestigationGatewayDouble({
+        queryOperationsQueue: vi.fn(async () => gatewayOk(page)),
+        getCoordination,
+        applyCoordinationAction,
+      }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toMatchObject({ status: "failed", error: UNKNOWN_COMMIT });
+    });
+    const frozen = applyCoordinationAction.mock.calls[0]?.[1];
+    expect(frozen).toEqual({
+      action: "assign_participant",
+      targetIdentityId: "identity-ravi",
+      expectedRevision: row.coordination.revision,
+      idempotencyKey: expect.any(String),
+    });
+    expect(Object.isFrozen(frozen)).toBe(true);
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-alice",
+      )).resolves.toEqual({
+        status: "failed",
+        error: { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
+      });
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "release_participant",
+        "identity-alice",
+      )).resolves.toEqual({
+        status: "failed",
+        error: { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
+      });
+      await expect(presentation?.participantCoordination.apply(
+        other.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toEqual({
+        status: "failed",
+        error: { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
+      });
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+    expect(presentation?.participantCoordination.action).toBe("assign_participant");
+    expect(presentation?.participantCoordination.targetIdentityId).toBe("identity-ravi");
+    expect(presentation?.participantCoordination.targetInvestigationId).toBe(row.investigation.id);
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.retry())
+        .resolves.toMatchObject({ status: "succeeded" });
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledTimes(2);
+    expect(applyCoordinationAction.mock.calls[1]?.[1]).toBe(frozen);
+    expect(applyCoordinationAction.mock.calls[1]?.[1]).toEqual({
+      action: "assign_participant",
+      targetIdentityId: "identity-ravi",
+      expectedRevision: row.coordination.revision,
+      idempotencyKey: frozen?.idempotencyKey,
+    });
+    expect(getCoordination).not.toHaveBeenCalled();
+  });
+
+  it("reports auth-loss and conceals apply 404 without invalidating the queue or reading per-row coordination", async () => {
+    const page = makeOperationsQueuePage();
+    const row = page.items[0]!;
+    const getCoordination = vi.fn();
+    const queryOperationsQueue = vi.fn(async () => gatewayOk(page));
+    const applyCoordinationAction = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: { kind: "auth_lost" as const, status: 401 as const } })
+      .mockResolvedValueOnce({ ok: false as const, error: { kind: "auth_lost" as const, status: 403 as const } })
+      .mockResolvedValueOnce({ ok: false as const, error: { kind: "not_found" as const, status: 404 as const } })
+      .mockResolvedValueOnce({ ok: false as const, error: { kind: "not_found" as const, status: 404 as const } });
+    renderProbe(
+      createInvestigationGatewayDouble({ queryOperationsQueue, getCoordination, applyCoordinationAction }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toEqual({ status: "failed", error: { kind: "auth_lost", status: 401 } });
+    });
+    expect(presentation?.view.availability).toBe("available");
+    expect(queryOperationsQueue).toHaveBeenCalledTimes(1);
+    expect(presentation?.participantCoordination.concealedInvestigationIds).toEqual([]);
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toEqual({ status: "failed", error: { kind: "auth_lost", status: 403 } });
+    });
+    expect(presentation?.view.availability).toBe("available");
+    expect(presentation?.participantCoordination.concealedInvestigationIds).toEqual([]);
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toEqual({ status: "failed", error: { kind: "not_found", status: 404 } });
+    });
+    expect(presentation?.view.availability).toBe("available");
+    expect(presentation?.participantCoordination.concealedInvestigationIds).toEqual([row.investigation.id]);
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        row.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toEqual({ status: "failed", error: { kind: "not_found", status: 404 } });
+    });
+    expect(presentation?.participantCoordination.concealedInvestigationIds).toEqual([row.investigation.id]);
+    expect(queryOperationsQueue).toHaveBeenCalledTimes(1);
+    expect(getCoordination).not.toHaveBeenCalled();
+  });
+
+  it("keeps a 404 concealment for the original investigation after another row is targeted", async () => {
+    const page = makeOperationsQueuePage();
+    const rowA = page.items[0]!;
+    const twoRowPage = makeOperationsQueuePage({
+      items: [
+        rowA,
+        {
+          investigation: {
+            ...rowA.investigation,
+            id: page.items[1]!.investigation.id,
+            title: page.items[1]!.investigation.title,
+          },
+          coordination: page.items[1]!.coordination,
+        },
+      ],
+    });
+    const rowB = twoRowPage.items[1]!;
+    const applyCoordinationAction = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: { kind: "not_found" as const, status: 404 as const } })
+      .mockResolvedValueOnce(gatewayOk({
+        ...coordinationSuccess(twoRowPage, "assign_participant", "identity-ravi"),
+        investigationId: rowB.investigation.id,
+      }));
+    const getCoordination = vi.fn();
+    const queryOperationsQueue = vi.fn(async () => gatewayOk(twoRowPage));
+    renderProbe(
+      createInvestigationGatewayDouble({ queryOperationsQueue, getCoordination, applyCoordinationAction }),
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      [...PARTICIPANT_WRITE],
+      false,
+    );
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        rowA.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toEqual({ status: "failed", error: { kind: "not_found", status: 404 } });
+    });
+    expect(presentation?.participantCoordination.concealedInvestigationIds).toEqual([rowA.investigation.id]);
+
+    await act(async () => {
+      await expect(presentation?.participantCoordination.apply(
+        rowB.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      )).resolves.toMatchObject({ status: "succeeded" });
+    });
+    expect(presentation?.participantCoordination.concealedInvestigationIds).toEqual([rowA.investigation.id]);
+    expect(presentation?.participantCoordination.targetInvestigationId).toBe(rowB.investigation.id);
+    expect(queryOperationsQueue).toHaveBeenCalledTimes(2);
+    expect(getCoordination).not.toHaveBeenCalled();
+  });
+
+  it("clears retained participant intent when the location query scope changes", async () => {
+    const page = makeOperationsQueuePage();
+    const applyCoordinationAction = vi.fn(async () => ({
+      ok: false as const,
+      error: UNKNOWN_COMMIT,
+    }));
+    const getCoordination = vi.fn();
+    const gateway = createInvestigationGatewayDouble({
+      queryOperationsQueue: vi.fn(async () => gatewayOk(page)),
+      getCoordination,
+      applyCoordinationAction,
+    });
+    const rendered = renderProbe(gateway, DEFAULT_OPERATIONS_QUEUE_QUERY, [...PARTICIPANT_WRITE], false);
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+    await act(async () => {
+      await presentation?.participantCoordination.apply(
+        page.items[0]!.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      );
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+
+    rendered.rerender(probeTree(
+      gateway,
+      { ...DEFAULT_OPERATIONS_QUEUE_QUERY, q: "other" },
+      [...PARTICIPANT_WRITE],
+      "identity-alice",
+      "authority-v1",
+      false,
+    ));
+    await waitFor(() => expect(presentation?.participantCoordination.action).toBeNull());
+    await act(async () => {
+      await expect(presentation?.participantCoordination.retry())
+        .resolves.toEqual({ status: "ignored", reason: "not_ready" });
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["query", { q: "other" } as Partial<OperationsQueueLocationQuery>, "identity-alice", "authority-v1"],
+    ["identity", {}, "identity-bob", "authority-v1"],
+    ["authority", {}, "identity-alice", "authority-v2"],
+  ] as const)("clears concealed participant ids after a %s change", async (
+    _dimension,
+    queryOverride,
+    nextIdentityKey,
+    nextAuthorityKey,
+  ) => {
+    const page = makeOperationsQueuePage();
+    const applyCoordinationAction = vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: "not_found" as const, status: 404 as const },
+    }));
+    const gateway = createInvestigationGatewayDouble({
+      queryOperationsQueue: vi.fn(async () => gatewayOk(page)),
+      getCoordination: vi.fn(),
+      applyCoordinationAction,
+    });
+    const rendered = renderProbe(gateway, DEFAULT_OPERATIONS_QUEUE_QUERY, [...PARTICIPANT_WRITE], false);
+    await waitFor(() => expect(presentation?.view.availability).toBe("available"));
+    await act(async () => {
+      await presentation?.participantCoordination.apply(
+        page.items[0]!.investigation.id,
+        "assign_participant",
+        "identity-ravi",
+      );
+    });
+    expect(presentation?.participantCoordination.concealedInvestigationIds)
+      .toEqual([page.items[0]!.investigation.id]);
+
+    rendered.rerender(probeTree(
+      gateway,
+      { ...DEFAULT_OPERATIONS_QUEUE_QUERY, ...queryOverride },
+      [...PARTICIPANT_WRITE],
+      nextIdentityKey,
+      nextAuthorityKey,
+      false,
+    ));
+    await waitFor(() => expect(presentation?.participantCoordination.concealedInvestigationIds).toEqual([]));
   });
 });

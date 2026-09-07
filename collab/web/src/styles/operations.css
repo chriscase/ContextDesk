@@ -50,7 +50,8 @@
 }
 
 .operations-queue button,
-.operations-queue input {
+.operations-queue input,
+.operations-queue select {
   font: inherit;
 }
 
@@ -75,7 +76,7 @@
   opacity: 0.66;
 }
 
-.operations-queue :where(button, input, a, [tabindex]):focus-visible {
+.operations-queue :where(button, input, select, a, [tabindex]):focus-visible {
   outline: 0.18rem solid var(--accent);
   outline-offset: 0.16rem;
 }
@@ -364,6 +365,7 @@
   display: flex;
   min-width: 10rem;
   flex-direction: column;
+  flex-wrap: wrap;
   align-items: stretch;
   justify-content: center;
   gap: 0.35rem;
@@ -373,11 +375,70 @@
   white-space: nowrap;
 }
 
+.operations-queue__participant-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.operations-queue__participant-select {
+  display: grid;
+  flex: 1 1 8rem;
+  gap: 0.2rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.operations-queue__participant-select select {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.35rem;
+  padding: 0.42rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface-input);
+  color: var(--fg);
+}
+
+.operations-queue__participant-actions {
+  display: flex;
+  flex: 1 1 8rem;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.operations-queue__participant-actions .operations-queue__coordination-action {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;
+}
+
 .operations-queue__coordination-feedback {
   max-width: 18rem;
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.35;
+}
+
+.operations-queue__coordination-feedback[tabindex] {
+  display: inline-block;
+  max-width: 18rem;
+}
+
+.operations-queue__participant-control button:disabled,
+.operations-queue__participant-control select:disabled {
+  cursor: not-allowed;
+  opacity: 0.66;
+}
+
+.operations-queue__participant-control button:disabled:hover,
+.operations-queue__participant-control select:disabled:hover {
+  border-color: var(--border);
 }
 
 .operations-queue__coordination-feedback[role="alert"] {
@@ -449,10 +510,13 @@
 
   .operations-queue__row-actions {
     min-width: 0;
-    align-items: flex-start;
+    align-items: stretch;
   }
 
-  .operations-queue__coordination-action {
+  .operations-queue__coordination-action,
+  .operations-queue__participant-control,
+  .operations-queue__participant-actions,
+  .operations-queue__participant-select {
     width: 100%;
   }
 }
@@ -485,14 +549,16 @@
   .operations-queue__archive-note,
   .operations-queue__row-link,
   .operations-queue__coordination-feedback,
+  .operations-queue__participant-control,
   .operations-queue__status,
   .operations-queue button,
-  .operations-queue input {
+  .operations-queue input,
+  .operations-queue select {
     border-color: CanvasText;
     forced-color-adjust: auto;
   }
 
-  .operations-queue :where(button, input, a, [tabindex]):focus-visible {
+  .operations-queue :where(button, input, select, a, [tabindex]):focus-visible {
     outline-color: Highlight;
   }
 
