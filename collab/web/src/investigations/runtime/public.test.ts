@@ -3,6 +3,7 @@ import type { InvestigationRuntimeProviderProps } from "./public.js";
 import type {
   ArtifactAnnotationBulkResultV1,
   InvestigationCoordinationActionCommand,
+  InvestigationNamedCoordinationParticipantCommand,
   InvestigationArtifactAnnotationsBulkCommand,
   InvestigationOperationsQueuePageV1,
   InvestigationOperationsQueueQueryInput,
@@ -62,6 +63,7 @@ describe("investigation runtime public surface", () => {
         applyLifecycle: null,
         applyCoordinationAction: null,
         applyNamedCoordinationSelf: null,
+        applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
       },
@@ -95,6 +97,27 @@ describe("investigation runtime public surface", () => {
       idempotencyKey: "coord-public-0004",
     };
     expect([invalidSelf.action, invalidParticipant.action]).toHaveLength(2);
+    const namedParticipant: InvestigationNamedCoordinationParticipantCommand = {
+      investigationId: "case-populated",
+      action: "assign_participant",
+      targetIdentityId: "identity-bob",
+      idempotencyKey: "named-participant-public-0001",
+    };
+    expect(namedParticipant.action).toBe("assign_participant");
+    const invalidNamedSelf: InvestigationNamedCoordinationParticipantCommand = {
+      investigationId: "case-populated",
+      // @ts-expect-error Named-row participant commands are not self-actions.
+      action: "claim_self",
+      targetIdentityId: "identity-bob",
+      idempotencyKey: "named-participant-public-0002",
+    };
+    // @ts-expect-error Named-row participant commands require an explicit target.
+    const invalidNamedTarget: InvestigationNamedCoordinationParticipantCommand = {
+      investigationId: "case-populated",
+      action: "release_participant",
+      idempotencyKey: "named-participant-public-0003",
+    };
+    expect([invalidNamedSelf.action, invalidNamedTarget.action]).toHaveLength(2);
   });
 
   it("exposes the read-only queue DTO and command without transport or action authority", () => {

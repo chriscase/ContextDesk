@@ -46,6 +46,13 @@ export {
   type UseNamedCoordinationSelfOptions,
 } from "./use-named-coordination-self.js";
 export {
+  useNamedCoordinationParticipant,
+  type NamedCoordinationParticipantAction,
+  type NamedCoordinationParticipantCommand,
+  type NamedCoordinationParticipantController,
+  type UseNamedCoordinationParticipantOptions,
+} from "./use-named-coordination-participant.js";
+export {
   useInvestigationList,
   type InvestigationListController,
   type UseInvestigationListOptions,

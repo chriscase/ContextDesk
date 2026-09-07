@@ -43,6 +43,7 @@ import {
   useInvestigationList,
   useInvestigationCoordination,
   useNamedCoordinationSelf,
+  useNamedCoordinationParticipant,
   useLifecycleAction,
   useUpdateSituation,
   useUploadEvidence,
@@ -52,6 +53,7 @@ import {
   type PreviewEvidenceCommand,
   type InvestigationCoordinationCommand,
   type NamedCoordinationSelfCommand,
+  type NamedCoordinationParticipantCommand,
   type UpdateSituationCommand,
   type UploadEvidenceCommand,
 } from "./controllers/index.js";
@@ -93,6 +95,7 @@ export type InvestigationArtifactAnnotationsBulkCommand = CreateArtifactAnnotati
 export type InvestigationSituationCommand = UpdateSituationCommand;
 export type InvestigationCoordinationActionCommand = InvestigationCoordinationCommand;
 export type InvestigationNamedCoordinationSelfCommand = NamedCoordinationSelfCommand;
+export type InvestigationNamedCoordinationParticipantCommand = NamedCoordinationParticipantCommand;
 
 export interface InvestigationRuntimeResources {
   readonly investigations: ResourceState<readonly CaseV1[]>;
@@ -118,6 +121,7 @@ export interface InvestigationRuntimeMutations {
   readonly lifecycle: MutationState<InvestigationLifecycleActionSuccessV1>;
   readonly coordination: MutationState<InvestigationCoordinationActionSuccessV1>;
   readonly namedCoordinationSelf: MutationState<InvestigationCoordinationActionSuccessV1>;
+  readonly namedCoordinationParticipant: MutationState<InvestigationCoordinationActionSuccessV1>;
   readonly createArtifactAnnotation: MutationState<ArtifactAnnotationV1>;
   readonly createArtifactAnnotations: MutationState<ArtifactAnnotationBulkResultV1>;
 }
@@ -156,6 +160,9 @@ export interface InvestigationRuntimeCommands {
   ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>) | null;
   readonly applyNamedCoordinationSelf: ((
     command: InvestigationNamedCoordinationSelfCommand,
+  ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>) | null;
+  readonly applyNamedCoordinationParticipant: ((
+    command: InvestigationNamedCoordinationParticipantCommand,
   ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>) | null;
   readonly createArtifactAnnotation: ((
     command: InvestigationArtifactAnnotationCommand,
@@ -688,6 +695,20 @@ export function InvestigationRuntimeProvider({
     onRefreshQueue: operationsQueue.refresh,
     onScopeDenied: activeInvestigation.denyScope,
   });
+  const namedCoordinationParticipantController = useNamedCoordinationParticipant({
+    gateway: coordinationGateway,
+    identityKey,
+    authorityKey,
+    actorIdentityId: identity.id,
+    canRead: capabilities.canRead,
+    canCoordinateParticipants,
+    readOnly,
+    queue: operationsQueue.page,
+    query: operationsQueue.query,
+    requestGeneration: operationsQueue.latestRequestGeneration,
+    onRefreshQueue: operationsQueue.refresh,
+    onScopeDenied: activeInvestigation.denyScope,
+  });
   const refreshAll = useCallback(() => {
     activeInvestigation.refreshAll();
     coordinationController.refresh();
@@ -736,6 +757,7 @@ export function InvestigationRuntimeProvider({
       lifecycle: lifecycleController.state,
       coordination: coordinationController.state,
       namedCoordinationSelf: namedCoordinationSelfController.state,
+      namedCoordinationParticipant: namedCoordinationParticipantController.state,
       createArtifactAnnotation: artifactAnnotationController.state,
       createArtifactAnnotations: artifactAnnotationsBulkController.state,
     },
@@ -797,6 +819,12 @@ export function InvestigationRuntimeProvider({
         && identity.id.length > 0
         && !readOnly
         ? namedCoordinationSelfController.apply
+        : null,
+      applyNamedCoordinationParticipant: capabilities.canRead
+        && canCoordinateParticipants
+        && identity.id.length > 0
+        && !readOnly
+        ? namedCoordinationParticipantController.apply
         : null,
       createArtifactAnnotation: canContribute
         && activeReadyCaseId !== null
@@ -866,6 +894,8 @@ export function InvestigationRuntimeProvider({
     coordinationController.state,
     namedCoordinationSelfController.apply,
     namedCoordinationSelfController.state,
+    namedCoordinationParticipantController.apply,
+    namedCoordinationParticipantController.state,
     readOnly,
     situationCase,
     situationController.state,
