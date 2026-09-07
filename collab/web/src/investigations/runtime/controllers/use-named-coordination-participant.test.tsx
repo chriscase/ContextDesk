@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  GatewayResult,
   InvestigationCoordinationGateway,
 } from "../gateway.js";
 import { makeOperationsQueuePage, makePopulatedCase } from "../testkit/fixtures.js";
@@ -536,5 +537,46 @@ describe("useNamedCoordinationParticipant", () => {
     });
     expect(applyCoordinationAction).toHaveBeenCalledTimes(2);
     expect(onScopeDenied).not.toHaveBeenCalled();
+  });
+
+  it("aborts and ignores an in-flight apply after unmount", async () => {
+    const page = makeOperationsQueuePage();
+    type ApplyResult = GatewayResult<InvestigationCoordinationActionSuccessV1>;
+    let resolveApply: ((result: ApplyResult) => void) | undefined;
+    let requestSignal: AbortSignal | undefined;
+    const applyCoordinationAction = vi.fn((
+      _investigationId: string,
+      _request: unknown,
+      requestOptions: { signal: AbortSignal },
+    ) => {
+      requestSignal = requestOptions.signal;
+      return new Promise<ApplyResult>((resolve) => {
+        resolveApply = resolve;
+      });
+    });
+    const refresh = vi.fn();
+    const { result, unmount } = renderHook(() => useNamedCoordinationParticipant({
+      ...options(page, { getCoordination: vi.fn(), applyCoordinationAction }),
+      onRefreshQueue: refresh,
+    }));
+
+    let outcomePromise: Promise<unknown> | undefined;
+    act(() => {
+      outcomePromise = result.current.apply({
+        investigationId: page.items[0]!.investigation.id,
+        action: "assign_participant",
+        targetIdentityId: ASSIGN_TARGET,
+        idempotencyKey: "unmount-1",
+      });
+    });
+    expect(requestSignal).toBeDefined();
+    unmount();
+    expect(requestSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveApply?.({ ok: true, value: success(page) });
+    });
+    await expect(outcomePromise).resolves.toEqual({ status: "ignored", reason: "stale" });
+    expect(refresh).not.toHaveBeenCalled();
   });
 });
