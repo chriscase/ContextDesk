@@ -56,3 +56,19 @@ export type { EvidenceAnnotationWorkspaceProps } from "./EvidenceAnnotationWorks
 
 export { CollectionPagination } from "./CollectionPagination.js";
 export type { CollectionPageView, CollectionPaginationProps } from "./CollectionPagination.js";
+
+export { HumanAssessmentsPanel } from "./HumanAssessmentsPanel.js";
+export type {
+  HumanAssessmentCitationChoice,
+  HumanAssessmentCreateCommand,
+  HumanAssessmentCreateInput,
+  HumanAssessmentCreateResult,
+  HumanAssessmentLink,
+  HumanAssessmentRecord,
+  HumanAssessmentValue,
+  HumanAssessmentsMutationState,
+  HumanAssessmentsPanelProps,
+  HumanAssessmentsReadError,
+  HumanAssessmentsResourceState,
+  HumanAssessmentsWriteError,
+} from "./HumanAssessmentsPanel.js";

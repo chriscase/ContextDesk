@@ -174,6 +174,89 @@ describe("triage workspace capture paths", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save review" }));
     expect(props.onCorroborate).toHaveBeenCalledWith("r1", "corroborated", "n1");
   });
+
+  it("renders human assessments only immediately after the matching focused imported run", () => {
+    const second: RunRow = { ...sampleRun, id: "r2", outputText: "A second imported output" };
+    const panel = <div data-testid="human-assessments-slot">Human assessments slot</div>;
+    render(<TriageWorkspace {...makeProps({
+      runs: [sampleRun, second],
+      humanAssessmentsPanel: panel,
+      routeFocus: {
+        section: "triage-capture",
+        item: "r1",
+        itemKind: "imported-run",
+        lane: null,
+        experiment: null,
+      },
+    })} />);
+    const firstCard = screen.getByText("The retry loop looks unbounded").closest("article") as HTMLElement;
+    const secondCard = screen.getByText("A second imported output").closest("article") as HTMLElement;
+    const slot = screen.getByTestId("human-assessments-slot");
+    expect(firstCard.nextElementSibling).toBe(slot);
+    expect(secondCard.nextElementSibling).not.toBe(slot);
+    expect(screen.getAllByTestId("human-assessments-slot")).toHaveLength(1);
+  });
+
+  it("does not render human assessments for another kind, unmatched run, or missing panel", () => {
+    const panel = <div data-testid="human-assessments-slot">Human assessments slot</div>;
+    const unmatched = render(<TriageWorkspace {...makeProps({
+      humanAssessmentsPanel: panel,
+      routeFocus: {
+        section: "triage-capture",
+        item: "missing",
+        itemKind: "imported-run",
+        lane: null,
+        experiment: null,
+      },
+    })} />);
+    expect(screen.queryByTestId("human-assessments-slot")).toBeNull();
+    unmatched.unmount();
+
+    const otherKind = render(<TriageWorkspace {...makeProps({
+      humanAssessmentsPanel: panel,
+      routeFocus: {
+        section: "triage-capture",
+        item: "r1",
+        itemKind: "contribution",
+        lane: null,
+        experiment: null,
+      },
+    })} />);
+    expect(screen.queryByTestId("human-assessments-slot")).toBeNull();
+    otherKind.unmount();
+
+    render(<TriageWorkspace {...makeProps({
+      routeFocus: {
+        section: "triage-capture",
+        item: "r1",
+        itemKind: "imported-run",
+        lane: null,
+        experiment: null,
+      },
+    })} />);
+    expect(screen.queryByTestId("human-assessments-slot")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save review" })).toBeTruthy();
+  });
+
+  it("keeps the legacy Save review path unchanged when assessments are present", () => {
+    const props = makeProps({
+      humanAssessmentsPanel: <div>Human assessments slot</div>,
+      routeFocus: {
+        section: "triage-capture",
+        item: "r1",
+        itemKind: "imported-run",
+        lane: null,
+        experiment: null,
+      },
+    });
+    render(<TriageWorkspace {...props} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Supporting record" }), {
+      target: { value: "n1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save review" }));
+    expect(props.onCorroborate).toHaveBeenCalledWith("r1", "corroborated", "n1");
+    expect(props.onCorroborate).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("triage workspace guidance and provenance", () => {

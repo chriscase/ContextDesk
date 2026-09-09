@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { CaseDiscussion } from "./CaseDiscussion.js";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
@@ -773,6 +773,7 @@ export function Cases(props: {
   onCollectionQueryChange?: (query: CollectionQueryLocation) => void;
   onCollectionRefresh?: () => void;
   onCollectionNextPage?: () => void;
+  humanAssessmentsPanel?: ReactNode;
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
@@ -2663,6 +2664,9 @@ export function Cases(props: {
             onAddNote={(event) => void addNote(event)}
             onImportRun={(event) => void importRun(event)}
             onCorroborate={(id, state, linkId) => void corroborate(id, state, linkId)}
+            {...(props.humanAssessmentsPanel === undefined
+              ? {}
+              : { humanAssessmentsPanel: props.humanAssessmentsPanel })}
           />
         </section>
         <section

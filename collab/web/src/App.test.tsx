@@ -2071,3 +2071,167 @@ describe("pathname shell routing", () => {
     expect(window.location.pathname).toBe("/");
   });
 });
+
+describe("War Room human assessments mount", () => {
+  const uuid = "77777777-7777-4777-8777-777777777771";
+  const run1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+  const run2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+
+  function importedRun(
+    id: string,
+    outputText: string,
+    corroborationState = "unverified",
+  ) {
+    return {
+      id,
+      sourceId: "s1",
+      outputText,
+      corroborationState,
+      evidenceVisibility: "unknown",
+      snapshotBinding: null,
+      importerUsername: "dave",
+      operatorUsername: "dave",
+      promptText: null,
+      promptCompleteness: "unknown",
+    };
+  }
+
+  function jsonOk(body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  function stubWarRoomCapture(
+    pathname: string,
+    extra?: (url: string, init?: RequestInit) => Promise<Response> | null,
+  ): FetchStub {
+    window.history.replaceState(null, "", pathname);
+    return stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url, init) => {
+      const handled = extra?.(url, init);
+      if (handled) return handled;
+      if (url === "/api/cases") {
+        return Promise.resolve(jsonOk({
+          cases: [{ id: uuid, title: "Imported output review", status: "open", severity: "high" }],
+        }));
+      }
+      if (url === `/api/cases/${uuid}/timeline`) {
+        return Promise.resolve(jsonOk({ events: [] }));
+      }
+      if (url === `/api/cases/${uuid}/contributions`) {
+        return Promise.resolve(jsonOk({
+          contributions: [{
+            id: "n1",
+            kind: "note",
+            body: "Queue depth spiked at 14:02",
+            privacyClass: "owner_only",
+            tombstoned: false,
+          }],
+        }));
+      }
+      if (url === `/api/cases/${uuid}/imports`) {
+        return Promise.resolve(jsonOk({
+          runs: [
+            importedRun(run1, "First imported output"),
+            importedRun(run2, "Second imported output", "corroborated"),
+          ],
+        }));
+      }
+      if (url === `/api/cases/${uuid}/runs/${run1}/judgments`) {
+        return Promise.resolve(jsonOk({
+          schemaId: "cd-collab.external_run_judgment_list.v1",
+          caseId: uuid,
+          runId: run1,
+          judgments: [],
+        }));
+      }
+      if (url === `/api/cases/${uuid}/imports/${run1}/corroborate`) {
+        return Promise.resolve(jsonOk({ ok: true }));
+      }
+      return null;
+    });
+  }
+
+  it("mounts human assessments only for War Room capture of the focused imported run", async () => {
+    stubWarRoomCapture(
+      `/investigations/${uuid}/capture?section=triage-capture&item=${run1}&kind=imported-run`,
+    );
+    render(<App />);
+    const firstReview = (await screen.findAllByRole("button", { name: "Save review" }))[0];
+    const first = firstReview?.closest("article");
+    expect(first).toBeTruthy();
+    expect(screen.getByText("Second imported output")).toBeTruthy();
+    const heading = await screen.findByRole("heading", { name: "Human assessments" });
+    expect(first?.nextElementSibling?.contains(heading)).toBe(true);
+    expect(screen.getAllByRole("heading", { name: "Human assessments" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Save review" })).toHaveLength(1);
+    expect(await screen.findByText("No human assessment has been recorded yet.")).toBeTruthy();
+  });
+
+  it("does not mount human assessments for another stage or item kind", async () => {
+    stubWarRoomCapture(
+      `/investigations/${uuid}/situation?section=triage-capture&item=${run1}&kind=imported-run`,
+    );
+    const situation = render(<App />);
+    await screen.findByRole("heading", { name: "Situation" });
+    expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
+    situation.unmount();
+
+    stubWarRoomCapture(
+      `/investigations/${uuid}/capture?section=triage-capture&item=n1&kind=contribution`,
+    );
+    render(<App />);
+    await screen.findAllByRole("button", { name: "Save review" });
+    expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Save review" })).toHaveLength(1);
+  });
+
+  it("does not mount human assessments for another strategy", async () => {
+    stubWarRoomCapture(
+      `/investigations/${uuid}/capture?section=triage-capture&item=${run1}&kind=imported-run`,
+      (url) => {
+        if (url === "/api/ui-strategies/effective") {
+          return Promise.resolve(jsonOk({
+            schemaId: "cd-collab.ui_strategy_effective.v1",
+            policyRevision: 1,
+            preferenceRevision: 1,
+            preferredId: "keystone",
+            effectiveId: "keystone",
+            defaultId: "war-room",
+            enabledIds: ["war-room", "keystone"],
+            selectableIds: ["keystone"],
+            canSelect: true,
+            source: "user",
+          }));
+        }
+        return null;
+      },
+    );
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Capture evidence and observations" })).toBeNull();
+    });
+    expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
+    expect(screen.queryByText("First imported output")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save review" })).toBeNull();
+  });
+
+  it("keeps the legacy Save review path and posts the existing corroborate callback", async () => {
+    const stub = stubWarRoomCapture(
+      `/investigations/${uuid}/capture?section=triage-capture&item=${run1}&kind=imported-run`,
+    );
+    render(<App />);
+    await screen.findByRole("heading", { name: "Human assessments" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Supporting record" }), {
+      target: { value: "n1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save review" }));
+    await waitFor(() => {
+      expect(stub).toHaveBeenCalledWith(
+        `/api/cases/${uuid}/imports/${run1}/corroborate`,
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+  });
+});

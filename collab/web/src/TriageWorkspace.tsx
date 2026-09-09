@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ImportedRun } from "./ImportedRun.js";
 import type { WorkFocus } from "./app-location.js";
 import { CorpusIntakePanel } from "./CorpusIntakePanel.js";
@@ -194,6 +194,7 @@ export function TriageWorkspace(props: {
   onAddNote: (event: FormEvent<HTMLFormElement>) => void;
   onImportRun: (event: FormEvent<HTMLFormElement>) => void;
   onCorroborate: (id: string, state: "corroborated" | "contradicted", linkId: string) => void;
+  humanAssessmentsPanel?: ReactNode;
 }) {
   // Only an explicitly retired source is excluded from new intake; a source with
   // no recorded lifecycle stays selectable rather than being guessed retired. The
@@ -623,18 +624,25 @@ export function TriageWorkspace(props: {
             {props.runs.length === 0 ? (
               <p className="case-memory__empty">No external output has been imported yet.</p>
             ) : (
-              props.runs.map((run) => (
-                <ImportedRun
-                  key={run.id}
-                  run={run}
-                  // Attribution searches the full catalog, retired sources included:
-                  // a run recorded against a since-retired source keeps its name/kind.
-                  source={props.sources.find((source) => source.id === run.sourceId) ?? null}
-                  linkOptions={reviewLinks}
-                  canCorroborate={props.canWrite}
-                  onCorroborate={props.onCorroborate}
-                />
-              ))
+              props.runs.map((run) => {
+                const focusedImportedRun = props.routeFocus?.itemKind === "imported-run"
+                  && props.routeFocus.item === run.id
+                  && props.humanAssessmentsPanel !== undefined;
+                return (
+                  <Fragment key={run.id}>
+                    <ImportedRun
+                      run={run}
+                      // Attribution searches the full catalog, retired sources included:
+                      // a run recorded against a since-retired source keeps its name/kind.
+                      source={props.sources.find((source) => source.id === run.sourceId) ?? null}
+                      linkOptions={reviewLinks}
+                      canCorroborate={props.canWrite}
+                      onCorroborate={props.onCorroborate}
+                    />
+                    {focusedImportedRun ? props.humanAssessmentsPanel : null}
+                  </Fragment>
+                );
+              })
             )}
           </div>
         </section>

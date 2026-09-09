@@ -382,6 +382,10 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
   const sharedIndexModule = resolve(sharedRoot, "index");
   const runtimeHandoffModule = resolve(strategiesRoot, "runtime-handoff");
   const runtimeCoordinationModule = resolve(strategiesRoot, "runtime-coordination");
+  const runtimeExternalRunJudgmentsModule = resolve(
+    strategiesRoot,
+    "runtime-external-run-judgments",
+  );
   const collectionQueryAdapterModule = resolve(strategiesRoot, "collection-query");
 
   const relativeInvestigationPath = relative(INVESTIGATIONS_ROOT, path).split(sep).join("/");
@@ -391,15 +395,19 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
   const strategyMatch = /^strategies\/([^/]+)\//.exec(relativeInvestigationPath);
   const strategyId = strategyMatch?.[1] ?? null;
   const isRuntimeCoordinationAdapter = sameModule(path, runtimeCoordinationModule);
+  const isRuntimeExternalRunJudgmentsAdapter = sameModule(
+    path,
+    runtimeExternalRunJudgmentsModule,
+  );
 
   for (const imported of importsOf(source)) {
     const resolvedModule = modulePath(path, imported.module);
     const location = `${repositoryPath(path)}:${imported.line}`;
     const importsProtectedApi = /(?:^|\/)protected-api(?:\.js)?$/.test(imported.module);
 
-    // This adapter lives directly under strategies/, so it has no strategyId
+    // These adapters live directly under strategies/, so they have no strategyId
     // and cannot inherit the directory-scoped strategy import rule below. Keep
-    // its complete dependency surface explicit and fail closed as it evolves.
+    // their complete dependency surface explicit and fail closed as they evolve.
     if (
       isRuntimeCoordinationAdapter
       && imported.module !== "react"
@@ -413,6 +421,22 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
     ) {
       violations.push(
         `${location} imports ${imported.module}, which is not an approved root runtime-coordination adapter dependency`,
+      );
+    }
+
+    if (
+      isRuntimeExternalRunJudgmentsAdapter
+      && imported.module !== "react"
+      && !(
+        resolvedModule
+        && (
+          sameModule(resolvedModule, publicModule)
+          || sameModule(resolvedModule, sharedIndexModule)
+        )
+      )
+    ) {
+      violations.push(
+        `${location} imports ${imported.module}, which is not an approved root runtime-external-run-judgments adapter dependency`,
       );
     }
 
@@ -933,6 +957,54 @@ describe("Investigation Runtime V1 dependency boundary", () => {
       expect(adapterViolations, `${specifier} escaped the root adapter allowlist`).toHaveLength(1);
       expect(adapterViolations[0]).toContain(`imports ${specifier},`);
     }
+  });
+
+  it("keeps the root runtime-external-run-judgments adapter on public Runtime plus shared presentation", () => {
+    const adapterPath = resolve(
+      INVESTIGATIONS_ROOT,
+      "strategies/runtime-external-run-judgments.tsx",
+    );
+    const adapterSourceText = readFileSync(adapterPath, "utf8");
+
+    expect(
+      investigationImportViolations(adapterPath, parseSourceText(adapterPath, adapterSourceText)),
+      "the adapter's present imports must remain inside its exact allowlist",
+    ).toEqual([]);
+    expect(
+      strategyRouteViolations(adapterPath, parseSourceText(adapterPath, adapterSourceText)),
+      "the adapter must not name a browser transport or raw investigation route",
+    ).toEqual([]);
+
+    const forbiddenImports = [
+      "../runtime/controllers/use-external-run-judgments.js",
+      "../runtime/gateway.js",
+      "../../protected-api.js",
+      "../../../../server/src/index.js",
+      "./keystone/KeystoneStrategy.js",
+    ] as const;
+    for (const specifier of forbiddenImports) {
+      const mutatedSource = parseSourceText(
+        adapterPath,
+        `${adapterSourceText}\nimport ${JSON.stringify(specifier)};`,
+      );
+      const adapterViolations = investigationImportViolations(adapterPath, mutatedSource)
+        .filter((violation) => violation.includes(
+          "not an approved root runtime-external-run-judgments adapter dependency",
+        ));
+
+      expect(adapterViolations, `${specifier} escaped the root adapter allowlist`).toHaveLength(1);
+      expect(adapterViolations[0]).toContain(`imports ${specifier},`);
+    }
+
+    const fetchLine = adapterSourceText.split("\n").length + 1;
+    const bypass = parseSourceText(
+      adapterPath,
+      `${adapterSourceText}\nexport const direct = (route: string) => fetch(route);\nexport const raw = "/api/cases/\${}/runs/\${}/judgments";`,
+    );
+    expect(strategyRouteViolations(adapterPath, bypass)).toEqual([
+      `collab/web/src/investigations/strategies/runtime-external-run-judgments.tsx:${fetchLine} references reserved browser transport fetch from a strategy`,
+      `collab/web/src/investigations/strategies/runtime-external-run-judgments.tsx:${fetchLine + 1} contains a raw investigation API route`,
+    ]);
   });
 
   it("rejects a production import of either testkit and allows test-only use", () => {
