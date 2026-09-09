@@ -171,7 +171,11 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
         resourceKind: event.kind === "run_corroboration" ? "imported_ai_run" : "evidence_item",
         resourceId: target,
         provenance: event.kind === "run_corroboration" ? "human" : "system",
-        summary: event.kind === "run_corroboration" ? "reviewed imported analysis" : "reviewed evidence",
+        summary: event.kind === "run_corroboration"
+          ? "reviewed imported analysis"
+          : event.kind === "evidence_attributed"
+            ? "attributed existing evidence"
+            : "rechecked evidence integrity",
         humanFinding: false,
         revision: null,
         workstreamId: null,
