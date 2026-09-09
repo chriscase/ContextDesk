@@ -20,6 +20,8 @@ type CoveredRuntimeOperation =
   | "POST lifecycle"
   | "GET coordination"
   | "POST coordination"
+  | "GET run judgments"
+  | "POST run judgments"
   | "PATCH situation";
 
 /**
@@ -170,6 +172,9 @@ function coveredOperation(
   }
   if (/^\/api\/cases\/\$\{\}\/coordination$/.test(route)) {
     if (method === "GET" || method === "POST") return `${method} coordination`;
+  }
+  if (/^\/api\/cases\/\$\{\}\/runs\/\$\{\}\/judgments$/.test(route)) {
+    if (method === "GET" || method === "POST") return `${method} run judgments`;
   }
   return null;
 }
@@ -665,6 +670,22 @@ describe("Investigation Runtime V1 dependency boundary", () => {
     );
     expect(drift).toEqual([
       "collab/web/src/UnexpectedRuntimeBypass.ts: expected [], observed [GET cases]",
+    ]);
+
+    const judgmentPath = resolve(WEB_SRC, "UnexpectedJudgmentBypass.ts");
+    const judgmentSource = parseSourceText(
+      judgmentPath,
+      [
+        'import { protectedApiFetch } from "./protected-api.js";',
+        "export const read = (caseId: string, runId: string) => protectedApiFetch(`/api/cases/${caseId}/runs/${runId}/judgments`);",
+        "export const write = (caseId: string, runId: string) => protectedApiFetch(`/api/cases/${caseId}/runs/${runId}/judgments`, { method: \"POST\" });",
+      ].join("\n"),
+    );
+    expect(debtDrift(
+      coveredOperationDebt([{ path: judgmentPath, source: judgmentSource }]),
+      {},
+    )).toEqual([
+      "collab/web/src/UnexpectedJudgmentBypass.ts: expected [], observed [GET run judgments, POST run judgments]",
     ]);
 
     const strategyPath = resolve(INVESTIGATIONS_ROOT, "strategies/example/Example.tsx");

@@ -24,6 +24,10 @@ import {
   INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
   INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
 } from "@cd-collab/contracts/investigation-operations-queue";
+import {
+  EXTERNAL_RUN_JUDGMENT_CONFLICT_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_REFUSED_SCHEMA_ID,
+} from "@cd-collab/contracts/external-run-judgment";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUTH_LOST_EVENT } from "../../protected-api.js";
 import {
@@ -32,6 +36,7 @@ import {
   investigationBulkAnnotationGateway,
   investigationCollectionQueryGateway,
   investigationCoordinationGateway,
+  investigationExternalRunJudgmentGateway,
   investigationOperationsQueueGateway,
   investigationWriteGateway,
   parseInvestigationCollectionQueryInput,
@@ -48,6 +53,7 @@ import {
 import { createInvestigationGatewayDouble } from "./testkit/gateway-double.js";
 import {
   RUNTIME_FIXTURE_IDS,
+  RUNTIME_JUDGMENT_FIXTURE_IDS,
   RUNTIME_BULK_ANNOTATION_FIXTURE_IDS,
   makeArchiveAllowedLifecycle,
   makeArchiveRefusedLifecycle,
@@ -56,6 +62,8 @@ import {
   makeContributionList,
   makeEvidenceList,
   makeEvidenceUploadSuccess,
+  makeExternalRunJudgmentList,
+  makeExternalRunJudgmentSuccess,
   makeOperationsQueuePage,
   makePopulatedCase,
 } from "./testkit/fixtures.js";
@@ -71,6 +79,170 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
+
+describe("external run judgment transport", () => {
+  const { caseId, runId } = RUNTIME_JUDGMENT_FIXTURE_IDS;
+  const options = () => ({ signal: new AbortController().signal });
+  const input = {
+    expectedSequence: 0,
+    judgment: "insufficient_evidence" as const,
+    links: [] as const,
+    rationale: "More recorded evidence is required.",
+    idempotencyKey: "judgment-runtime-0001",
+  };
+
+  it("resolves the optional pair together and fails older gateways closed", async () => {
+    const legacy = createInvestigationGatewayDouble();
+    const unavailable = investigationExternalRunJudgmentGateway(legacy);
+    await expect(unavailable.listExternalRunJudgments(caseId, runId, options())).resolves.toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503 },
+    });
+    const half = {
+      ...legacy,
+      listExternalRunJudgments: vi.fn(async () => ({
+        ok: true,
+        value: makeExternalRunJudgmentList(),
+      } as const)),
+    };
+    expect(investigationExternalRunJudgmentGateway(half)).toBe(unavailable);
+    expect(half.listExternalRunJudgments).not.toHaveBeenCalled();
+  });
+
+  it("GETs the exact run route and rejects an envelope identity mismatch", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(makeExternalRunJudgmentList()))
+      .mockResolvedValueOnce(jsonResponse(makeExternalRunJudgmentList({
+        runId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      })));
+    const result = await investigationGateway.listExternalRunJudgments(caseId, runId, options());
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `/api/cases/${encodeURIComponent(caseId)}/runs/${encodeURIComponent(runId)}/judgments`,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(Object.isFrozen(result.value.judgments)).toBe(true);
+    await expect(investigationGateway.listExternalRunJudgments(caseId, runId, options()))
+      .resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+  });
+
+  it("POSTs only the strict intent and distinguishes fresh and replay success", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(makeExternalRunJudgmentSuccess(), 201))
+      .mockResolvedValueOnce(jsonResponse(makeExternalRunJudgmentSuccess({ replayed: true }), 200));
+    await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+      .resolves.toMatchObject({ ok: true, value: { replayed: false } });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      schemaId: "cd-collab.external_run_judgment_request.v1",
+      caseId,
+      runId,
+      expectedSequence: 0,
+      idempotencyKey: input.idempotencyKey,
+      judgment: input.judgment,
+      links: [],
+      rationale: input.rationale,
+    });
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+    await expect(investigationGateway.createExternalRunJudgment(
+      caseId,
+      runId,
+      { ...input, expectedSequence: 99 },
+      options(),
+    )).resolves.toMatchObject({ ok: true, value: { replayed: true } });
+  });
+
+  it("fails closed on malformed, non-JSON, identity, or status/replay mismatches", async () => {
+    const privateMarker = "private-server-detail";
+    const success = makeExternalRunJudgmentSuccess();
+    const otherCaseId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const otherCaseSuccess = {
+      ...success,
+      caseId: otherCaseId,
+      applied: { ...success.applied, caseId: otherCaseId },
+      run: { ...success.run, caseId: otherCaseId },
+    };
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({}, 200))
+      .mockResolvedValueOnce(new Response("not JSON", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      }))
+      .mockResolvedValueOnce(jsonResponse(otherCaseSuccess, 201))
+      .mockResolvedValueOnce(jsonResponse(makeExternalRunJudgmentSuccess(), 200))
+      .mockResolvedValueOnce(jsonResponse(makeExternalRunJudgmentSuccess({ replayed: true }), 201))
+      .mockResolvedValueOnce(jsonResponse({ error: "internal", detail: privateMarker }, 500));
+
+    await expect(investigationGateway.listExternalRunJudgments(caseId, runId, options()))
+      .resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "contract" } });
+    await expect(investigationGateway.listExternalRunJudgments(caseId, runId, options()))
+      .resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "content_type" } });
+    await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+      .resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+    await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+      .resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+    await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+      .resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+    const failure = await investigationGateway.createExternalRunJudgment(
+      caseId,
+      runId,
+      input,
+      options(),
+    );
+    expect(failure).toEqual({ ok: false, error: { kind: "server_failure", status: 500 } });
+    expect(JSON.stringify(failure)).not.toContain(privateMarker);
+  });
+
+  it("parses bounded conflict, refusal, limit, and unknown-outcome failures", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({
+        schemaId: EXTERNAL_RUN_JUDGMENT_CONFLICT_SCHEMA_ID,
+        caseId,
+        runId,
+        expectedSequence: 0,
+        currentSequence: 1,
+      }, 409))
+      .mockResolvedValueOnce(jsonResponse({
+        schemaId: EXTERNAL_RUN_JUDGMENT_REFUSED_SCHEMA_ID,
+        error: "external_run_judgment_refused",
+        caseId,
+        runId,
+        reason: "links_required",
+        detail: "Recorded links are required.",
+        current: null,
+      }, 409))
+      .mockResolvedValueOnce(jsonResponse({ error: "judgment_limit_reached" }, 413))
+      .mockResolvedValueOnce(jsonResponse({ error: "commit_outcome_unknown" }, 503));
+    await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+      .resolves.toMatchObject({ ok: false, error: { kind: "judgment_conflict" } });
+    await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+      .resolves.toMatchObject({ ok: false, error: { kind: "judgment_refused" } });
+    await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+      .resolves.toEqual({ ok: false, error: { kind: "judgment_limit_reached", status: 413 } });
+    await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+      .resolves.toEqual({
+        ok: false,
+        error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+      });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([401, 403] as const)(
+    "classifies global auth loss %i before reading a misleading private body",
+    async (status) => {
+      let bodyRead = false;
+      const response = new Response(null, { status });
+      Object.defineProperty(response, "body", {
+        get() {
+          bodyRead = true;
+          throw new Error("private response body");
+        },
+      });
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+      await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+        .resolves.toEqual({ ok: false, error: { kind: "auth_lost", status } });
+      expect(bodyRead).toBe(false);
+    },
+  );
+});
 
 describe("investigation coordination transport", () => {
   const investigationId = RUNTIME_FIXTURE_IDS.populatedCase;
