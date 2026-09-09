@@ -1112,29 +1112,163 @@ describe("Investigation First Runtime V1 presentation", () => {
     );
   });
 
-  it("states that an unknown upload outcome was not confirmed and does not invite a blind retry", async () => {
-    const gateway = createInvestigationGatewayDouble({
-      uploadEvidence: vi.fn(async () => ({
+  it("blocks an unknown upload until authoritative refresh enables one explicit retry", async () => {
+    const refresh = createDeferred<GatewayResult<readonly ArtifactV1[]>>();
+    let evidenceReads = 0;
+    const listEvidence = vi.fn(() => {
+      evidenceReads += 1;
+      return evidenceReads === 2
+        ? refresh.promise
+        : Promise.resolve(gatewayOk(makeEvidenceList().artifacts));
+    });
+    const uploadEvidence = vi.fn()
+      .mockResolvedValueOnce({
         ok: false as const,
         error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
-      })),
+      })
+      .mockResolvedValueOnce(gatewayOk(makeEvidenceUploadSuccess()));
+    const gateway = createInvestigationGatewayDouble({
+      listEvidence,
+      uploadEvidence,
     });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
-    fireEvent.change(screen.getByLabelText("File"), {
-      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
-    });
-    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), {
-      target: { value: "Operator notes" },
-    });
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    const fileInput = screen.getByLabelText("File") as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    const summary = screen.getByPlaceholderText("What is this file and why does it matter?") as HTMLInputElement;
+    fireEvent.change(summary, { target: { value: "Operator notes" } });
     fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/not confirmed/i);
     expect(alert.textContent).toMatch(/being refreshed/i);
     expect(alert.textContent).toMatch(/check it before uploading again/i);
-    expect(alert.textContent).not.toMatch(/try again/i);
+    expect(alert.textContent).toMatch(/not confirmation.*stored or rolled back/isu);
+    expect(uploadEvidence).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(gateway.listEvidence).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(vi.mocked(gateway.listInvestigations).mock.calls.length).toBeGreaterThan(1));
+    const blocked = screen.getByRole("button", { name: "Upload blocked until inventory refresh" });
+    expect((blocked as HTMLButtonElement).disabled).toBe(true);
+    expect(fileInput.files?.[0]).toBe(file);
+    expect(summary.value).toBe("Operator notes");
+    fireEvent.submit(blocked.closest("form")!);
+    expect(uploadEvidence).toHaveBeenCalledTimes(1);
+
+    await act(async () => refresh.resolve(gatewayOk(makeEvidenceList().artifacts)));
+    const retry = await screen.findByRole("button", { name: "Retry upload after checking inventory" });
+    fireEvent.click(retry);
+    await waitFor(() => expect(uploadEvidence).toHaveBeenCalledTimes(2));
+    expect(uploadEvidence.mock.calls[1]?.[1]).toEqual(uploadEvidence.mock.calls[0]?.[1]);
+    expect(uploadEvidence.mock.calls[1]?.[1]).toMatchObject({
+      filename: "notes.txt",
+      kind: "attachment",
+      privacyClass: "owner_only",
+      summary: "Operator notes",
+    });
+  });
+
+  it("clears a reconciled upload before another focused investigation can use it", async () => {
+    const secondCaseId = "33333333-3333-4333-8333-333333333333";
+    const firstCase = { ...makePopulatedCase(), title: "First focused investigation" };
+    const secondCase = { ...makePopulatedCase(), id: secondCaseId, title: "Second focused investigation" };
+    const getInvestigation = vi.fn(async (caseId: string) => gatewayOk(caseId === secondCaseId ? secondCase : firstCase));
+    const uploadEvidence = vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
+    }));
+    const { rerender } = renderStrategy({
+      gateway: createInvestigationGatewayDouble({
+        listInvestigations: vi.fn(async () => gatewayOk([firstCase, secondCase])),
+        getInvestigation,
+        uploadEvidence,
+      }),
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByRole("heading", { name: "First focused investigation" });
+    fireEvent.change(screen.getByLabelText("File"), { target: { files: [new File(["case A"], "case-a.log")] } });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), { target: { value: "Only for case A." } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+
+    await screen.findByRole("button", { name: "Retry upload after checking inventory" });
+    rerender({ focusCaseId: secondCaseId });
+    await screen.findByRole("heading", { name: "Second focused investigation" });
+    expect(screen.queryByRole("button", { name: /Retry upload|Upload blocked/u })).toBeNull();
+    expect((screen.getByPlaceholderText("What is this file and why does it matter?") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("File") as HTMLInputElement).files).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+    expect(uploadEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores an unknown upload completion after its authority scope changes", async () => {
+    const completion = createDeferred<GatewayResult<ReturnType<typeof makeEvidenceUploadSuccess>>>();
+    const uploadEvidence = vi.fn(() => completion.promise);
+    const { rerender } = renderStrategy({
+      gateway: createInvestigationGatewayDouble({ uploadEvidence }),
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    fireEvent.change(screen.getByLabelText("File"), { target: { files: [new File(["old"], "old.log")] } });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), { target: { value: "Old authority." } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+    await waitFor(() => expect(uploadEvidence).toHaveBeenCalledTimes(1));
+
+    rerender({}, { authorityKey: "alice-authority-v2" });
+    await act(async () => completion.resolve({
+      ok: false,
+      error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+    }));
+    expect(screen.queryByRole("button", { name: /Retry upload|Upload blocked/u })).toBeNull();
+    expect(screen.queryByText(/upload result was not confirmed/iu)).toBeNull();
+    expect(uploadEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an unknown upload blocked and preserves its draft after refresh failure", async () => {
+    let evidenceReads = 0;
+    const listEvidence = vi.fn(async () => {
+      evidenceReads += 1;
+      return evidenceReads === 1
+        ? gatewayOk(makeEvidenceList().artifacts)
+        : gatewayUnavailable<readonly ArtifactV1[]>();
+    });
+    const uploadEvidence = vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
+    }));
+    const gateway = createInvestigationGatewayDouble({ listEvidence, uploadEvidence });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    const fileInput = screen.getByLabelText("File") as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    const summary = screen.getByPlaceholderText("What is this file and why does it matter?") as HTMLInputElement;
+    fireEvent.change(summary, { target: { value: "Operator notes" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+
+    const blocked = await screen.findByRole("button", { name: "Upload blocked until inventory refresh" });
+    expect((blocked as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(screen.getAllByRole("alert").some((candidate) => /could not be refreshed.*not confirmation.*stored or rolled back/isu.test(candidate.textContent ?? ""))).toBe(true));
+    expect(fileInput.files?.[0]).toBe(file);
+    expect(summary.value).toBe("Operator notes");
+    fireEvent.submit(blocked.closest("form")!);
+    expect(uploadEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not put an ordinary unavailable upload behind the unknown reconciliation gate", async () => {
+    const uploadEvidence = vi.fn(async () => gatewayUnavailable<ReturnType<typeof makeEvidenceUploadSuccess>>());
+    const gateway = createInvestigationGatewayDouble({ uploadEvidence });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    const fileInput = screen.getByLabelText("File") as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] } });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), { target: { value: "Operator notes" } });
+    const submit = screen.getByRole("button", { name: "Add to evidence inventory" });
+    fireEvent.click(submit);
+    await waitFor(() => expect(uploadEvidence).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("alert").textContent).toMatch(/could not be loaded right now.*try again/isu);
+    expect(screen.getByRole("alert").textContent).not.toMatch(/not confirmed|stored or rolled back/iu);
+    expect((screen.getByRole("button", { name: "Add to evidence inventory" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() => expect(uploadEvidence).toHaveBeenCalledTimes(2));
   });
 
   it("suppresses every mutation affordance for viewers and static read-only builds", async () => {
