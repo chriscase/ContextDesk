@@ -49,15 +49,19 @@ describe.skipIf(!adminUrl())("PostgreSQL external-run judgment atomicity", () =>
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);
       const pool = new Pool({ connectionString: url, max: 6 });
-      const sql: { connection: number; statement: string }[] = [];
+      const sql: { connection: number; transaction: number; statement: string }[] = [];
       let nextConnection = 0;
       pool.on("connect", (connected) => {
         const connection = ++nextConnection;
+        let transaction = 0;
         const originalQuery = connected.query.bind(connected);
         connected.query = ((...args: Parameters<typeof connected.query>) => {
+          const statement = typeof args[0] === "string" ? args[0] : String(args[0]);
+          if (statement === "BEGIN") transaction += 1;
           sql.push({
             connection,
-            statement: typeof args[0] === "string" ? args[0] : String(args[0]),
+            transaction,
+            statement,
           });
           return originalQuery(...args);
         }) as typeof connected.query;
@@ -90,13 +94,14 @@ describe.skipIf(!adminUrl())("PostgreSQL external-run judgment atomicity", () =>
           .toEqual([false, true]);
         expect(await runs.listJudgments(RUN_ID)).toHaveLength(1);
 
-        const mutationConnections = new Set(
+        const mutationTransactions = new Set(
           sql.filter(({ statement }) => statement.includes("pg_advisory_xact_lock"))
-            .map(({ connection }) => connection),
+            .map(({ connection, transaction }) => `${connection}:${transaction}`),
         );
-        expect(mutationConnections.size).toBeGreaterThan(0);
-        for (const connection of mutationConnections) {
-          const statements = sql.filter((row) => row.connection === connection)
+        expect(mutationTransactions.size).toBe(2);
+        const transactionTraces = [...mutationTransactions].map((transactionKey) => {
+          const statements = sql.filter(({ connection, transaction }) =>
+            `${connection}:${transaction}` === transactionKey)
             .map((row) => row.statement);
           const caseLock = statements.findIndex((statement) =>
             statement.includes("SELECT id FROM cases WHERE id = $1 FOR UPDATE"));
@@ -111,8 +116,21 @@ describe.skipIf(!adminUrl())("PostgreSQL external-run judgment atomicity", () =>
           expect(advisory).toBeGreaterThan(caseLock);
           expect(intentRead).toBeGreaterThan(advisory);
           expect(statements[intentRead]).not.toContain("FOR UPDATE");
-          expect(runReload).toBeGreaterThan(intentRead);
-        }
+          return { statements, intentRead, runReload };
+        });
+        const freshWrites = transactionTraces.filter(({ statements }) =>
+          statements.some((statement) => statement.includes("INSERT INTO external_run_judgments")),
+        );
+        const replays = transactionTraces.filter(({ statements }) =>
+          !statements.some((statement) => statement.includes("INSERT INTO external_run_judgments")),
+        );
+        expect(freshWrites).toHaveLength(1);
+        expect(replays).toHaveLength(1);
+        const freshWrite = freshWrites[0];
+        const replay = replays[0];
+        if (!freshWrite || !replay) throw new Error("expected one fresh write and one replay");
+        expect(freshWrite.runReload).toBeGreaterThan(freshWrite.intentRead);
+        expect(replay.runReload).toBe(-1);
 
         const contenders = await Promise.allSettled([
           imports.addRunJudgment(
@@ -166,7 +184,8 @@ describe.skipIf(!adminUrl())("PostgreSQL external-run judgment atomicity", () =>
         const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
         const audit = new PgAuditStore(pool);
         const catalog = new CatalogService(new PgCatalogStore(pool), audit);
-        const cases = new CaseService(evidence, audit, new PgCaseStore(pool), catalog);
+        const caseStore = new PgCaseStore(pool);
+        const cases = new CaseService(evidence, audit, caseStore, catalog);
         const runs = new PgRunStore(pool);
         const imports = new ImportService({ evidence, audit, cases, catalog, runs });
         const created = await cases.createCase(ACTOR, { title: "PG judgment outcome" }, "test");
@@ -218,6 +237,12 @@ describe.skipIf(!adminUrl())("PostgreSQL external-run judgment atomicity", () =>
         );
         expect(parseExternalRunJudgmentSuccess(replay).replayed).toBe(true);
         expect(await runs.listJudgments(RUN_ID)).toHaveLength(1);
+        expect((await caseStore.listTimeline(created.id)).filter(
+          (event) => event.kind === "external_run_judgment_recorded",
+        )).toHaveLength(1);
+        expect((await audit.list({ action: "external_run_judgment_recorded" })).filter(
+          (event) => event.outcome === "success",
+        )).toHaveLength(1);
       } finally {
         await pool.end();
         await rm(root, { recursive: true, force: true });

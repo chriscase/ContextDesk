@@ -513,6 +513,11 @@ describe("external run human judgment HTTP and memory core", () => {
   it("enforces route identity, concealment, authentication, capability-before-read, and the list cap", async () => {
     await withApp(async (context) => {
       const created = await seedCaseAndRun(context, { privacyClass: "owner_only" });
+      const createdEvent = (await context.caseStore.listTimeline(created.id)).find(
+        (event) => event.kind === "case_created",
+      );
+      expect(createdEvent?.actorId).toBe(ALICE.id);
+      expect(createdEvent?.actorId).not.toMatch(/^usr-/);
       const getSpy = vi.spyOn(context.runs, "get");
       const listSpy = vi.spyOn(context.runs, "listJudgments");
       const ownerGet = await getJudgments(context.app, context.alice, created.id);
