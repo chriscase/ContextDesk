@@ -37,6 +37,21 @@ export interface RunRow {
   operatorUsername: string;
   promptText: string | null;
   promptCompleteness: string;
+  /** Existing ExternalRunV1 fields are optional here for legacy embedded rows. */
+  outputCompleteness?: string;
+  workflowCompleteness?: string;
+  visibilityNote?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  version?: string | null;
+  claimedTraces?: string[];
+  evidenceArtifactIds?: string[];
+  uncertainty?: string | null;
+  timing?: string | null;
+  cost?: string | null;
+  redacted?: boolean;
+  privacyClass?: string;
+  createdAt?: string;
 }
 
 export interface SourceOption {
@@ -632,6 +647,7 @@ export function TriageWorkspace(props: {
                   <Fragment key={run.id}>
                     <ImportedRun
                       run={run}
+                      focused={focusedImportedRun}
                       // Attribution searches the full catalog, retired sources included:
                       // a run recorded against a since-retired source keeps its name/kind.
                       source={props.sources.find((source) => source.id === run.sourceId) ?? null}
