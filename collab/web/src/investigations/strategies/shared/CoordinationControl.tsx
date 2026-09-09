@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   createCoordinationIdempotencyKey,
   selectCoordinationResourceView,
@@ -159,7 +159,11 @@ export function CoordinationControl(props: CoordinationControlProps) {
     props.canCoordinateParticipants ? "participants" : "",
   ].join("\u0000");
 
-  useEffect(() => {
+  // Reset scope-bound intent before the browser can expose the new scope's
+  // controls. A passive mount reset can otherwise race the first click after
+  // an asynchronously loaded detail becomes interactive and erase the
+  // confirmation that click just opened.
+  useLayoutEffect(() => {
     generationRef.current += 1;
     busyRef.current = false;
     setSubmitting(false);

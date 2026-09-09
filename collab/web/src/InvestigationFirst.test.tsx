@@ -226,7 +226,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     claim.focus();
     fireEvent.click(claim);
     expect(applyCoordinationAction).not.toHaveBeenCalled();
-    const confirmClaim = await screen.findByRole("button", { name: "Confirm claim coordination" }, { timeout: 10000 });
+    const confirmClaim = screen.getByRole("button", { name: "Confirm claim coordination" });
     confirmClaim.focus();
     fireEvent.click(confirmClaim);
     await waitFor(() => expect(applyCoordinationAction).toHaveBeenCalledTimes(1));
@@ -342,7 +342,7 @@ describe("Investigation First Runtime V1 presentation", () => {
       });
 
       fireEvent.click(await screen.findByRole("button", { name: "Claim coordination" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Confirm claim coordination" }, { timeout: 10000 }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm claim coordination" }));
       expect(await screen.findByText(/may have been recorded/iu)).toBeTruthy();
       expect(screen.getByRole("button", { name: "Retry exact action" })).toBeTruthy();
       expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
@@ -391,7 +391,7 @@ describe("Investigation First Runtime V1 presentation", () => {
       });
       renderStrategy({ gateway, shell: { focusCaseId: current.id } });
       fireEvent.click(await screen.findByRole("button", { name: "Claim coordination" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Confirm claim coordination" }, { timeout: 5000 }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm claim coordination" }));
       const alert = await screen.findByRole("alert");
       expect(alert.textContent).toMatch(/current recorded facts/iu);
       if (kind === "coordination_refused") {
@@ -416,7 +416,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     });
     renderStrategy({ gateway, shell: { focusCaseId: current.id } });
     fireEvent.click(await screen.findByRole("button", { name: "Claim coordination" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Confirm claim coordination" }, { timeout: 5000 }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm claim coordination" }));
     expect(await screen.findByRole("heading", { name: "Investigation unavailable" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Coordination" })).toBeNull();
   }, 10000);
