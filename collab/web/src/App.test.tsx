@@ -2187,7 +2187,9 @@ describe("War Room human assessments mount", () => {
     expect(screen.getAllByRole("button", { name: "Save review" })).toHaveLength(1);
   });
 
-  it("does not mount human assessments for another strategy", async () => {
+  it.each(["keystone", "investigation-first", "beacon"] as const)(
+    "does not mount human assessments for the %s strategy",
+    async (strategyId) => {
     stubWarRoomCapture(
       `/investigations/${uuid}/capture?section=triage-capture&item=${run1}&kind=imported-run`,
       (url) => {
@@ -2196,11 +2198,11 @@ describe("War Room human assessments mount", () => {
             schemaId: "cd-collab.ui_strategy_effective.v1",
             policyRevision: 1,
             preferenceRevision: 1,
-            preferredId: "keystone",
-            effectiveId: "keystone",
+            preferredId: strategyId,
+            effectiveId: strategyId,
             defaultId: "war-room",
-            enabledIds: ["war-room", "keystone"],
-            selectableIds: ["keystone"],
+            enabledIds: ["war-room", strategyId],
+            selectableIds: [strategyId],
             canSelect: true,
             source: "user",
           }));
@@ -2215,6 +2217,14 @@ describe("War Room human assessments mount", () => {
     expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
     expect(screen.queryByText("First imported output")).toBeNull();
     expect(screen.queryByRole("button", { name: "Save review" })).toBeNull();
+    },
+  );
+
+  it("does not mount human assessments on the War Room Overview", async () => {
+    stubWarRoomCapture("/");
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
   });
 
   it("keeps the legacy Save review path and posts the existing corroborate callback", async () => {

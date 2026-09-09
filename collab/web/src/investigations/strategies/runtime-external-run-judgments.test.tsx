@@ -206,10 +206,32 @@ describe("runtime external run judgments adapter", () => {
     expect(query).toHaveBeenCalledWith(RUN_A);
   });
 
-  it("makes zero query calls when the command is null", () => {
-    const query = vi.fn();
-    renderFor(RUN_A, makeRuntime({ query: null, runId: null }));
-    expect(query).not.toHaveBeenCalled();
+  it("makes zero query calls and conceals matching stale data when the command is null", () => {
+    renderFor(RUN_A, makeRuntime({
+      query: null,
+      runId: RUN_A,
+      judgments: {
+        status: "ready",
+        value: list({
+          judgments: [{
+            schemaId: "cd-collab.external_run_judgment.v1",
+            caseId: "11111111-1111-4111-8111-111111111111",
+            runId: RUN_A,
+            seq: 1,
+            judgment: "corroborates",
+            actor: { id: "id-1", username: "stale-actor" },
+            links: [],
+            rationale: "Stale rationale must disappear.",
+            recordedAt: "2026-09-09T12:00:00.000Z",
+          }],
+        }),
+      },
+      mutation: { status: "running" },
+    }));
+    expect(screen.queryByText("Stale rationale must disappear.")).toBeNull();
+    expect(screen.queryByText("Recording the assessment once…")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Record assessment" })).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("could not be loaded right now");
   });
 
   it("masks a resource whose run id does not match the focused run", () => {
@@ -367,6 +389,108 @@ describe("runtime external run judgments adapter", () => {
       contributionMutation: { status: "running" },
     }));
     expect(screen.queryByText("Recording the assessment once…")).toBeNull();
+  });
+
+  it.each([
+    [
+      "conflict",
+      {
+        status: "failed",
+        error: {
+          kind: "judgment_conflict",
+          status: 409,
+          caseId: "11111111-1111-4111-8111-111111111111",
+          runId: RUN_A,
+          expectedSequence: 0,
+          currentSequence: 1,
+        },
+      },
+      /Another assessment was recorded first/,
+      true,
+    ],
+    [
+      "refusal",
+      {
+        status: "failed",
+        error: {
+          kind: "judgment_refused",
+          status: 409,
+          caseId: "11111111-1111-4111-8111-111111111111",
+          runId: RUN_A,
+          reason: "links_required",
+          detail: "private server detail",
+        },
+      },
+      /needs at least one citation/,
+      false,
+    ],
+    [
+      "limit",
+      { status: "failed", error: { kind: "judgment_limit_reached", status: 413 } },
+      /recorded assessment limit/,
+      true,
+    ],
+    [
+      "unknown outcome",
+      {
+        status: "failed",
+        error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+      },
+      /could not confirm the result/,
+      true,
+    ],
+    [
+      "busy",
+      { status: "ignored", reason: "busy" },
+      /already being recorded/,
+      false,
+    ],
+  ] as const)("maps the dedicated %s command outcome", async (_label, outcome, copy, blocked) => {
+    const create = vi.fn<NonNullable<InvestigationRuntime["commands"]["createExternalRunJudgment"]>>(
+      async () => outcome,
+    );
+    renderFor(RUN_A, makeRuntime({
+      runId: RUN_A,
+      judgments: { status: "ready", value: list() },
+      create,
+    }));
+    fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(copy);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("radio", { name: "Insufficient evidence" }).matches(":disabled"))
+      .toBe(blocked);
+    expect(document.body.textContent).not.toContain("private server detail");
+  });
+
+  it("maps dedicated running and failed mutation state without borrowing another mutation", () => {
+    const running = renderFor(RUN_A, makeRuntime({
+      runId: RUN_A,
+      judgments: { status: "ready", value: list() },
+      mutation: { status: "running" },
+    }));
+    expect(screen.getByText("Recording the assessment once…")).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "Insufficient evidence" }).matches(":disabled")).toBe(true);
+    running.unmount();
+
+    renderFor(RUN_A, makeRuntime({
+      runId: RUN_A,
+      judgments: { status: "ready", value: list() },
+      mutation: {
+        status: "failed",
+        error: {
+          kind: "judgment_refused",
+          status: 409,
+          caseId: "11111111-1111-4111-8111-111111111111",
+          runId: RUN_A,
+          reason: "case_archived",
+          detail: "private server detail",
+        },
+      },
+    }));
+    expect(screen.getByRole("alert").textContent).toContain("investigation is archived");
+    expect(screen.getByRole("radio", { name: "Insufficient evidence" }).matches(":disabled")).toBe(true);
+    expect(document.body.textContent).not.toContain("private server detail");
   });
 
   it("posts the exact public command payload and never calls fetch", async () => {

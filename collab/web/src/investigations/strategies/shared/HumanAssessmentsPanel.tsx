@@ -159,10 +159,18 @@ function readErrorCopy(error: HumanAssessmentsReadError): string {
   }
 }
 
-function writeErrorCopy(error: HumanAssessmentsWriteError): string {
+function writeErrorCopy(
+  error: HumanAssessmentsWriteError,
+  frozenRetryAvailable: boolean,
+  historyReviewed: boolean,
+): string {
   switch (error) {
     case "conflict":
-      return "Another assessment was recorded first. This draft remains available. Review the refreshed history before recording.";
+      return frozenRetryAvailable
+        ? historyReviewed
+          ? "Another assessment was recorded first. The refreshed history is ready. Retry the unchanged draft or reopen this imported output to begin a different assessment."
+          : "Another assessment was recorded first. This draft remains available. Review the refreshed history before recording."
+        : "Another assessment was recorded first. This form is disabled. Reopen this imported output and review its current history before recording.";
     case "links_required":
       return "This reading needs at least one citation. Select a cited record and try again. This draft remains available.";
     case "case_archived":
@@ -174,7 +182,11 @@ function writeErrorCopy(error: HumanAssessmentsWriteError): string {
     case "judgment_limit_reached":
       return "This imported output has reached the recorded assessment limit. No further assessment can be added here.";
     case "commit_outcome_unknown":
-      return "This view could not confirm the result. The assessment may have been recorded. Refresh the history, then retry this exact assessment with the same request key. The draft is frozen.";
+      return frozenRetryAvailable
+        ? historyReviewed
+          ? "This view could not confirm the result. The refreshed history is ready. Retry the unchanged assessment with the same request key only if it is still needed."
+          : "This view could not confirm the result. The assessment may have been recorded. Refresh the history, then retry this exact assessment with the same request key. The draft is frozen."
+        : "This view could not confirm the result. The assessment may have been recorded, so this form is disabled. Reopen this imported output and review its current history before taking another action.";
     case "auth_lost":
       return "Your access changed while this view was open. Sign in again before writing. Local retry is not available.";
     case "not_found":
@@ -209,6 +221,26 @@ function orderedRecords(
   records: readonly HumanAssessmentRecord[],
 ): readonly HumanAssessmentRecord[] {
   return [...records].sort((left, right) => left.seq - right.seq);
+}
+
+function recordsFingerprint(records: readonly HumanAssessmentRecord[]): string {
+  return JSON.stringify(orderedRecords(records).map((record) => ({
+    seq: record.seq,
+    value: record.value,
+    actorUsername: record.actorUsername,
+    recordedAt: record.recordedAt,
+    rationale: record.rationale,
+    links: record.links.map((link) => ({ kind: link.kind, id: link.id })),
+  })));
+}
+
+function blocksFurtherWriting(error: HumanAssessmentsWriteError | null): boolean {
+  return error === "auth_lost"
+    || error === "not_found"
+    || error === "case_archived"
+    || error === "judgment_limit_reached"
+    || error === "commit_outcome_unknown"
+    || error === "conflict";
 }
 
 interface FrozenDraft {
@@ -284,6 +316,7 @@ export function HumanAssessmentsPanel({
   const submittingRef = useRef(false);
   const intentRef = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
   const refreshStartResourceRef = useRef<HumanAssessmentsResourceState | null>(null);
+  const successBaselineRef = useRef<string | null>(null);
   const [judgment, setJudgment] = useState<HumanAssessmentValue | "">("");
   const [selected, setSelected] = useState<HumanAssessmentCitationChoice[]>([]);
   const [rationale, setRationale] = useState("");
@@ -293,6 +326,7 @@ export function HumanAssessmentsPanel({
   const [frozen, setFrozen] = useState<FrozenDraft | null>(null);
   const [historyReviewed, setHistoryReviewed] = useState(false);
   const [awaitingHistoryReview, setAwaitingHistoryReview] = useState(false);
+  const [awaitingSuccessHistory, setAwaitingSuccessHistory] = useState(false);
 
   const records = publishedRecords(resource);
   const hasSnapshot = records !== undefined;
@@ -302,10 +336,6 @@ export function HumanAssessmentsPanel({
     || mutation?.status === "running";
   const readFailed = resource.status === "failed";
   const readError = readFailed ? resource.error : null;
-  const writeBlocked = readError === "auth_lost"
-    || readError === "not_found"
-    || frozen !== null
-    || createAssessment === null;
   const canWrite = createAssessment !== null
     && records !== undefined
     && readError !== "auth_lost"
@@ -318,11 +348,14 @@ export function HumanAssessmentsPanel({
       : null;
   const failureKey = writeError ?? (feedback?.status === "invalid" ? feedback.message : null)
     ?? (feedback?.status === "ignored" ? feedback.reason : null);
+  const writeFailureBlocksEditing = blocksFurtherWriting(writeError);
   const atLinkCap = selected.length >= MAX_LINKS;
   const citationsRequired = judgment === "corroborates" || judgment === "contradicts";
   const canSubmit = !running
     && frozen === null
     && canWrite
+    && !awaitingSuccessHistory
+    && !writeFailureBlocksEditing
     && judgment !== ""
     && rationale.length <= MAX_RATIONALE
     && selected.length <= MAX_LINKS
@@ -355,6 +388,14 @@ export function HumanAssessmentsPanel({
     }
   }, [awaitingHistoryReview, frozen, resource]);
 
+  useEffect(() => {
+    if (!awaitingSuccessHistory || resource.status !== "ready") return;
+    const baseline = successBaselineRef.current;
+    if (baseline === null || recordsFingerprint(resource.value) === baseline) return;
+    successBaselineRef.current = null;
+    setAwaitingSuccessHistory(false);
+  }, [awaitingSuccessHistory, resource]);
+
   function clearTransientFeedback() {
     if (frozen !== null) return;
     if (intentRef.current !== null) {
@@ -381,7 +422,7 @@ export function HumanAssessmentsPanel({
   }
 
   function currentFingerprint(): string {
-    return fingerprintOf(judgment, selected, rationale);
+    return fingerprintOf(judgment, selected, rationale.trim());
   }
 
   function intentForCurrentDraft(): { fingerprint: string; idempotencyKey: string } {
@@ -406,14 +447,17 @@ export function HumanAssessmentsPanel({
     if (outcome.status === "succeeded") {
       intentRef.current = null;
       refreshStartResourceRef.current = null;
+      successBaselineRef.current = recordsFingerprint(records ?? []);
       setFrozen(null);
       setAwaitingHistoryReview(false);
       setHistoryReviewed(false);
+      setAwaitingSuccessHistory(true);
       setJudgment("");
       setSelected([]);
       setRationale("");
       setIdempotencyKey(createAssessmentIdempotencyKey());
       setFeedback({ status: "succeeded" });
+      refresh();
       return;
     }
     if (outcome.status === "ignored") {
@@ -423,6 +467,8 @@ export function HumanAssessmentsPanel({
     if (outcome.error === "commit_outcome_unknown" || outcome.error === "conflict") {
       const frozenLinks = Object.freeze(draft.links.map((link) => Object.freeze({ ...link })));
       setFrozen(Object.freeze({ ...draft, links: frozenLinks }));
+      setSelected([...frozenLinks]);
+      setRationale(draft.rationale);
       setHistoryReviewed(false);
       intentRef.current = {
         fingerprint: intent.fingerprint,
@@ -436,7 +482,15 @@ export function HumanAssessmentsPanel({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (frozen !== null || submittingRef.current || running || createAssessment === null) return;
+    if (
+      frozen !== null
+      || submittingRef.current
+      || running
+      || createAssessment === null
+      || !canWrite
+      || awaitingSuccessHistory
+      || writeFailureBlocksEditing
+    ) return;
     if (judgment === "") return;
     if (citationsRequired && selected.length === 0) {
       setFeedback({
@@ -465,7 +519,7 @@ export function HumanAssessmentsPanel({
     const draft: FrozenDraft = {
       judgment,
       links: selected,
-      rationale,
+      rationale: trimmed,
       idempotencyKey: intent.idempotencyKey,
     };
     submittingRef.current = true;
@@ -528,8 +582,11 @@ export function HumanAssessmentsPanel({
 
   const retryRead = readError === "not_found" || readError === "auth_lost"
     ? undefined
-    : <button type="button" onClick={refreshHistory}>Retry</button>;
-  const fieldsDisabled = frozen !== null || running;
+    : <button type="button" onClick={refreshHistory}>Retry loading assessments</button>;
+  const fieldsDisabled = frozen !== null
+    || running
+    || awaitingSuccessHistory
+    || writeFailureBlocksEditing;
   const showWrite = canWrite;
 
   return (
@@ -552,12 +609,12 @@ export function HumanAssessmentsPanel({
       >
         {resource.status === "idle" ? (
           <StrategyStateNotice busy>
-            <span aria-live="polite">Waiting for recorded human assessments.</span>
+            Waiting for recorded human assessments.
           </StrategyStateNotice>
         ) : null}
         {resource.status === "loading" && resource.previous === undefined ? (
           <StrategyStateNotice busy>
-            <span aria-live="polite">Loading recorded human assessments…</span>
+            Loading recorded human assessments…
           </StrategyStateNotice>
         ) : null}
         {readFailed && resource.previous === undefined ? (
@@ -582,13 +639,15 @@ export function HumanAssessmentsPanel({
         ) : null}
         {hasSnapshot && resource.status === "loading" ? (
           <StrategyStateNotice busy>
-            <span aria-live="polite">Refreshing recorded human assessments…</span>
+            Refreshing recorded human assessments…
           </StrategyStateNotice>
         ) : null}
 
         <section className="strategy-kit__human-assessments-history" aria-labelledby={historyId}>
           <h4 id={historyId}>Recorded assessments</h4>
-          {records !== undefined ? <HistoryList records={records} /> : null}
+          {records !== undefined && !(awaitingSuccessHistory && records.length === 0)
+            ? <HistoryList records={records} />
+            : null}
           {!hasSnapshot && resource.status !== "failed" ? (
             <p className="strategy-kit__human-assessments-meta">
               Recorded assessments appear here after this load succeeds.
@@ -697,7 +756,7 @@ export function HumanAssessmentsPanel({
                       disabled={!historyReviewed || running}
                       onClick={() => void retryFrozen()}
                     >
-                      Retry
+                      Retry unchanged assessment
                     </button>
                   </>
                 )}
@@ -708,11 +767,16 @@ export function HumanAssessmentsPanel({
 
         {running ? (
           <StrategyStateNotice busy>
-            <span aria-live="polite">Recording the assessment once…</span>
+            Recording the assessment once…
           </StrategyStateNotice>
         ) : null}
         {!running && (writeError !== null || feedback?.status === "invalid" || feedback?.status === "ignored") ? (
-          <div ref={alertRef} tabIndex={-1}>
+          <div
+            ref={alertRef}
+            tabIndex={-1}
+            role="group"
+            aria-label="Assessment submission problem"
+          >
             <StrategyStateNotice
               role="alert"
               tone="danger"
@@ -723,7 +787,7 @@ export function HumanAssessmentsPanel({
                   : "Assessment not recorded"}
             >
               {writeError !== null
-                ? writeErrorCopy(writeError)
+                ? writeErrorCopy(writeError, frozen !== null, historyReviewed)
                 : feedback?.status === "ignored"
                   ? ignoredCopy(feedback.reason)
                   : feedback?.status === "invalid"
@@ -734,10 +798,12 @@ export function HumanAssessmentsPanel({
         ) : null}
         {!running && feedback?.status === "succeeded" ? (
           <StrategyStateNotice tone="success" title="Assessment recorded">
-            <span aria-live="polite">The assessment was recorded.</span>
+            {awaitingSuccessHistory
+              ? "The assessment was recorded. Updating the recorded history…"
+              : "The assessment was recorded."}
           </StrategyStateNotice>
         ) : null}
-        {writeBlocked && frozen !== null && !historyReviewed ? (
+        {frozen !== null && !historyReviewed ? (
           <StrategyStateNotice tone="warning" title="Refresh required">
             Refresh the recorded history before retrying this exact assessment. The draft and request key stay frozen.
           </StrategyStateNotice>

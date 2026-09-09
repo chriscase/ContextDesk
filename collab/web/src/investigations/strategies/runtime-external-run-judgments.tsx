@@ -207,20 +207,23 @@ export function RuntimeExternalRunJudgments({ runId }: { readonly runId: string 
   const runtime = useInvestigationRuntime();
   const query = runtime.commands.queryExternalRunJudgments;
   const create = runtime.commands.createExternalRunJudgment;
-  const matching = runtime.resources.externalRunJudgmentsRunId === runId;
+  const queryAvailable = query !== null;
+  const matching = queryAvailable && runtime.resources.externalRunJudgmentsRunId === runId;
   const choices = citationChoices(
     runtime.resources.evidence,
     runtime.resources.contributions,
   );
-  const resource = matching
-    ? mappedResource(runtime.resources.externalRunJudgments, choices)
-    : { status: "idle" as const };
-  const mutation = matching
+  const resource: HumanAssessmentsResourceState = !queryAvailable
+    ? { status: "failed", error: "unavailable" }
+    : matching
+      ? mappedResource(runtime.resources.externalRunJudgments, choices)
+      : { status: "idle" };
+  const mutation = queryAvailable && matching
     ? mappedMutation(runtime.mutations.externalRunJudgment)
     : { status: "idle" as const };
   const readDenied = resource.status === "failed"
     && (resource.error === "auth_lost" || resource.error === "not_found");
-  const createAssessment = create === null || !matching || readDenied
+  const createAssessment = !queryAvailable || create === null || !matching || readDenied
     ? null
     : async (input: HumanAssessmentCreateInput): Promise<HumanAssessmentCreateResult> => {
         const outcome = await create({

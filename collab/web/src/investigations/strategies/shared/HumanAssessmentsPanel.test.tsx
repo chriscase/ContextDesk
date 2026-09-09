@@ -134,14 +134,14 @@ describe("shared human assessments panel", () => {
     });
     expect(screen.getByRole("alert").textContent).toContain("could not be loaded right now");
     expect(screen.queryByText("No human assessment has been recorded yet.")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading assessments" }));
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("offers no retry on a 404 and does not claim the history is empty", () => {
     mount({ resource: { status: "failed", error: "not_found" } });
     expect(screen.getByRole("alert").textContent).toContain("no longer available in the current scope");
-    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
     expect(screen.queryByText("No human assessment has been recorded yet.")).toBeNull();
     expect(screen.queryByRole("button", { name: "Record assessment" })).toBeNull();
   });
@@ -149,7 +149,7 @@ describe("shared human assessments panel", () => {
   it("offers no local retry or write after auth loss", () => {
     mount({ resource: { status: "failed", error: "auth_lost" } });
     expect(screen.getByRole("alert").textContent).toContain("Sign in again before loading assessments");
-    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Record assessment" })).toBeNull();
     expect(screen.getByText(/Local retry is not available/)).toBeTruthy();
   });
@@ -166,7 +166,7 @@ describe("shared human assessments panel", () => {
     });
     expect(screen.getByText("Still visible.")).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toContain("Previously loaded assessments remain visible");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading assessments" }));
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
@@ -197,7 +197,7 @@ describe("shared human assessments panel", () => {
 
   it("requires a citation for corroborates and contradicts and allows none for insufficient evidence", async () => {
     const createAssessment = vi.fn(async () => ({ status: "succeeded" as const }));
-    mount({ createAssessment });
+    const view = mount({ createAssessment });
     fireEvent.click(screen.getByRole("radio", { name: "Corroborates" }));
     expect((screen.getByRole("button", { name: "Record assessment" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "checkout-timeout.log" }));
@@ -205,6 +205,14 @@ describe("shared human assessments panel", () => {
     await waitFor(() => expect(createAssessment).toHaveBeenCalledTimes(1));
     expect(commandInput(createAssessment, 0).judgment).toBe("corroborates");
     expect(commandInput(createAssessment, 0).links).toEqual([artifactChoice]);
+
+    view.rerender(<HumanAssessmentsPanel
+      {...view.props}
+      resource={{ status: "ready", value: [record({ seq: 1, value: "corroborates" })] }}
+    />);
+    await waitFor(() => expect(
+      (screen.getByRole("radio", { name: "Insufficient evidence" }) as HTMLInputElement).disabled,
+    ).toBe(false));
 
     fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
     fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
@@ -221,10 +229,11 @@ describe("shared human assessments panel", () => {
       label: `file-${index}.log`,
     }));
     mount({ citationChoices: choices });
+    const citationCheckboxes = screen.getAllByRole("checkbox") as HTMLInputElement[];
     for (let index = 0; index < 64; index += 1) {
-      fireEvent.click(screen.getByRole("checkbox", { name: `file-${index}.log` }));
+      fireEvent.click(citationCheckboxes[index]!);
     }
-    const extra = screen.getByRole("checkbox", { name: "file-64.log" }) as HTMLInputElement;
+    const extra = citationCheckboxes[64]!;
     expect(extra.disabled).toBe(true);
     expect(screen.getByText(/Select at most 64/)).toBeTruthy();
 
@@ -288,6 +297,38 @@ describe("shared human assessments panel", () => {
     expect((screen.getByRole("radio", { name: "Insufficient evidence" }) as HTMLInputElement).checked).toBe(true);
   });
 
+  it.each([
+    "auth_lost",
+    "not_found",
+    "case_archived",
+    "judgment_limit_reached",
+  ] as const)("fails closed after terminal write failure %s", async (error) => {
+    const createAssessment = vi.fn(async () => ({ status: "failed" as const, error }));
+    mount({ createAssessment });
+    fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
+    await screen.findByRole("alert");
+    expect(screen.getByRole("radio", { name: "Insufficient evidence" }).matches(":disabled")).toBe(true);
+    expect((screen.getByRole("textbox", { name: "Rationale (optional)" }) as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Record assessment" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+  });
+
+  it.each([
+    "commit_outcome_unknown",
+    "conflict",
+    "auth_lost",
+    "not_found",
+    "case_archived",
+    "judgment_limit_reached",
+  ] as const)("fails closed for mutation-only %s state", (error) => {
+    mount({ mutation: { status: "failed", error } });
+    expect(screen.getByRole("radio", { name: "Insufficient evidence" }).matches(":disabled")).toBe(true);
+    expect((screen.getByRole("button", { name: "Record assessment" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("group", { name: "Assessment submission problem" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry unchanged assessment" })).toBeNull();
+  });
+
   it("mints a new request key when a definitive failure is edited into a new intent", async () => {
     const createAssessment = vi.fn()
       .mockResolvedValueOnce({ status: "failed" as const, error: "validation" as const })
@@ -321,10 +362,10 @@ describe("shared human assessments panel", () => {
     expect((screen.getByRole("textbox", { name: "Rationale (optional)" }) as HTMLTextAreaElement).value)
       .toBe("Keep this draft.");
     expect(createAssessment).toHaveBeenCalledTimes(1);
-    expect((screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Refresh recorded assessments" }));
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect((screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled).toBe(true);
     view.rerender(<HumanAssessmentsPanel
       {...view.props}
       resource={{ status: "loading", previous: [] }}
@@ -334,9 +375,9 @@ describe("shared human assessments panel", () => {
       resource={{ status: "ready", value: [] }}
     />);
     await waitFor(() => expect(
-      (screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled,
     ).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry unchanged assessment" }));
     await waitFor(() => expect(createAssessment).toHaveBeenCalledTimes(2));
     expect(commandInput(createAssessment, 1).idempotencyKey).toBe(firstKey);
     expect(commandInput(createAssessment, 1).rationale).toBe("Keep this draft.");
@@ -360,12 +401,12 @@ describe("shared human assessments panel", () => {
     expect(screen.getByRole("radio", { name: "Corroborates" }).matches(":disabled")).toBe(true);
     expect(screen.getByRole("checkbox", { name: "checkout-timeout.log" }).matches(":disabled")).toBe(true);
     expect((screen.getByRole("textbox", { name: "Rationale (optional)" }) as HTMLTextAreaElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled).toBe(true);
     expect(createAssessment).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh recorded assessments" }));
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect((screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled).toBe(true);
     view.rerender(<HumanAssessmentsPanel
       {...view.props}
       resource={{ status: "loading", previous: [] }}
@@ -375,9 +416,9 @@ describe("shared human assessments panel", () => {
       resource={{ status: "ready", value: [] }}
     />);
     await waitFor(() => expect(
-      (screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled,
     ).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry unchanged assessment" }));
     await waitFor(() => expect(createAssessment).toHaveBeenCalledTimes(2));
     expect(commandInput(createAssessment, 1)).toEqual(first);
   });
@@ -397,18 +438,32 @@ describe("shared human assessments panel", () => {
 
   it("clears the form, mints a new key, and announces success once", async () => {
     const createAssessment = vi.fn(async () => ({ status: "succeeded" as const }));
-    mount({ createAssessment });
+    const refresh = vi.fn();
+    const view = mount({ createAssessment, refresh });
     fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Rationale (optional)" }), {
       target: { value: "  First reading.  " },
     });
     fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
-    await waitFor(() => expect(screen.getByText("The assessment was recorded.")).toBeTruthy());
+    await waitFor(() => expect(
+      screen.getByText("The assessment was recorded. Updating the recorded history…"),
+    ).toBeTruthy());
     const firstKey = commandInput(createAssessment, 0).idempotencyKey;
     expect(commandInput(createAssessment, 0).rationale).toBe("First reading.");
     expect((screen.getByRole("textbox", { name: "Rationale (optional)" }) as HTMLTextAreaElement).value).toBe("");
     expect((screen.getByRole("radio", { name: "Insufficient evidence" }) as HTMLInputElement).checked).toBe(false);
-    expect(screen.getByText("The assessment was recorded.")).toBeTruthy();
+    expect(screen.queryByText("No human assessment has been recorded yet.")).toBeNull();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("radio", { name: "Insufficient evidence" }).matches(":disabled")).toBe(true);
+
+    view.rerender(<HumanAssessmentsPanel
+      {...view.props}
+      resource={{ status: "ready", value: [record({ seq: 1 })] }}
+    />);
+    await waitFor(() => expect(
+      screen.getByText("The assessment was recorded."),
+    ).toBeTruthy());
+    expect((screen.getByRole("radio", { name: "Insufficient evidence" }) as HTMLInputElement).disabled).toBe(false);
 
     fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
     fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
