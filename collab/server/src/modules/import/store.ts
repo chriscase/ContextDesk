@@ -2,9 +2,15 @@ import type { Pool } from "pg";
 import type {
   Completeness,
   EvidenceVisibility,
+  ExternalRunJudgmentLinkV1,
+  ExternalRunJudgmentValue,
   ExternalRunImportMode,
 } from "@cd-collab/contracts";
-import { SOURCE_UUID_RE } from "@cd-collab/contracts";
+import {
+  EXTERNAL_RUN_JUDGMENT_SCHEMA_ID,
+  SOURCE_UUID_RE,
+  parseExternalRunJudgment,
+} from "@cd-collab/contracts";
 import { activeCaseQueryable } from "../cases/index.js";
 
 export interface FrozenRunRow {
@@ -65,6 +71,29 @@ export interface CorroborationRow {
   createdAt: string;
 }
 
+export interface ExternalRunJudgmentRow {
+  caseId: string;
+  runId: string;
+  seq: number;
+  judgment: ExternalRunJudgmentValue;
+  actorId: string;
+  actorUsername: string;
+  links: ExternalRunJudgmentLinkV1[];
+  rationale: string | null;
+  recordedAt: string;
+}
+
+export interface ExternalRunJudgmentSuccessIntent {
+  caseId: string;
+  runId: string;
+  actorId: string;
+  idempotencyKey: string;
+  requestDigest: string;
+  judgmentSeq: number;
+  successJson: string;
+  createdAt: string;
+}
+
 export interface RunStore {
   insert(row: FrozenRunRow): Promise<void>;
   get(id: string): Promise<FrozenRunRow | null>;
@@ -72,6 +101,15 @@ export interface RunStore {
   listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   listCorroborations(runId: string): Promise<CorroborationRow[]>;
   appendCorroboration(row: Omit<CorroborationRow, "seq" | "createdAt">): Promise<CorroborationRow>;
+  listJudgments(runId: string): Promise<ExternalRunJudgmentRow[]>;
+  appendJudgment(row: ExternalRunJudgmentRow): Promise<void>;
+  getJudgmentSuccessIntent(
+    caseId: string,
+    runId: string,
+    actorId: string,
+    idempotencyKey: string,
+  ): Promise<ExternalRunJudgmentSuccessIntent | null>;
+  insertJudgmentSuccessIntent(row: ExternalRunJudgmentSuccessIntent): Promise<void>;
   /** Caller must already hold the case row lock inside the case transaction. */
   lockImportSuccessIntent(
     caseId: string,
@@ -92,12 +130,16 @@ export class MemoryRunStore implements RunStore {
   private readonly runs = new Map<string, FrozenRunRow>();
   private readonly events = new Map<string, CorroborationRow[]>();
   private readonly importSuccessIntents = new Map<string, ExternalRunImportSuccessIntent>();
+  private readonly judgments = new Map<string, ExternalRunJudgmentRow[]>();
+  private readonly judgmentSuccessIntents = new Map<string, ExternalRunJudgmentSuccessIntent>();
 
   capture(): unknown {
     return structuredClone({
       runs: [...this.runs.entries()],
       events: [...this.events.entries()],
       importSuccessIntents: [...this.importSuccessIntents.entries()],
+      judgments: [...this.judgments.entries()],
+      judgmentSuccessIntents: [...this.judgmentSuccessIntents.entries()],
     });
   }
 
@@ -106,20 +148,31 @@ export class MemoryRunStore implements RunStore {
       runs: [string, FrozenRunRow][];
       events: [string, CorroborationRow[]][];
       importSuccessIntents?: [string, ExternalRunImportSuccessIntent][];
+      judgments?: [string, ExternalRunJudgmentRow[]][];
+      judgmentSuccessIntents?: [string, ExternalRunJudgmentSuccessIntent][];
     };
     this.runs.clear();
     this.events.clear();
     this.importSuccessIntents.clear();
+    this.judgments.clear();
+    this.judgmentSuccessIntents.clear();
     for (const [id, value] of row.runs) this.runs.set(id, value);
     for (const [id, value] of row.events) this.events.set(id, value);
     for (const [key, value] of row.importSuccessIntents ?? []) {
       this.importSuccessIntents.set(key, value);
+    }
+    for (const [id, value] of row.judgments ?? []) {
+      this.judgments.set(id, value.map(cloneJudgment));
+    }
+    for (const [key, value] of row.judgmentSuccessIntents ?? []) {
+      this.judgmentSuccessIntents.set(key, { ...value });
     }
   }
 
   async insert(row: FrozenRunRow): Promise<void> {
     this.runs.set(row.id, Object.freeze(cloneRun(row)));
     this.events.set(row.id, []);
+    this.judgments.set(row.id, []);
   }
 
   async probeExistingIds(ids: readonly string[]): Promise<string[]> {
@@ -165,6 +218,46 @@ export class MemoryRunStore implements RunStore {
     list.push(next);
     this.events.set(row.runId, list);
     return next;
+  }
+
+  async listJudgments(runId: string): Promise<ExternalRunJudgmentRow[]> {
+    return (this.judgments.get(runId) ?? []).map(cloneJudgment);
+  }
+
+  async appendJudgment(row: ExternalRunJudgmentRow): Promise<void> {
+    let list = this.judgments.get(row.runId);
+    if (!list) {
+      if (!this.runs.has(row.runId)) {
+        throw new Error("external run judgment target does not exist");
+      }
+      // SQLite documents written before judgments existed have a run and its
+      // corroboration bucket, but no judgments map entry. Lazily materialize
+      // the empty bucket so the first append remains backwards-compatible.
+      list = [];
+      this.judgments.set(row.runId, list);
+    }
+    if (row.seq !== list.length + 1) throw new Error("external run judgment sequence is not contiguous");
+    list.push(Object.freeze(cloneJudgment(row)));
+  }
+
+  async getJudgmentSuccessIntent(
+    caseId: string,
+    runId: string,
+    actorId: string,
+    idempotencyKey: string,
+  ): Promise<ExternalRunJudgmentSuccessIntent | null> {
+    const row = this.judgmentSuccessIntents.get(
+      judgmentIntentKey(caseId, runId, actorId, idempotencyKey),
+    );
+    return row ? { ...row } : null;
+  }
+
+  async insertJudgmentSuccessIntent(row: ExternalRunJudgmentSuccessIntent): Promise<void> {
+    const key = judgmentIntentKey(row.caseId, row.runId, row.actorId, row.idempotencyKey);
+    if (this.judgmentSuccessIntents.has(key)) {
+      throw new Error("external run judgment success intent already exists");
+    }
+    this.judgmentSuccessIntents.set(key, Object.freeze({ ...row }));
   }
 
   async lockImportSuccessIntent(
@@ -324,6 +417,77 @@ export class PgRunStore implements RunStore {
     return { ...row, seq, createdAt };
   }
 
+  async listJudgments(runId: string): Promise<ExternalRunJudgmentRow[]> {
+    const result = await this.db.query(
+      `SELECT * FROM external_run_judgments WHERE run_id = $1 ORDER BY seq ASC`,
+      [runId],
+    );
+    return result.rows.map((row) => asJudgment(row as Record<string, unknown>));
+  }
+
+  async appendJudgment(row: ExternalRunJudgmentRow): Promise<void> {
+    await this.mutationDb.query(
+      `INSERT INTO external_run_judgments (
+         case_id, run_id, seq, judgment, actor_id, actor_username, links,
+         rationale, recorded_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)`,
+      [
+        row.caseId,
+        row.runId,
+        row.seq,
+        row.judgment,
+        row.actorId,
+        row.actorUsername,
+        JSON.stringify(row.links),
+        row.rationale,
+        row.recordedAt,
+      ],
+    );
+  }
+
+  /**
+   * PRECONDITION: the caller already holds the authoritative case row lock in
+   * the active case transaction. This secondary actor/key lock only serializes
+   * identical retry intents; it must never become the case authority boundary.
+   */
+  async getJudgmentSuccessIntent(
+    caseId: string,
+    runId: string,
+    actorId: string,
+    idempotencyKey: string,
+  ): Promise<ExternalRunJudgmentSuccessIntent | null> {
+    const db = this.mutationDb;
+    await db.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+      `external-run-judgment:${caseId}:${runId}:${actorId}:${idempotencyKey}`,
+    ]);
+    const result = await db.query(
+      `SELECT * FROM external_run_judgment_success_intents
+       WHERE case_id = $1 AND run_id = $2 AND actor_id = $3 AND idempotency_key = $4`,
+      [caseId, runId, actorId, idempotencyKey],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asJudgmentIntent(row) : null;
+  }
+
+  async insertJudgmentSuccessIntent(row: ExternalRunJudgmentSuccessIntent): Promise<void> {
+    await this.mutationDb.query(
+      `INSERT INTO external_run_judgment_success_intents (
+         case_id, run_id, actor_id, idempotency_key, request_digest,
+         judgment_seq, success_json, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        row.caseId,
+        row.runId,
+        row.actorId,
+        row.idempotencyKey,
+        row.requestDigest,
+        row.judgmentSeq,
+        row.successJson,
+        row.createdAt,
+      ],
+    );
+  }
+
   async lockImportSuccessIntent(
     caseId: string,
     actorId: string,
@@ -403,6 +567,61 @@ function assertEvidenceArtifactIds(value: unknown): asserts value is string[] {
 
 function importIntentKey(caseId: string, actorId: string, idempotencyKey: string): string {
   return `${caseId}\u0000${actorId}\u0000${idempotencyKey}`;
+}
+
+function judgmentIntentKey(
+  caseId: string,
+  runId: string,
+  actorId: string,
+  idempotencyKey: string,
+): string {
+  return `${caseId}\u0000${runId}\u0000${actorId}\u0000${idempotencyKey}`;
+}
+
+function cloneJudgment(row: ExternalRunJudgmentRow): ExternalRunJudgmentRow {
+  return { ...row, links: row.links.map((link) => ({ ...link })) };
+}
+
+function asJudgment(row: Record<string, unknown>): ExternalRunJudgmentRow {
+  const parsed = parseExternalRunJudgment({
+    schemaId: EXTERNAL_RUN_JUDGMENT_SCHEMA_ID,
+    caseId: row.case_id,
+    runId: row.run_id,
+    seq: Number(row.seq),
+    judgment: row.judgment,
+    actor: { id: row.actor_id, username: row.actor_username },
+    links: row.links,
+    rationale: row.rationale,
+    recordedAt: row.recorded_at instanceof Date
+      ? row.recorded_at.toISOString()
+      : String(row.recorded_at),
+  });
+  return {
+    caseId: parsed.caseId,
+    runId: parsed.runId,
+    seq: parsed.seq,
+    judgment: parsed.judgment,
+    actorId: parsed.actor.id,
+    actorUsername: parsed.actor.username,
+    links: parsed.links.map((link) => ({ ...link })),
+    rationale: parsed.rationale,
+    recordedAt: parsed.recordedAt,
+  };
+}
+
+function asJudgmentIntent(row: Record<string, unknown>): ExternalRunJudgmentSuccessIntent {
+  return {
+    caseId: String(row.case_id),
+    runId: String(row.run_id),
+    actorId: String(row.actor_id),
+    idempotencyKey: String(row.idempotency_key),
+    requestDigest: String(row.request_digest),
+    judgmentSeq: Number(row.judgment_seq),
+    successJson: String(row.success_json),
+    createdAt: row.created_at instanceof Date
+      ? row.created_at.toISOString()
+      : String(row.created_at),
+  };
 }
 
 function asRun(row: Record<string, unknown>): FrozenRunRow {
