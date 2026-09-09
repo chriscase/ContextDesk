@@ -112,7 +112,7 @@ async function recordJudgmentViaPublicApi(
       caseId,
       runId,
       expectedSequence: 0,
-      idempotencyKey: "assess-e2e-readonly-0001",
+      idempotencyKey: `assess-e2e-readonly-${runId}`,
       judgment: "insufficient_evidence",
       links: [],
       rationale,
@@ -301,7 +301,29 @@ test.describe("War Room imported-run human assessments", () => {
 
       await panel.getByRole("radio", { name: "Insufficient evidence" }).check();
       await panel.getByRole("textbox", { name: "Rationale (optional)" }).fill(`  ${RATIONALE}  `);
+      const recorded = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === "POST" && isJudgmentRoute(url, caseId, focused.id);
+      });
       await panel.getByRole("button", { name: "Record assessment" }).click();
+      const recordedResponse = await recorded;
+      expect(recordedResponse.ok(), await recordedResponse.text()).toBeTruthy();
+      const recordedBody = await recordedResponse.json() as Record<string, unknown>;
+      expect(recordedBody).toMatchObject({
+        schemaId: JUDGMENT_SUCCESS_SCHEMA_ID,
+        caseId,
+        runId: focused.id,
+        replayed: false,
+        applied: {
+          schemaId: JUDGMENT_SCHEMA_ID,
+          caseId,
+          runId: focused.id,
+          seq: 1,
+          judgment: "insufficient_evidence",
+          links: [],
+          rationale: RATIONALE,
+        },
+      });
       await expect.poll(() => traffic.posts.length).toBe(1);
       expectInsufficientEvidenceRequest(traffic.posts[0]!.body, caseId, focused.id, RATIONALE);
       expect(traffic.posts[0]!.raw).toBe(JSON.stringify(traffic.posts[0]!.body));
@@ -404,11 +426,17 @@ test.describe("War Room imported-run human assessments", () => {
       expect(traffic.posts).toEqual([]);
       expect(traffic.corroborationWrites).toEqual([]);
 
-      const judgmentGets: Request[] = [];
+      const protectedReadGets: string[] = [];
       const recordGets = (request: Request) => {
         const url = new URL(request.url());
-        if (request.method() === "GET" && url.pathname.includes("/judgments")) {
-          judgmentGets.push(request);
+        if (
+          request.method() === "GET"
+          && (
+            url.pathname === "/api/cases"
+            || url.pathname.startsWith(`/api/cases/${caseId}`)
+          )
+        ) {
+          protectedReadGets.push(url.pathname);
         }
       };
       await page.unroute("**/api/auth/me");
@@ -430,7 +458,10 @@ test.describe("War Room imported-run human assessments", () => {
         await expect(page.getByText(recordedRationale)).toHaveCount(0);
         await expect(humanAssessmentsHeading(page)).toHaveCount(0);
         await expect(page.getByRole("heading", { name: "Record an assessment" })).toHaveCount(0);
-        expect(judgmentGets, "a no-read session still requested recorded assessments").toEqual([]);
+        expect(
+          protectedReadGets,
+          "a no-read session still requested investigation, evidence, or assessment data",
+        ).toEqual([]);
         expect(traffic.posts).toEqual([]);
       } finally {
         page.off("request", recordGets);
@@ -528,7 +559,9 @@ test.describe("War Room imported-run human assessments", () => {
       expect(traffic.posts).toHaveLength(1);
       await expect(retry).toBeEnabled();
       await expect(panel.getByRole("textbox", { name: "Rationale (optional)" })).toHaveValue(RATIONALE);
+      await expect(panel.getByRole("textbox", { name: "Rationale (optional)" })).toBeDisabled();
       await expect(panel.getByRole("radio", { name: "Insufficient evidence" })).toBeChecked();
+      await expect(panel.getByRole("radio", { name: "Insufficient evidence" })).toBeDisabled();
       await expect(panel.getByText("No human assessment has been recorded yet.")).toBeVisible();
 
       const retried = page.waitForResponse((response) => {
