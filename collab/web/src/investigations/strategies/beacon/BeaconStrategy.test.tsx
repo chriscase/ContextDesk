@@ -209,6 +209,7 @@ describe("Beacon rapid-intake strategy", () => {
     fireEvent.click(screen.getByText("Optional technical context"));
     fireEvent.change(screen.getByRole("combobox", { name: "Product" }), { target: { value: "ContextDesk Storefront" } });
     expect(screen.getByText("Existing recorded value selected.")).toBeTruthy();
+    fireEvent.change(screen.getByRole("combobox", { name: "Version" }), { target: { value: "4.8.0" } });
     fireEvent.change(screen.getByRole("combobox", { name: "Build" }), { target: { value: "new-build-2026.09" } });
     expect(screen.getByText("New value; it will be recorded exactly as entered.")).toBeTruthy();
     fireEvent.change(screen.getByRole("textbox", { name: "Investigation title" }), { target: { value: created.title } });
@@ -219,7 +220,7 @@ describe("Beacon rapid-intake strategy", () => {
       expect.objectContaining({
         title: created.title,
         problemStatement: created.problemStatement,
-        investigationContext: expect.objectContaining({ productName: "ContextDesk Storefront", build: "new-build-2026.09" }),
+        investigationContext: expect.objectContaining({ productName: "ContextDesk Storefront", version: "4.8.0", build: "new-build-2026.09" }),
       }),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );

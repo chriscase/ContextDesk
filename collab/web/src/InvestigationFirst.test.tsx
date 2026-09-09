@@ -429,11 +429,11 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(screen.getByText("Advanced context"));
     const product = screen.getByRole("combobox", { name: "Product or software" });
     fireEvent.change(product, { target: { value: "ContextDesk Storefront" } });
-    expect(screen.getByText("Matches a recorded value after removing outer whitespace; that value will be reused.")).toBeTruthy();
+    expect(screen.getByText("Matches a recorded value after removing outer whitespace; it will be saved without outer whitespace.")).toBeTruthy();
     fireEvent.change(product, { target: { value: "contextdesk storefront" } });
     expect(screen.getByText("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.")).toBeTruthy();
     fireEvent.change(product, { target: { value: "  ContextDesk Storefront  " } });
-    expect(screen.getByText("Matches a recorded value after removing outer whitespace; that value will be reused.")).toBeTruthy();
+    expect(screen.getByText("Matches a recorded value after removing outer whitespace; it will be saved without outer whitespace.")).toBeTruthy();
     fireEvent.change(product, { target: { value: "A new product" } });
     expect(screen.getByText("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Filter investigations by status"), { target: { value: "monitoring" } });
@@ -499,7 +499,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.change(screen.getByPlaceholderText("Short investigation title"), { target: { value: "Trimmed context" } });
     fireEvent.click(screen.getByText("Advanced context"));
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "  ContextDesk Storefront  " } });
-    expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; that value will be reused.");
+    expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; it will be saved without outer whitespace.");
     fireEvent.change(screen.getByRole("combobox", { name: "Build" }), { target: { value: "  never-recorded-build  " } });
     expect(comboHint("Build")).toBe("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.");
     fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
@@ -1361,7 +1361,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(document.activeElement).toBe(product);
     expect(comboHint("Product or software")).toBe("Choose a recorded value or enter a new one. Outer whitespace will be removed when saved.");
     fireEvent.change(product, { target: { value: "ContextDesk Storefront" } });
-    expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; that value will be reused.");
+    expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; it will be saved without outer whitespace.");
   });
 
   it("stops calling a typed value new when the recorded values could not be read", async () => {
@@ -1384,7 +1384,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(screen.getByText(/Recorded values could not be loaded/).textContent).toContain("Creating an investigation still works.");
 
     fireEvent.click(retry);
-    await waitFor(() => expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; that value will be reused."));
+    await waitFor(() => expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; it will be saved without outer whitespace."));
     expect(screen.queryByRole("button", { name: "Retry recorded values" })).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "A product nobody recorded" } });
     expect(comboHint("Product or software")).toBe("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.");
