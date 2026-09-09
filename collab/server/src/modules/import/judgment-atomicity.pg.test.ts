@@ -49,11 +49,16 @@ describe.skipIf(!adminUrl())("PostgreSQL external-run judgment atomicity", () =>
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);
       const pool = new Pool({ connectionString: url, max: 6 });
-      const sql: string[] = [];
+      const sql: { connection: number; statement: string }[] = [];
+      let nextConnection = 0;
       pool.on("connect", (connected) => {
+        const connection = ++nextConnection;
         const originalQuery = connected.query.bind(connected);
         connected.query = ((...args: Parameters<typeof connected.query>) => {
-          sql.push(typeof args[0] === "string" ? args[0] : String(args[0]));
+          sql.push({
+            connection,
+            statement: typeof args[0] === "string" ? args[0] : String(args[0]),
+          });
           return originalQuery(...args);
         }) as typeof connected.query;
       });
@@ -85,17 +90,26 @@ describe.skipIf(!adminUrl())("PostgreSQL external-run judgment atomicity", () =>
           .toEqual([false, true]);
         expect(await runs.listJudgments(RUN_ID)).toHaveLength(1);
 
-        const caseLock = sql.findIndex((statement) =>
-          statement.includes("SELECT id FROM cases WHERE id = $1 FOR UPDATE"));
-        const advisory = sql.findIndex((statement) =>
-          statement.includes("pg_advisory_xact_lock")
-          && statement.includes("hashtextextended"));
-        const intentRead = sql.findIndex((statement) =>
-          statement.includes("FROM external_run_judgment_success_intents"));
-        expect(caseLock).toBeGreaterThanOrEqual(0);
-        expect(advisory).toBeGreaterThan(caseLock);
-        expect(intentRead).toBeGreaterThan(advisory);
-        expect(sql[intentRead]).not.toContain("FOR UPDATE");
+        const mutationConnections = new Set(
+          sql.filter(({ statement }) => statement.includes("pg_advisory_xact_lock"))
+            .map(({ connection }) => connection),
+        );
+        expect(mutationConnections.size).toBeGreaterThan(0);
+        for (const connection of mutationConnections) {
+          const statements = sql.filter((row) => row.connection === connection)
+            .map((row) => row.statement);
+          const caseLock = statements.findIndex((statement) =>
+            statement.includes("SELECT id FROM cases WHERE id = $1 FOR UPDATE"));
+          const advisory = statements.findIndex((statement) =>
+            statement.includes("pg_advisory_xact_lock")
+            && statement.includes("hashtextextended"));
+          const intentRead = statements.findIndex((statement) =>
+            statement.includes("FROM external_run_judgment_success_intents"));
+          expect(caseLock).toBeGreaterThanOrEqual(0);
+          expect(advisory).toBeGreaterThan(caseLock);
+          expect(intentRead).toBeGreaterThan(advisory);
+          expect(statements[intentRead]).not.toContain("FOR UPDATE");
+        }
 
         const contenders = await Promise.allSettled([
           imports.addRunJudgment(

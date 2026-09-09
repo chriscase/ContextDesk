@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { projectTimelineSource } from "./project.js";
 
 describe("external-run judgment activity projection", () => {
-  it.each(["corroborates", "contradicts"])(
+  it.each(["corroborates", "contradicts", "insufficient_evidence"])(
     "projects a factual human review without leaking the %s value or private fields",
     (judgment) => {
       const projected = projectTimelineSource({

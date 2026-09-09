@@ -482,6 +482,15 @@ describe("external run human judgment HTTP and memory core", () => {
       expect(response.statusCode).toBe(201);
       expect(parseExternalRunJudgmentSuccess(JSON.parse(response.body)).applied.links)
         .toEqual(links);
+      const timeline = (await context.caseStore.listTimeline(created.id)).filter(
+        (event) => event.kind === "external_run_judgment_recorded",
+      );
+      expect(timeline.map((event) => JSON.parse(event.payload))).toEqual([
+        { sequence: 1, linkCount: 3 },
+      ]);
+      const timelineJson = JSON.stringify(timeline);
+      expect(timelineJson).not.toMatch(/corroborates|contradicts|insufficient_evidence|rationale/);
+      for (const link of links) expect(timelineJson).not.toContain(link.id);
     });
   });
 
@@ -544,7 +553,12 @@ describe("external run human judgment HTTP and memory core", () => {
         otherCase.id,
         { ...judgmentRequest(otherCase.id), caseId: otherCase.id },
       )).statusCode).toBe(404);
+    });
+  });
 
+  it("rejects a 1,025th judgment without changing the share-safe run history", async () => {
+    await withApp(async (context) => {
+      const created = await seedCaseAndRun(context);
       for (let index = 1; index <= EXTERNAL_RUN_JUDGMENT_SERVER_LIMIT; index += 1) {
         await context.runs.appendJudgment(judgmentRow(created.id, index));
       }

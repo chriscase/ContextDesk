@@ -76,6 +76,7 @@ interface Fixture {
   cases: CaseService;
   caseStore: MemoryCaseStore;
   imports: ImportService;
+  runStore: MemoryRunStore;
   triageRuns: TriageRunService;
   jobStore: MemoryTriageJobStore;
   experiments: ExperimentService;
@@ -351,6 +352,7 @@ async function fixture(): Promise<Fixture> {
     cases,
     caseStore,
     imports,
+    runStore,
     triageRuns,
     jobStore,
     experiments,
@@ -629,6 +631,30 @@ describe("portable investigation service", () => {
       clientTime: null,
       payload: { judgment: "insufficient_evidence", sequence: 1, linkCount: 0 },
     });
+
+    await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
+      code: "unsupported_state",
+    });
+  });
+
+  it("refuses export when the authoritative run store has judgment history without a timeline event", async () => {
+    const row = await fixture();
+    const run = (await row.imports.listRuns(row.caseId, ACTOR, false))[0];
+    if (!run) throw new Error("synthetic portable fixture has no imported run");
+    await row.runStore.appendJudgment({
+      caseId: row.caseId,
+      runId: run.id,
+      seq: 1,
+      judgment: "insufficient_evidence",
+      actorId: ACTOR.id,
+      actorUsername: ACTOR.username,
+      links: [],
+      rationale: null,
+      recordedAt: "2042-03-04T12:00:00.000Z",
+    });
+    expect((await row.caseStore.listTimeline(row.caseId)).some(
+      (event) => event.kind === "external_run_judgment_recorded",
+    )).toBe(false);
 
     await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
       code: "unsupported_state",

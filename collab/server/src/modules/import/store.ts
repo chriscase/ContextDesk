@@ -445,6 +445,11 @@ export class PgRunStore implements RunStore {
     );
   }
 
+  /**
+   * PRECONDITION: the caller already holds the authoritative case row lock in
+   * the active case transaction. This secondary actor/key lock only serializes
+   * identical retry intents; it must never become the case authority boundary.
+   */
   async getJudgmentSuccessIntent(
     caseId: string,
     runId: string,
