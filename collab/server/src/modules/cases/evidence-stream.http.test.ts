@@ -834,6 +834,76 @@ describe("POST /api/cases/:id/evidence/stream", () => {
     });
   });
 
+  it("maps JSON evidence promote ambiguity without trusting ordinary or stray S3 failures", async () => {
+    await withApp(async ({ app, store }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "S3 JSON promote outcome http");
+      const originalBeginWriteBatch = store.beginWriteBatch.bind(store);
+      const upload = () => app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/evidence`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "log",
+          filename: "app.log",
+          mediaType: "text/plain",
+          contentBase64: Buffer.from(LOG).toString("base64"),
+          summary: "S3 JSON outcome",
+        },
+      });
+      const spyPromoteError = (error: S3EvidenceError) => {
+        vi.spyOn(store, "beginWriteBatch").mockImplementation(async () => {
+          const batch = await originalBeginWriteBatch();
+          return new Proxy(batch, {
+            get(target, property, receiver) {
+              if (property === "promote") {
+                return async () => {
+                  throw error;
+                };
+              }
+              return Reflect.get(target, property, receiver) as unknown;
+            },
+          });
+        });
+      };
+
+      spyPromoteError(new S3EvidenceError("promote", "unavailable", {
+        commitOutcomeUnknown: true,
+      }));
+      const unknown = await upload();
+      expect(unknown.statusCode).toBe(503);
+      expect(JSON.parse(unknown.body)).toEqual({ error: "commit_outcome_unknown" });
+      expect(Object.keys(JSON.parse(unknown.body) as object)).toEqual(["error"]);
+      expect(unknown.body).not.toMatch(
+        /s3 evidence|promote failed|unavailable|ECONNRESET|accessKey|secret|endpoint|requestId/i,
+      );
+
+      vi.mocked(store.beginWriteBatch).mockRestore();
+      spyPromoteError(new S3EvidenceError("promote", "unavailable"));
+      const unavailable = await upload();
+      expect(unavailable.statusCode).toBe(503);
+      expect(JSON.parse(unavailable.body)).toEqual({ error: "storage_unavailable" });
+      expect(Object.keys(JSON.parse(unavailable.body) as object)).toEqual(["error"]);
+      expect(unavailable.body).not.toMatch(
+        /commit_outcome_unknown|s3 evidence|promote failed|accessKey|secret|endpoint|requestId/i,
+      );
+
+      vi.mocked(store.beginWriteBatch).mockRestore();
+      spyPromoteError(new S3EvidenceError("put", "unavailable", {
+        commitOutcomeUnknown: true,
+      }));
+      const stray = await upload();
+      expect(stray.statusCode).toBe(503);
+      expect(JSON.parse(stray.body)).toEqual({ error: "storage_unavailable" });
+      expect(Object.keys(JSON.parse(stray.body) as object)).toEqual(["error"]);
+      expect(stray.body).not.toMatch(/commit_outcome_unknown|s3 evidence|accessKey|secret/i);
+
+      expect(unknown.body).not.toEqual(unavailable.body);
+      expect(unknown.body).not.toEqual(stray.body);
+      expect(stray.body).toEqual(unavailable.body);
+    });
+  });
+
   it("keeps the legacy JSON upload cap at 1_000_000 decoded bytes", async () => {
     await withApp(async ({ app }) => {
       const alice = await login(app, "alice", ALICE);
