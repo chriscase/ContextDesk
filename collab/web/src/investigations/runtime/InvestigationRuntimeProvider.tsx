@@ -880,6 +880,9 @@ export function InvestigationRuntimeProvider({
         ? artifactAnnotationsBulkController.create
         : null,
       queryExternalRunJudgments: capabilities.canRead
+        && active
+        && activeCaseId !== null
+        && !activeScopeUnavailable
         ? externalRunJudgmentsController.query
         : null,
       createExternalRunJudgment: canRecordRunJudgment

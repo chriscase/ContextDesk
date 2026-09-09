@@ -410,6 +410,7 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().resources.externalRunJudgmentsRunId)
       .toBe(RUNTIME_JUDGMENT_FIXTURE_IDS.runId);
     expect(currentRuntime().capabilities.canRecordRunJudgment).toBe(true);
+    expect(currentRuntime().commands.queryExternalRunJudgments).toEqual(expect.any(Function));
     expect(currentRuntime().commands.createExternalRunJudgment).toEqual(expect.any(Function));
 
     act(() => currentRuntime().refresh.activeInvestigation());
@@ -989,6 +990,7 @@ describe("InvestigationRuntimeProvider", () => {
     });
     expect(currentRuntime().commands.uploadEvidence).toBeNull();
     expect(currentRuntime().commands.applyLifecycle).toBeNull();
+    expect(currentRuntime().commands.queryExternalRunJudgments).toBeNull();
   });
 
   it("denies the active scope when an authoritative collection no longer includes it", async () => {
@@ -1028,6 +1030,7 @@ describe("InvestigationRuntimeProvider", () => {
     });
     expect(currentRuntime().commands.uploadEvidence).toBeNull();
     expect(currentRuntime().commands.applyLifecycle).toBeNull();
+    expect(currentRuntime().commands.queryExternalRunJudgments).toBeNull();
   });
 
   it("refreshes a settled list before inferring that a newly focused investigation is absent", async () => {
@@ -2142,7 +2145,7 @@ describe("InvestigationRuntimeProvider", () => {
       applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
-      queryExternalRunJudgments: expect.any(Function),
+      queryExternalRunJudgments: null,
       createExternalRunJudgment: null,
       queryInvestigations: expect.any(Function),
       queryOperationsQueue: expect.any(Function),
@@ -2311,7 +2314,7 @@ describe("InvestigationRuntimeProvider", () => {
         applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
-        queryExternalRunJudgments: expect.any(Function),
+        queryExternalRunJudgments: null,
         createExternalRunJudgment: null,
         queryInvestigations: expect.any(Function),
         queryOperationsQueue: expect.any(Function),
@@ -2493,7 +2496,7 @@ describe("InvestigationRuntimeProvider", () => {
         applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
-        queryExternalRunJudgments: expect.any(Function),
+        queryExternalRunJudgments: null,
         createExternalRunJudgment: null,
         queryInvestigations: expect.any(Function),
         queryOperationsQueue: expect.any(Function),
