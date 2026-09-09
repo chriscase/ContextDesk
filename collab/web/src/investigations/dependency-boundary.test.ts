@@ -878,6 +878,18 @@ describe("Investigation Runtime V1 dependency boundary", () => {
       "collab/web/src/investigations/strategies/shared/presentation.tsx:2 imports authority or strategy behavior into the presentation-only shared kit",
       "collab/web/src/investigations/strategies/shared/presentation.tsx:3 imports authority or strategy behavior into the presentation-only shared kit",
     ]);
+
+    const hypothesisComposerPath = resolve(
+      INVESTIGATIONS_ROOT,
+      "strategies/shared/EvidenceHypothesisComposer.tsx",
+    );
+    const hypothesisComposer = parseSource(hypothesisComposerPath);
+    expect(isTestOnly(hypothesisComposerPath)).toBe(false);
+    expect(
+      investigationImportViolations(hypothesisComposerPath, hypothesisComposer),
+      "the shared hypothesis composer must remain transport- and authority-free",
+    ).toEqual([]);
+    expect(strategyRouteViolations(hypothesisComposerPath, hypothesisComposer)).toEqual([]);
   });
 
   it("keeps the root runtime-coordination adapter on its exact public dependency seam", () => {

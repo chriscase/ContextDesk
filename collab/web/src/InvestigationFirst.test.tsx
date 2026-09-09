@@ -741,6 +741,47 @@ describe("Investigation First Runtime V1 presentation", () => {
     );
   });
 
+  it("records one hypothesis citing exactly the selected evidence", async () => {
+    const investigation = makePopulatedCase();
+    const evidence = makeEvidenceList().artifacts[0]!;
+    const hypothesis = {
+      ...makeContributionList().contributions[0]!,
+      id: "investigation-first-hypothesis",
+      kind: "hypothesis" as const,
+      body: "Gateway retries may be amplifying checkout latency.",
+      hypothesisLinks: [{ kind: "artifact" as const, id: evidence.id }],
+    };
+    const createContribution = vi.fn(async () => gatewayOk(hypothesis));
+    const gateway = createInvestigationGatewayDouble({
+      getInvestigation: vi.fn(async () => gatewayOk(investigation)),
+      listEvidence: vi.fn(async () => gatewayOk([evidence])),
+      listContributions: vi.fn(async () => gatewayOk([])),
+      getLifecycle: vi.fn(async () => gatewayOk(makeLifecycle(investigation))),
+      createContribution,
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: investigation.id } });
+
+    await screen.findByRole("heading", { name: investigation.title });
+    fireEvent.click(screen.getByRole("checkbox", { name: new RegExp(evidence.filename ?? evidence.id, "iu") }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Hypothesis" }), {
+      target: { value: hypothesis.body },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Record hypothesis" }));
+
+    await waitFor(() => expect(createContribution).toHaveBeenCalledTimes(1));
+    expect(createContribution).toHaveBeenCalledWith(
+      investigation.id,
+      expect.objectContaining({
+        kind: "hypothesis",
+        body: hypothesis.body,
+        hypothesisLinks: [{ kind: "artifact", id: evidence.id }],
+        idempotencyKey: expect.stringMatching(/^evidence-hypothesis-/u),
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(await screen.findByText("Hypothesis recorded")).toBeTruthy();
+  });
+
   it("shows durable artifact notes and submits a stable retry token", async () => {
     const existing = makeArtifactAnnotation();
     const created = makeArtifactAnnotation({ id: "annotation-created", body: "A second corroborating observation." });

@@ -665,3 +665,133 @@
   font-size: 0.78rem;
   line-height: 1.35;
 }
+
+/* Shared, authority-free evidence-linked hypothesis composer. */
+.strategy-kit__hypothesis-evidence {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(12rem, 2fr);
+  gap: 0.8rem 1rem;
+  align-items: start;
+  padding: 0.85rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.strategy-kit__hypothesis-evidence h4,
+.strategy-kit__hypothesis-evidence p,
+.strategy-kit__hypothesis-editor p { margin: 0; }
+
+.strategy-kit__hypothesis-evidence p,
+.strategy-kit__hypothesis-evidence > span,
+.strategy-kit__hypothesis-editor > p {
+  margin-top: 0.3rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.strategy-kit__hypothesis-evidence ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.strategy-kit__hypothesis-evidence li {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface);
+}
+
+.strategy-kit__hypothesis-evidence li span,
+.strategy-kit__breakable { overflow-wrap: anywhere; }
+
+.strategy-kit__hypothesis-evidence li span:last-child {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.strategy-kit__hypothesis-editor {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.8rem;
+  padding: 0.85rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.strategy-kit__hypothesis-field {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.strategy-kit__hypothesis-field textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  padding: 0.65rem 0.7rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.strategy-kit__hypothesis-editor button {
+  min-height: 2.35rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface-deep);
+  color: var(--fg);
+  font: inherit;
+}
+
+.strategy-kit__hypothesis-editor button:disabled { opacity: 0.58; }
+.strategy-kit__hypothesis-editor :is(textarea, button):focus-visible {
+  outline: 0.18rem solid var(--accent);
+  outline-offset: 0.14rem;
+}
+
+@media (max-width: 560px) {
+  .strategy-kit__hypothesis-evidence { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 390px) {
+  .strategy-kit__hypothesis-editor .strategy-kit__actions,
+  .strategy-kit__hypothesis-editor .strategy-kit__actions button { width: 100%; }
+}
+
+@media (forced-colors: active) {
+  .strategy-kit__hypothesis-evidence,
+  .strategy-kit__hypothesis-evidence li,
+  .strategy-kit__hypothesis-editor,
+  .strategy-kit__hypothesis-field textarea,
+  .strategy-kit__hypothesis-editor button { border-color: CanvasText; }
+  .strategy-kit__hypothesis-editor :is(textarea, button):focus-visible {
+    outline: 3px solid Highlight;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .strategy-kit__hypothesis-evidence,
+  .strategy-kit__hypothesis-evidence *,
+  .strategy-kit__hypothesis-editor,
+  .strategy-kit__hypothesis-editor * {
+    animation: none !important;
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}

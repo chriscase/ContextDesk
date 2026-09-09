@@ -13,6 +13,7 @@ import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import { RuntimeCoordinationControl } from "../runtime-coordination.js";
 import {
   EvidenceAnnotationWorkspace,
+  EvidenceHypothesisComposer,
   RecordedContextCombo,
   recordedContextCatalogFromView,
   recordedContextOptions,
@@ -586,6 +587,19 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         onRefresh={runtime.refresh.artifactAnnotations}
         onClearSelection={() => setSelectedEvidence([])}
         trashDescriptionId="investigation-first-trash-description"
+      />
+      <EvidenceHypothesisComposer
+        scopeKey={`${props.focusCaseId ?? "none"}\u0000${runtime.identity.id}\u0000${runtime.identity.username}`}
+        selectedEvidence={inventory.availability === "available"
+          ? inventory.value
+            .filter(({ evidence }) => selectedEvidence.includes(evidence.id))
+            .map(({ evidence }) => ({
+              id: evidence.id,
+              name: evidence.filename || evidence.uri || "Unnamed evidence",
+            }))
+          : []}
+        createContribution={runtime.commands.createContribution}
+        mutationState={runtime.mutations.createContribution}
       />
       {upload.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
       {uploadCommand !== null ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment">{UPLOAD_KINDS.map((option) => <option key={option} value={option}>{option === "attachment" ? "Attachment" : option === "log" ? "Log" : "Email"}</option>)}</select></label><label>Privacy<select name="privacyClass" value={privacyClass} onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe")}>{(runtime.capabilities.canReadPrivate ? PRIVACY_CLASSES : SHARE_SAFE_PRIVACY_CLASSES).map((option) => <option key={option} value={option}>{option === "owner_only" ? "Owner only" : "Share safe"}</option>)}</select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={upload.status === "running"}>{upload.status === "running" ? "Adding…" : "Add to evidence inventory"}</button></form> : null}

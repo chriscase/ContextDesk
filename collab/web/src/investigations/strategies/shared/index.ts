@@ -54,6 +54,12 @@ export type { CoordinationControlProps } from "./CoordinationControl.js";
 export { EvidenceAnnotationWorkspace } from "./EvidenceAnnotationWorkspace.js";
 export type { EvidenceAnnotationWorkspaceProps } from "./EvidenceAnnotationWorkspace.js";
 
+export { EvidenceHypothesisComposer } from "./EvidenceHypothesisComposer.js";
+export type {
+  EvidenceHypothesisComposerProps,
+  EvidenceHypothesisEvidence,
+} from "./EvidenceHypothesisComposer.js";
+
 export { CollectionPagination } from "./CollectionPagination.js";
 export type { CollectionPageView, CollectionPaginationProps } from "./CollectionPagination.js";
 
