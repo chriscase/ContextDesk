@@ -70,7 +70,7 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     const caseId = await caseIdForTitle(page, title);
     await expect(page.getByRole("heading", { name: "Evidence and snapshots" })).toBeVisible();
 
-    await uploadEvidence(page, caseId, {
+    const artifact = await uploadEvidence(page, caseId, {
       kind: "log",
       summary: "Shared synthetic timeout log",
       filename: "shared-timeout.log",
@@ -86,6 +86,17 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     await page.getByRole("button", { name: "Freeze selected evidence (1)" }).click();
     await expect(page.getByText(/1 items ·/)).toBeVisible();
     await expect(page.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
+
+    const row = page.locator(".case-memory__item").filter({ hasText: "shared-timeout.log" });
+    const disclosure = row.getByText("Artifact identity & integrity");
+    await disclosure.click();
+    const inspector = row.getByRole("region", { name: "shared-timeout.log" });
+    await expect(inspector).toBeVisible();
+    if (!artifact.contentHash) throw new Error("uploaded fixture did not return a content hash");
+    await expect(inspector.getByText(artifact.contentHash, { exact: true }).first()).toBeVisible();
+    await expect(inspector.getByText("Snapshot S0")).toBeVisible();
+    await expect(inspector.getByText(/Technical integrity facts do not establish human judgment/)).toBeVisible();
+    await expect(inspector.getByText(/live recheck/)).toHaveCount(0);
   });
 
   test("unscoped snapshot routes remain absent", async ({ request }) => {

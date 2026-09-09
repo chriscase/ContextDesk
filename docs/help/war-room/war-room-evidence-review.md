@@ -38,6 +38,22 @@ Manual intake begins unverified. The importer and the described operator are
 different provenance fields. A package snapshot identity is useful only when
 it is actually recorded; its absence does not license an inferred binding.
 
+## Inspect artifact identity and integrity
+
+In the War Room evidence board, expand **Artifact identity & integrity** for a
+file or reference before relying on it. The inspector brings together the
+artifact id, recorded source and uploader, privacy class, content and expected
+hashes, technical verification value, and every loaded frozen snapshot that
+includes that artifact identity. Preview and download remain bounded by the
+existing evidence controls.
+
+These are technical and historical facts, not a human decision about whether
+the evidence is correct or relevant. A matching recorded hash does not approve
+a conclusion. Snapshot inclusion means only that the frozen snapshot names
+that artifact identity. For a controlled external reference, the inspector
+shows the provider result recorded with the artifact; it does not perform a
+live reference recheck. Missing values remain **Not recorded**.
+
 ## Snapshot and lane checks
 
 Each selected lane should identify the frozen evidence snapshot it received.

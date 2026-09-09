@@ -4,6 +4,7 @@ import { protectedApiFetch, protectedMultipartUpload } from "./protected-api.js"
 import type { WorkFocus } from "./app-location.js";
 import { useRouteFocus } from "./route-focus.js";
 import { TechnicalIdentifiers } from "./technical-identity.js";
+import { ArtifactIntegrityPanel } from "./ArtifactIntegrityPanel.js";
 
 const ARTIFACT_KINDS = ["log", "email", "attachment", "file_server_ref"] as const;
 const UPLOAD_KINDS = ARTIFACT_KINDS.filter(
@@ -44,12 +45,16 @@ interface ArtifactView {
   id: string;
   kind: string;
   filename: string | null;
+  uri?: string | null;
   contentHash: string | null;
+  expectedHash?: string | null;
   verificationStatus: string | null;
   privacyClass: string;
   uploaderId: string;
+  sourceId?: string | null;
   relativePath?: string | null;
   intakeBatchId?: string | null;
+  summaryContributionId?: string | null;
   mediaType?: string | null;
   byteLength?: number | null;
 }
@@ -1367,57 +1372,66 @@ export function CaseBoardPanel(props: {
                         </span>
                         <span className="case-memory__meta">{artifact.privacyClass}</span>
                       </div>
-                      <div className="case-memory__item-actions">
-                        <TechnicalIdentifiers
-                          record={label}
-                          items={[
-                            {
-                              label: "Content hash",
-                              value: artifact.contentHash,
-                              hint: "matches this exact evidence against another system",
-                            },
-                            { label: "Evidence id", value: artifact.id },
-                          ]}
-                        />
-                        {canReadArtifact ? (
-                          <>
-                            <button
-                              type="button"
-                              className="case-memory__inspect"
-                              aria-expanded={inspecting === artifact.id}
-                              onClick={() => void inspectArtifact(artifact)}
-                            >
-                              {previewControlName(artifact, inspecting === artifact.id)}
-                            </button>
-                            {artifact.kind !== "file_server_ref" ? (
+                      <ArtifactIntegrityPanel
+                        key={`${props.caseId}\u0000${artifact.id}\u0000${artifact.contentHash ?? "no-content-hash"}`}
+                        caseId={props.caseId}
+                        artifact={artifact}
+                        snapshots={currentSnapshots}
+                        uploaderLabel={participantLabel(artifact.uploaderId, props.participants ?? [])}
+                        snapshotCreatorLabel={(identityId) => participantLabel(identityId, props.participants ?? [])}
+                      >
+                        <div className="case-memory__item-actions">
+                          <TechnicalIdentifiers
+                            record={label}
+                            items={[
+                              {
+                                label: "Content hash",
+                                value: artifact.contentHash,
+                                hint: "matches this exact evidence against another system",
+                              },
+                              { label: "Evidence id", value: artifact.id },
+                            ]}
+                          />
+                          {canReadArtifact ? (
+                            <>
                               <button
                                 type="button"
-                                className="case-memory__download"
-                                onClick={() => downloadArtifact(artifact)}
+                                className="case-memory__inspect"
+                                aria-expanded={inspecting === artifact.id}
+                                onClick={() => void inspectArtifact(artifact)}
                               >
-                                Download {label}
+                                {previewControlName(artifact, inspecting === artifact.id)}
                               </button>
-                            ) : null}
-                          </>
-                        ) : (
-                          <span className="case-memory__note">
-                            Private evidence bytes require additional permission.
-                          </span>
-                        )}
-                      </div>
-                      {canReadArtifact && inspecting === artifact.id ? (
-                        inspectUnavailable ? (
-                          <p className="case-memory__note">{inspectUnavailable}</p>
-                        ) : inspectText !== null ? (
-                          <LogEvidenceViewer
-                            filename={label}
-                            text={inspectText}
-                            truncated={inspectTruncated}
-                          />
-                        ) : (
-                          <p className="case-memory__empty">Loading preview…</p>
-                        )
-                      ) : null}
+                              {artifact.kind !== "file_server_ref" ? (
+                                <button
+                                  type="button"
+                                  className="case-memory__download"
+                                  onClick={() => downloadArtifact(artifact)}
+                                >
+                                  Download {label}
+                                </button>
+                              ) : null}
+                            </>
+                          ) : (
+                            <span className="case-memory__note">
+                              Private evidence bytes require additional permission.
+                            </span>
+                          )}
+                        </div>
+                        {canReadArtifact && inspecting === artifact.id ? (
+                          inspectUnavailable ? (
+                            <p className="case-memory__note">{inspectUnavailable}</p>
+                          ) : inspectText !== null ? (
+                            <LogEvidenceViewer
+                              filename={label}
+                              text={inspectText}
+                              truncated={inspectTruncated}
+                            />
+                          ) : (
+                            <p className="case-memory__empty">Loading preview…</p>
+                          )
+                        ) : null}
+                      </ArtifactIntegrityPanel>
                     </div>
                   </li>
                   );

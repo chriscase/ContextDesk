@@ -237,6 +237,40 @@ test.describe("War Room scenario surfaces are readable and operable", () => {
     await expect(disclosure.locator("summary")).toContainText(/\d+ lines/);
   });
 
+  test("the artifact integrity inspector is keyboard-operable and reflows in forced colors", async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 760 });
+    await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
+    await loginAs(page, FIXTURE_USERS.dave);
+    const caseId = await referenceInvestigation(page, uniqueTitle("Artifact integrity"));
+    await page.goto(`/investigations/${caseId}/analyze`);
+
+    const row = page.locator("#stage-analyze .case-memory__list > li").filter({
+      hasText: "bundle/mailer/mailer-offsetless.log",
+    });
+    const summary = row.locator(".artifact-integrity > summary");
+    await summary.focus();
+    await expect(summary).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    const inspector = row.getByRole("region", { name: "bundle/mailer/mailer-offsetless.log" });
+    await expect(inspector).toBeVisible();
+    await expect(inspector.getByRole("heading", { name: "Technical integrity" })).toBeVisible();
+    await expect(inspector.getByRole("heading", { name: "Frozen snapshot inclusion" })).toBeVisible();
+    await expect(inspector.getByText("Snapshot S0")).toBeVisible();
+    expect(await unnamedControls(page, ".artifact-integrity")).toEqual([]);
+    expect(await documentOverflow(page)).toBeLessThanOrEqual(320);
+    expect(
+      await inspector.locator("code").evaluateAll((nodes) =>
+        nodes.every((node) => node.scrollWidth <= node.clientWidth),
+      ),
+      "an artifact hash or fingerprint overflows its inspector",
+    ).toBe(true);
+    expect(
+      await inspector.evaluate((node) => getComputedStyle(node).borderStyle),
+      "forced-colors removes the inspector boundary",
+    ).not.toBe("none");
+  });
+
   test("the comparison matrix scrolls inside its own wrapper on a phone", async ({ page }) => {
     await page.setViewportSize(PHONE);
     await loginAs(page, FIXTURE_USERS.dave);

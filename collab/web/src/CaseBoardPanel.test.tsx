@@ -16,6 +16,13 @@ const PANEL_SOURCE = readFileSync(
   "utf8",
 );
 
+function openDetails(summary: HTMLElement): void {
+  const details = summary.closest("details");
+  if (!details) throw new Error("details disclosure is missing");
+  fireEvent.click(summary);
+  fireEvent(details, new Event("toggle"));
+}
+
 class UploadXHR {
   static pending: UploadXHR[] = [];
   status = 0;
@@ -243,9 +250,14 @@ describe("CaseBoardPanel", () => {
                   kind: "log",
                   filename: "checkout.log",
                   contentHash: "a".repeat(64),
+                  expectedHash: "a".repeat(64),
                   verificationStatus: "verified",
                   privacyClass: "owner_only",
                   uploaderId: directoryIdentity,
+                  sourceId: "source-checkout",
+                  relativePath: "checkout/checkout.log",
+                  intakeBatchId: "batch-checkout",
+                  summaryContributionId: "summary-checkout",
                   byteLength: 12,
                   mediaType: "text/plain",
                 },
@@ -346,6 +358,13 @@ describe("CaseBoardPanel", () => {
     expect(evidence.dataset.routeKind).toBe("evidence");
     expect(screen.getByRole("button", { name: "Download checkout.log" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Inspect log" })).toBeTruthy();
+    openDetails(screen.getByText("Artifact identity & integrity"));
+    expect(screen.getByText("Recorded hashes match")).toBeTruthy();
+    expect(screen.getByText("source-checkout")).toBeTruthy();
+    expect(screen.getByText("checkout/checkout.log")).toBeTruthy();
+    expect(screen.getByText("Snapshot S0")).toBeTruthy();
+    expect(screen.getByText(/Position 1 · owner_only · frozen by alice/)).toBeTruthy();
+    expect(screen.getByText("b".repeat(64))).toBeTruthy();
   });
 
   it("keeps the empty state useful and read-only", async () => {
@@ -2423,6 +2442,8 @@ describe("upload protocol and selection fencing", () => {
     );
     const caseAItem = (await screen.findByText("case-a.log")).closest("li") as HTMLElement;
     await waitFor(() => expect(document.activeElement).toBe(caseAItem));
+    openDetails(within(caseAItem).getByText("Artifact identity & integrity"));
+    expect(within(caseAItem).getAllByText("a".repeat(64)).length).toBeGreaterThan(0);
     window.dispatchEvent(new CustomEvent("contextdesk:corpus-intake-committed", {
       detail: { caseId: "case-1" },
     }));
@@ -2433,6 +2454,7 @@ describe("upload protocol and selection fencing", () => {
       <CaseBoardPanel canReadPrivate caseId="case-2" canWrite={false} canLead={false} readOnly />,
     );
     expect(screen.queryByText("case-a.log")).toBeNull();
+    expect(screen.queryByText("a".repeat(64))).toBeNull();
     expect(screen.getByText("Loading case memory…")).toBeTruthy();
     expect(refreshSignal?.aborted).toBe(true);
 
