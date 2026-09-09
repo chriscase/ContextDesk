@@ -11,9 +11,12 @@ import {
   readSync,
 } from "node:fs";
 import { isAbsolute } from "node:path";
+import { assertCanonicalEvidenceProviderInstanceId } from "./provider-instance.js";
 
 export const EVIDENCE_PROVIDER_FILESYSTEM = "filesystem" as const;
 export const EVIDENCE_PROVIDER_S3 = "s3" as const;
+export const EVIDENCE_PROVIDER_INSTANCE_ID_SETTING =
+  "COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID" as const;
 export type EvidenceProviderKind =
   | typeof EVIDENCE_PROVIDER_FILESYSTEM
   | typeof EVIDENCE_PROVIDER_S3;
@@ -69,6 +72,10 @@ const KNOWN_S3_NAMES = new Set<string>([
 export const EVIDENCE_STORAGE_ERRORS = {
   leftover: "filesystem evidence mode rejects leftover s3 configuration",
   provider: "COLLAB_EVIDENCE_PROVIDER must be filesystem or s3",
+  providerInstanceId:
+    "COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID must be a canonical lowercase UUID",
+  unknownProviderInstanceSetting:
+    "evidence provider identity rejects unknown configuration",
   unknownSetting: "s3 evidence mode rejects unknown s3 configuration",
   missingEndpoint: "s3 evidence mode requires COLLAB_EVIDENCE_S3_ENDPOINT",
   missingRegion: "s3 evidence mode requires COLLAB_EVIDENCE_S3_REGION",
@@ -124,6 +131,8 @@ export interface EvidenceS3Settings {
 type EvidenceStorageBase = {
   controlRoot: string;
   storage: "postgres" | "sqlite";
+  /** Absent/null preserves legacy, unbound evidence-provider behavior. */
+  expectedProviderInstanceId?: string | null;
 };
 
 /**
@@ -193,6 +202,26 @@ function listedS3Leftovers(env: NodeJS.ProcessEnv): string[] {
     if (name.startsWith("COLLAB_EVIDENCE_S3_")) leftovers.push(name);
   }
   return leftovers;
+}
+
+function parseExpectedProviderInstanceId(env: NodeJS.ProcessEnv): string | null {
+  for (const name of Object.keys(env)) {
+    if (!envIsPresent(env, name)) continue;
+    if (
+      name.startsWith("COLLAB_EVIDENCE_PROVIDER_INSTANCE_")
+      && name !== EVIDENCE_PROVIDER_INSTANCE_ID_SETTING
+    ) {
+      fail(EVIDENCE_STORAGE_ERRORS.unknownProviderInstanceSetting);
+    }
+  }
+  if (!envIsPresent(env, EVIDENCE_PROVIDER_INSTANCE_ID_SETTING)) return null;
+  try {
+    return assertCanonicalEvidenceProviderInstanceId(
+      presentEnvValue(env, EVIDENCE_PROVIDER_INSTANCE_ID_SETTING),
+    );
+  } catch {
+    fail(EVIDENCE_STORAGE_ERRORS.providerInstanceId);
+  }
 }
 
 function parseMaxUploadBytes(env: NodeJS.ProcessEnv): number {
@@ -613,6 +642,7 @@ export function loadEvidenceStorageSettings(
   env: NodeJS.ProcessEnv,
   options: { controlRoot: string; storage: "postgres" | "sqlite" },
 ): LoadedEvidenceStorageSettings {
+  const expectedProviderInstanceId = parseExpectedProviderInstanceId(env);
   const provider = parseProvider(env);
   if (provider === EVIDENCE_PROVIDER_FILESYSTEM) {
     if (listedS3Leftovers(env).length > 0) fail(EVIDENCE_STORAGE_ERRORS.leftover);
@@ -621,6 +651,7 @@ export function loadEvidenceStorageSettings(
       controlRoot: options.controlRoot,
       storage: options.storage,
       maxUploadBytes: parseMaxUploadBytes(env),
+      ...(expectedProviderInstanceId === null ? {} : { expectedProviderInstanceId }),
     };
   }
   assertNoUnknownS3Names(env);
@@ -686,6 +717,7 @@ export function loadEvidenceStorageSettings(
     controlRoot: options.controlRoot,
     storage: options.storage,
     maxUploadBytes,
+    ...(expectedProviderInstanceId === null ? {} : { expectedProviderInstanceId }),
     s3: {
       endpoint,
       region,

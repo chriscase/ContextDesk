@@ -450,6 +450,48 @@ describe("evidence s3 prefix, bucket, timeout, and size", () => {
   });
 });
 
+describe("evidence provider identity pin", () => {
+  const instanceId = "8d2f63fa-327e-4b90-9d43-aa4f10e1d3a2";
+
+  it("keeps an absent pin in legacy-unbound mode for both providers", () => {
+    expect(load({}).expectedProviderInstanceId).toBeUndefined();
+    expect(load(s3Base()).expectedProviderInstanceId).toBeUndefined();
+  });
+
+  it("projects one canonical expected identity without provider I/O", () => {
+    const filesystem = load({ COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID: instanceId });
+    expect(filesystem.expectedProviderInstanceId).toBe(instanceId);
+
+    const s3 = load(s3Base({ COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID: instanceId }));
+    expect(s3.expectedProviderInstanceId).toBe(instanceId);
+    expect(JSON.stringify(s3)).not.toMatch(/access.?key|secret|token/i);
+  });
+
+  it("rejects present invalid pins without trimming or case folding", () => {
+    for (const value of ["", ` ${instanceId}`, `${instanceId} `, instanceId.toUpperCase(), "nope"]) {
+      expectThrow(
+        { COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID: value },
+        EVIDENCE_STORAGE_ERRORS.providerInstanceId,
+      );
+      expectThrow(
+        s3Base({ COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID: value }),
+        EVIDENCE_STORAGE_ERRORS.providerInstanceId,
+      );
+    }
+  });
+
+  it("rejects unknown provider-identity settings in either mode", () => {
+    expectThrow(
+      { COLLAB_EVIDENCE_PROVIDER_INSTANCE_LABEL: "private-canary" },
+      EVIDENCE_STORAGE_ERRORS.unknownProviderInstanceSetting,
+    );
+    expectThrow(
+      s3Base({ COLLAB_EVIDENCE_PROVIDER_INSTANCE_LABEL: "private-canary" }),
+      EVIDENCE_STORAGE_ERRORS.unknownProviderInstanceSetting,
+    );
+  });
+});
+
 describe("evidence s3 custom CA file", () => {
   it("refuses a custom CA for an explicitly allowed plaintext endpoint", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cd-collab-s3-ca-http-"));
