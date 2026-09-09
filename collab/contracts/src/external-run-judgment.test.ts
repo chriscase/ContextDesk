@@ -429,7 +429,6 @@ describe("external-run judgment constants", () => {
     }
   });
 });
-
 describe("external-run judgment record", () => {
   it("parses a frozen corroborates record with sorted unique links", () => {
     const parsed = parseExternalRunJudgment(
@@ -1077,4 +1076,3 @@ describe("external-run judgment JSON Schema / Ajv parity", () => {
     );
   });
 });
-
