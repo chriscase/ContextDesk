@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
 import {
   selectResourceView,
   useInvestigationRuntime,
   type ArtifactKind,
+  type ArtifactV1,
   type CaseV1,
   type CommandOutcome,
   type ContributionV1,
@@ -26,6 +27,11 @@ import {
 } from "../shared/index.js";
 
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
+type UploadReconciliation = {
+  readonly baseline: ResourceState<readonly ArtifactV1[]>;
+  readonly scopeKey: string;
+  readonly status: "waiting" | "failed" | "ready";
+};
 
 function titleOf(investigation: CaseV1): string {
   return investigation.title.trim() || "Untitled investigation";
@@ -267,20 +273,49 @@ function EntryComposer({ investigation }: { readonly investigation: CaseV1 }) {
   );
 }
 
-function EvidenceCard() {
+function EvidenceCard({ investigationId }: { readonly investigationId: string }) {
   const runtime = useInvestigationRuntime();
   const view = selectResourceView(runtime.resources.evidence);
   const [kind, setKind] = useState<ArtifactKind>("attachment");
   const [summary, setSummary] = useState("");
   const [privacyClass, setPrivacyClass] = useState<PrivacyClass | "">(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
   const [feedback, setFeedback] = useState<{ tone: "danger" | "success"; text: string } | null>(null);
+  const [uploadReconciliation, setUploadReconciliation] = useState<UploadReconciliation | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const busy = runtime.mutations.uploadEvidence.status === "running";
+  const uploadScopeKey = `${runtime.presentationScopeKey}\u0000${investigationId}\u0000${runtime.capabilities.canRead ? "read" : "denied"}\u0000${runtime.capabilities.canUpload ? "upload" : "read-only"}\u0000${runtime.capabilities.canReadPrivate ? "private" : "share-safe"}`;
+  const uploadScopeRef = useRef(uploadScopeKey);
+  const priorUploadScopeRef = useRef(uploadScopeKey);
+  uploadScopeRef.current = uploadScopeKey;
+  const activeUploadReconciliation = uploadReconciliation?.scopeKey === uploadScopeKey
+    ? uploadReconciliation
+    : null;
+  useLayoutEffect(() => {
+    if (priorUploadScopeRef.current === uploadScopeKey) return;
+    priorUploadScopeRef.current = uploadScopeKey;
+    setUploadReconciliation(null);
+    setSummary("");
+    setFeedback(null);
+    if (fileRef.current) fileRef.current.value = "";
+  }, [uploadScopeKey]);
+  useEffect(() => {
+    setUploadReconciliation((current) => {
+      if (current === null || current.scopeKey !== uploadScopeKey) return null;
+      if (runtime.resources.evidence === current.baseline) return current;
+      const status = runtime.resources.evidence.status === "ready"
+        ? "ready"
+        : runtime.resources.evidence.status === "failed"
+          ? "failed"
+          : "waiting";
+      return status === current.status ? current : { ...current, status };
+    });
+  }, [runtime.resources.evidence, uploadScopeKey]);
   useEffect(() => {
     if (!runtime.capabilities.canReadPrivate && privacyClass === "owner_only") {
       // Do not silently broaden a private draft to share-safe. The person
       // attaching it must make a new disclosure choice after authority loss.
       setPrivacyClass("");
+      setUploadReconciliation(null);
       if (fileRef.current) fileRef.current.value = "";
       setFeedback({ tone: "danger", text: "Private evidence access changed. Choose a privacy level again before attaching this file." });
     }
@@ -289,7 +324,11 @@ function EvidenceCard() {
     event.preventDefault();
     const command = runtime.commands.uploadEvidence;
     const file = fileRef.current?.files?.[0] ?? null;
-    if (!command || !file || busy || !privacyClass) return;
+    const explicitRetry = activeUploadReconciliation?.status === "ready";
+    if (!command || !file || busy || !privacyClass || (activeUploadReconciliation !== null && !explicitRetry)) return;
+    const evidenceBeforeUpload = runtime.resources.evidence;
+    const submittedScopeKey = uploadScopeKey;
+    if (explicitRetry) setUploadReconciliation(null);
     // Revalidate privacy at the action boundary. A passive state repair alone
     // leaves one render window in which revoked private-read authority could
     // otherwise submit a stale owner-only draft.
@@ -301,11 +340,19 @@ function EvidenceCard() {
     }
     setFeedback(null);
     const result = await command({ file, kind, summary, privacyClass });
+    if (uploadScopeRef.current !== submittedScopeKey) return;
     if (result.status === "succeeded") {
+      setUploadReconciliation(null);
       setSummary("");
       if (fileRef.current) fileRef.current.value = "";
       setFeedback({ tone: "success", text: `${file.name} was attached to the evidence inventory.` });
+    } else if (result.status === "failed"
+      && result.error.kind === "unavailable"
+      && result.error.reason === "commit_outcome_unknown") {
+      setFeedback(null);
+      setUploadReconciliation({ baseline: evidenceBeforeUpload, scopeKey: submittedScopeKey, status: "waiting" });
     } else {
+      setUploadReconciliation(null);
       setFeedback({ tone: "danger", text: commandFailureCopy(result, "The upload") });
     }
   }
@@ -316,7 +363,11 @@ function EvidenceCard() {
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Evidence refresh failed" action={<button type="button" onClick={runtime.refresh.evidence}>Retry</button>}>The previously loaded inventory remains visible.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length === 0 ? <StrategyStateNotice>No supporting material has been recorded yet.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length > 0 ? <ul className="beacon__evidence-list">{view.value.map((item) => <li key={item.id}><span><strong>{item.filename || item.uri || "Unnamed evidence"}</strong><small>{item.kind} · {item.mediaType || "media type not recorded"} · {item.privacyClass === "owner_only" ? "owner only" : "share safe"}</small></span><StrategyBadge>{item.verificationStatus || "verification not recorded"}</StrategyBadge></li>)}</ul> : null}
-      {runtime.capabilities.canUpload ? <form className="beacon__upload" onSubmit={(event) => void submit(event)}><label className="beacon__field"><span>File (server-configured limit)</span><input ref={fileRef} type="file" required /></label><label className="beacon__field"><span>Kind</span><select value={kind} onChange={(event) => setKind(event.target.value as ArtifactKind)}><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option></select></label><label className="beacon__field"><span>Privacy</span><select value={privacyClass} required onChange={(event) => { const next = event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : event.target.value === "share_safe" ? "share_safe" : ""; setPrivacyClass(next); if (next && feedback?.text.startsWith("Private evidence access changed")) setFeedback(null); }}><option value="">Choose privacy</option><option value="share_safe">Share safe</option>{runtime.capabilities.canReadPrivate ? <option value="owner_only">Owner only</option> : null}</select></label><label className="beacon__field beacon__field--wide"><span>Why does this matter?</span><input value={summary} onChange={(event) => setSummary(event.target.value)} required /></label>{feedback ? <StrategyStateNotice tone={feedback.tone} role={feedback.tone === "danger" ? "alert" : "status"}>{feedback.text}</StrategyStateNotice> : null}<button type="submit" disabled={busy || !privacyClass || !runtime.commands.uploadEvidence}>{busy ? "Attaching…" : runtime.commands.uploadEvidence ? "Attach evidence" : "Preparing upload…"}</button></form> : <StrategyStateNotice title="Evidence upload is read-only">You can review supporting material, but your current access cannot attach a file.</StrategyStateNotice>}
+      {runtime.capabilities.canUpload ? <form className="beacon__upload" onSubmit={(event) => void submit(event)}><label className="beacon__field"><span>File (server-configured limit)</span><input ref={fileRef} type="file" required /></label><label className="beacon__field"><span>Kind</span><select value={kind} onChange={(event) => setKind(event.target.value as ArtifactKind)}><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option></select></label><label className="beacon__field"><span>Privacy</span><select value={privacyClass} required onChange={(event) => { const next = event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : event.target.value === "share_safe" ? "share_safe" : ""; setPrivacyClass(next); if (next && feedback?.text.startsWith("Private evidence access changed")) setFeedback(null); }}><option value="">Choose privacy</option><option value="share_safe">Share safe</option>{runtime.capabilities.canReadPrivate ? <option value="owner_only">Owner only</option> : null}</select></label><label className="beacon__field beacon__field--wide"><span>Why does this matter?</span><input value={summary} onChange={(event) => setSummary(event.target.value)} required /></label>{activeUploadReconciliation ? <StrategyStateNotice tone="danger" role="alert">{activeUploadReconciliation.status === "failed"
+        ? "The upload result was not confirmed, and the evidence inventory could not be refreshed. Retry loading the inventory, then check it before uploading again. This is not confirmation that the file was stored or rolled back."
+        : activeUploadReconciliation.status === "ready"
+          ? "The upload result was not confirmed. The evidence inventory has been refreshed; check it before retrying. This is not confirmation that the file was stored or rolled back."
+          : "The upload result was not confirmed. The evidence inventory is being refreshed; check it before uploading again. This is not confirmation that the file was stored or rolled back."}</StrategyStateNotice> : feedback ? <StrategyStateNotice tone={feedback.tone} role={feedback.tone === "danger" ? "alert" : "status"}>{feedback.text}</StrategyStateNotice> : null}<button type="submit" disabled={busy || !privacyClass || !runtime.commands.uploadEvidence || (activeUploadReconciliation !== null && activeUploadReconciliation.status !== "ready")}>{busy ? "Attaching…" : activeUploadReconciliation?.status === "ready" ? "Retry upload after checking inventory" : activeUploadReconciliation === null ? runtime.commands.uploadEvidence ? "Attach evidence" : "Preparing upload…" : "Upload blocked until inventory refresh"}</button></form> : <StrategyStateNotice title="Evidence upload is read-only">You can review supporting material, but your current access cannot attach a file.</StrategyStateNotice>}
     </StrategyPanel>
   );
 }
@@ -421,7 +472,7 @@ function Detail(props: InvestigationStrategyShellProps) {
             {contributions.availability === "available" && entries.length === 0 ? <StrategyStateNotice>No dated entries have been recorded yet.</StrategyStateNotice> : null}
             {entries.length > 0 ? <ol className="beacon__stream">{entries.map((entry) => <li key={entry.id}><div className="beacon__stream-marker" aria-hidden="true" /><article><header><StrategyBadge tone={entry.kind === "hypothesis" ? "warning" : entry.kind === "action" ? "accent" : "neutral"}>{contributionLabel(entry)}</StrategyBadge><time dateTime={entry.createdAt}>{dateLabel(entry.createdAt)}</time></header><p>{entry.tombstoned ? "This entry was removed from the active record." : recorded(entry.body)}</p><footer>Recorded by {entry.authorUsername || "unknown author"}{entry.hypothesisLinks?.length ? ` · ${entry.hypothesisLinks.length} cited source${entry.hypothesisLinks.length === 1 ? "" : "s"}` : ""}</footer></article></li>)}</ol> : null}
           </StrategyPanel>
-          <EvidenceCard />
+          <EvidenceCard key={selected.id} investigationId={selected.id} />
           <RuntimeHandoffPanel investigation={selected} />
         </div>
         <aside className="beacon__side">

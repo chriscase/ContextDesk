@@ -4,6 +4,7 @@ import {
   selectResourceView,
   useInvestigationRuntime,
   type ArtifactAnnotationV1,
+  type ArtifactV1,
   type CaseV1,
   type LifecycleAction,
   type ResourceState,
@@ -44,6 +45,11 @@ const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
 const SHARE_SAFE_PRIVACY_CLASSES = ["share_safe"] as const;
 type UploadKind = (typeof UPLOAD_KINDS)[number];
 type UploadPrivacyClass = (typeof PRIVACY_CLASSES)[number];
+type UploadReconciliation = {
+  readonly baseline: ResourceState<readonly ArtifactV1[]>;
+  readonly scopeKey: string;
+  readonly status: "waiting" | "failed" | "ready";
+};
 
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function display(value: unknown): string { return text(value) || "Not recorded"; }
@@ -250,12 +256,14 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const [privacyClass, setPrivacyClass] = useState<UploadPrivacyClass>(
     runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe",
   );
+  const [uploadReconciliation, setUploadReconciliation] = useState<UploadReconciliation | null>(null);
   const [annotationMutationArtifactId, setAnnotationMutationArtifactId] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const browseHeadingRef = useRef<HTMLHeadingElement>(null);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
   const focusedArrival = useRef<string | null>(null);
+  const uploadFormRef = useRef<HTMLFormElement>(null);
   const draftOwnerKey = `${runtime.identity.id}\u0000${runtime.identity.username}`;
   const priorDraftOwnerKey = useRef(draftOwnerKey);
   const legacyCases = investigations.availability === "available" ? investigations.value : [];
@@ -298,6 +306,13 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const evidenceSelectionKey = evidenceInventory.inventory.availability === "available"
     ? evidenceInventory.inventory.value.map(({ evidence }) => evidence.id).join("\u0000")
     : "";
+  const uploadScopeKey = `${runtime.presentationScopeKey}\u0000${props.focusCaseId ?? "browse"}\u0000${runtime.capabilities.canRead ? "read" : "denied"}\u0000${runtime.capabilities.canUpload ? "upload" : "read-only"}\u0000${runtime.capabilities.canReadPrivate ? "private" : "share-safe"}`;
+  const uploadScopeRef = useRef(uploadScopeKey);
+  const priorUploadScopeRef = useRef(uploadScopeKey);
+  uploadScopeRef.current = uploadScopeKey;
+  const activeUploadReconciliation = uploadReconciliation?.scopeKey === uploadScopeKey
+    ? uploadReconciliation
+    : null;
   const contextOptions = useMemo(() => {
     const result: Record<keyof InvestigationContext, string[]> = { productName: [], version: [], build: [], component: [], environment: [], organization: [] };
     for (const row of legacyCases) for (const [field] of CONTEXT_FIELDS) { const value = text(row.investigationContext?.[field]); if (value && !result[field].includes(value)) result[field].push(value); }
@@ -349,6 +364,24 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   useLayoutEffect(() => {
     setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
   }, [runtime.capabilities.canReadPrivate]);
+  useLayoutEffect(() => {
+    if (priorUploadScopeRef.current === uploadScopeKey) return;
+    priorUploadScopeRef.current = uploadScopeKey;
+    setUploadReconciliation(null);
+    uploadFormRef.current?.reset();
+  }, [uploadScopeKey]);
+  useEffect(() => {
+    setUploadReconciliation((current) => {
+      if (current === null || current.scopeKey !== uploadScopeKey) return null;
+      if (runtime.resources.evidence === current.baseline) return current;
+      const status = runtime.resources.evidence.status === "ready"
+        ? "ready"
+        : runtime.resources.evidence.status === "failed"
+          ? "failed"
+          : "waiting";
+      return status === current.status ? current : { ...current, status };
+    });
+  }, [runtime.resources.evidence, uploadScopeKey]);
   useEffect(() => setSelectedEvidence([]), [props.focusCaseId]);
   useEffect(() => setPreviewArtifactId(null), [props.focusCaseId]);
   useEffect(() => setAnnotationArtifactId(null), [props.focusCaseId]);
@@ -392,7 +425,13 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   async function uploadEvidence(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const command = runtime.commands.uploadEvidence;
-    if (command === null || runtime.mutations.uploadEvidence.status === "running") return;
+    const explicitRetry = activeUploadReconciliation?.status === "ready";
+    if (command === null
+      || runtime.mutations.uploadEvidence.status === "running"
+      || (activeUploadReconciliation !== null && !explicitRetry)) return;
+    const evidenceBeforeUpload = runtime.resources.evidence;
+    const submittedScopeKey = uploadScopeKey;
+    if (explicitRetry) setUploadReconciliation(null);
     const form = event.currentTarget;
     const file = (form.elements.namedItem("file") as HTMLInputElement | null)?.files?.[0] ?? null;
     const summary = (form.elements.namedItem("summary") as HTMLInputElement | null)?.value ?? "";
@@ -407,9 +446,17 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       ? "owner_only"
       : "share_safe";
     const result = await command({ file, summary, kind, privacyClass: submittedPrivacy });
+    if (uploadScopeRef.current !== submittedScopeKey) return;
     if (result.status === "succeeded") {
+      setUploadReconciliation(null);
       form.reset();
       setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
+    } else if (result.status === "failed"
+      && result.error.kind === "unavailable"
+      && result.error.reason === "commit_outcome_unknown") {
+      setUploadReconciliation({ baseline: evidenceBeforeUpload, scopeKey: submittedScopeKey, status: "waiting" });
+    } else {
+      setUploadReconciliation(null);
     }
   }
 
@@ -624,8 +671,13 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         onClearSelection={() => setSelectedEvidence([])}
         trashDescriptionId="investigation-first-trash-description"
       />
-      {upload.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
-      {uploadCommand !== null ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment">{UPLOAD_KINDS.map((option) => <option key={option} value={option}>{option === "attachment" ? "Attachment" : option === "log" ? "Log" : "Email"}</option>)}</select></label><label>Privacy<select name="privacyClass" value={privacyClass} onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe")}>{(runtime.capabilities.canReadPrivate ? PRIVACY_CLASSES : SHARE_SAFE_PRIVACY_CLASSES).map((option) => <option key={option} value={option}>{option === "owner_only" ? "Owner only" : "Share safe"}</option>)}</select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={upload.status === "running"}>{upload.status === "running" ? "Adding…" : "Add to evidence inventory"}</button></form> : null}
+      {activeUploadReconciliation !== null ? <p className="investigation-first__error" role="alert">{activeUploadReconciliation.status === "failed"
+        ? "The upload result was not confirmed, and the evidence inventory could not be refreshed. Retry loading the inventory, then check it before uploading again. This is not confirmation that the file was stored or rolled back."
+        : activeUploadReconciliation.status === "ready"
+          ? "The upload result was not confirmed. The evidence inventory has been refreshed; check it before retrying. This is not confirmation that the file was stored or rolled back."
+          : "The upload result was not confirmed. The evidence inventory is being refreshed; check it before uploading again. This is not confirmation that the file was stored or rolled back."}</p>
+        : upload.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
+      {uploadCommand !== null ? <form ref={uploadFormRef} className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment">{UPLOAD_KINDS.map((option) => <option key={option} value={option}>{option === "attachment" ? "Attachment" : option === "log" ? "Log" : "Email"}</option>)}</select></label><label>Privacy<select name="privacyClass" value={privacyClass} onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe")}>{(runtime.capabilities.canReadPrivate ? PRIVACY_CLASSES : SHARE_SAFE_PRIVACY_CLASSES).map((option) => <option key={option} value={option}>{option === "owner_only" ? "Owner only" : "Share safe"}</option>)}</select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={upload.status === "running" || (activeUploadReconciliation !== null && activeUploadReconciliation.status !== "ready")}>{upload.status === "running" ? "Adding…" : activeUploadReconciliation?.status === "ready" ? "Retry upload after checking inventory" : activeUploadReconciliation === null ? "Add to evidence inventory" : "Upload blocked until inventory refresh"}</button></form> : null}
     </section>;
   }
 
