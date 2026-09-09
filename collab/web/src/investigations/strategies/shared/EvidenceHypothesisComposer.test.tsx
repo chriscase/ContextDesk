@@ -572,4 +572,3 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     expect(document.body.textContent).not.toContain(privateDetail);
   });
 });
-
