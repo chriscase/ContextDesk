@@ -132,7 +132,7 @@ type EvidenceStorageBase = {
   controlRoot: string;
   storage: "postgres" | "sqlite";
   /** Absent/null preserves legacy, unbound evidence-provider behavior. */
-  expectedProviderInstanceId?: string | null;
+  expectedProviderInstanceId?: string;
 };
 
 /**

@@ -88,7 +88,15 @@ describe("evidence provider instance manifest", () => {
     const { providerKind: _omitted, ...missing } = valid();
     expectCode(bytes(JSON.stringify(missing)), "missing_field");
     expectCode(bytes(JSON.stringify({ ...valid(), schemaId: "wrong" })), "invalid_schema");
-    for (const providerInstanceId of [ID.toUpperCase(), ` ${ID}`, `{${ID}}`, "not-a-uuid"]) {
+    for (const providerInstanceId of [
+      ID.toUpperCase(),
+      ` ${ID}`,
+      `{${ID}}`,
+      "00000000-0000-0000-0000-000000000000",
+      "8d2f63fa-327e-0b90-9d43-aa4f10e1d3a2",
+      "8d2f63fa-327e-4b90-7d43-aa4f10e1d3a2",
+      "not-a-uuid",
+    ]) {
       expectCode(bytes(JSON.stringify({ ...valid(), providerInstanceId })), "invalid_id");
     }
     expectCode(bytes(JSON.stringify({ ...valid(), providerKind: "file" })), "invalid_provider");
@@ -116,5 +124,29 @@ describe("evidence provider instance manifest", () => {
     const hidden = { ...valid() };
     Object.defineProperty(hidden, "providerKind", { value: "filesystem", enumerable: false });
     expect(() => serializeEvidenceProviderInstance(hidden)).toThrow(EvidenceProviderInstanceError);
+
+    const hostile = new Proxy(valid(), {
+      ownKeys() {
+        throw new Error(`private ${ID}`);
+      },
+    });
+    expect(() => serializeEvidenceProviderInstance(hostile)).toThrow(
+      new EvidenceProviderInstanceError("invalid_shape"),
+    );
+  });
+
+  it("fails closed across malformed scanner branches", () => {
+    for (const input of [
+      "",
+      `{"schemaId":"bad\\x"}`,
+      `{"schemaId":"bad\\u123"}`,
+      `{"schemaId":01}`,
+      `{"schemaId":1.}`,
+      "[[[[[[[[[[null]]]]]]]]]]",
+    ]) {
+      expect(() => parseEvidenceProviderInstance(bytes(input))).toThrow(
+        EvidenceProviderInstanceError,
+      );
+    }
   });
 });

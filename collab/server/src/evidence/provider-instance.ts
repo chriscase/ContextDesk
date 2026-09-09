@@ -42,7 +42,7 @@ export class EvidenceProviderInstanceError extends Error {
 }
 
 const PROVIDER_INSTANCE_ID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const EXPECTED_KEYS = new Set(["schemaId", "providerInstanceId", "providerKind"]);
 
 export function isCanonicalEvidenceProviderInstanceId(value: string): boolean {
@@ -97,6 +97,15 @@ export function serializeEvidenceProviderInstance(
 }
 
 function parseManifestValue(value: unknown): EvidenceProviderInstanceV1 {
+  try {
+    return parseManifestValueUnsafe(value);
+  } catch (error) {
+    if (error instanceof EvidenceProviderInstanceError) throw error;
+    throw new EvidenceProviderInstanceError("invalid_shape");
+  }
+}
+
+function parseManifestValueUnsafe(value: unknown): EvidenceProviderInstanceV1 {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new EvidenceProviderInstanceError("invalid_shape");
   }
