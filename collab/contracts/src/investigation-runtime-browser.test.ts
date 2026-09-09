@@ -90,10 +90,28 @@ describe("investigation Runtime browser contract boundary", () => {
     expect(browser.parseReferenceRecheckRefused).toBe(root.parseReferenceRecheckRefused);
   });
 
+  it("exports the exact root provider-bound reference contract", () => {
+    expect(browser.PROVIDER_BOUND_REFERENCE_CREATE_SCHEMA_ID).toBe(
+      root.PROVIDER_BOUND_REFERENCE_CREATE_SCHEMA_ID,
+    );
+    expect(browser.PROVIDER_BOUND_REFERENCE_LIMITS).toBe(root.PROVIDER_BOUND_REFERENCE_LIMITS);
+    expect(browser.PROVIDER_BOUND_REFERENCE_PRIVATE_FIELDS).toBe(
+      root.PROVIDER_BOUND_REFERENCE_PRIVATE_FIELDS,
+    );
+    expect(browser.PROVIDER_BOUND_REFERENCE_CONTEXT).toBe(root.PROVIDER_BOUND_REFERENCE_CONTEXT);
+    expect(browser.PROVIDER_BOUND_REFERENCE_IDEMPOTENCY).toBe(
+      root.PROVIDER_BOUND_REFERENCE_IDEMPOTENCY,
+    );
+    expect(browser.parseProviderBoundReferenceCreate).toBe(
+      root.parseProviderBoundReferenceCreate,
+    );
+  });
+
   it("recursively keeps the real browser entry free of Node and bare modules", () => {
     const graph = browserGraph(ENTRY);
     expect(graph.size).toBeGreaterThan(5);
     expect(graph).toContain(resolve(SRC_ROOT, "reference-recheck.ts"));
+    expect(graph).toContain(resolve(SRC_ROOT, "provider-reference.ts"));
     expect(graph).toContain(resolve(SRC_ROOT, "parse.ts"));
     expect(graph).toContain(resolve(SRC_ROOT, "temporal.ts"));
     expect(graph).toContain(resolve(SRC_ROOT, "user-profile.ts"));

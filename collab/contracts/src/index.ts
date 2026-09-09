@@ -1009,3 +1009,4 @@ export * from "./admin-audit.js";
 
 export * from "./investigation-lifecycle.js";
 export * from "./investigation-coordination.js";
+export * from "./provider-reference.js";
