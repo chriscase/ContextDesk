@@ -3,10 +3,20 @@ import {
   EXTERNAL_RUN_IMPORT_IDEMPOTENCY,
   EXTERNAL_RUN_IMPORT_REFUSED_SCHEMA_ID,
   EXTERNAL_RUN_IMPORT_SUCCESS_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_CONFLICT_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_LIST_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_REFUSED_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_SUCCESS_SCHEMA_ID,
   EXTERNAL_RUN_SCHEMA_ID,
   IMPORTABLE_SOURCE_KINDS,
   parseExternalRunImportRefused,
   parseExternalRunImportSuccess,
+  parseExternalRunJudgmentConflict,
+  parseExternalRunJudgmentList,
+  parseExternalRunJudgmentRefused,
+  parseExternalRunJudgmentSuccess,
+  projectExternalRunJudgmentIdempotencyIntent,
   type Completeness,
   type ContributionV1,
   type CorroborationState,
@@ -15,6 +25,12 @@ import {
   type ExternalRunImportRefusedV1,
   type ExternalRunImportRequestV1,
   type ExternalRunImportSuccessV1,
+  type ExternalRunJudgmentConflictV1,
+  type ExternalRunJudgmentLinkV1,
+  type ExternalRunJudgmentListV1,
+  type ExternalRunJudgmentRefusedV1,
+  type ExternalRunJudgmentRequestV1,
+  type ExternalRunJudgmentSuccessV1,
   type ExternalRunV1,
   type PrivacyClass,
   type SourceV1,
@@ -33,6 +49,8 @@ import {
 } from "./model.js";
 import {
   MemoryRunStore,
+  type ExternalRunJudgmentRow,
+  type ExternalRunJudgmentSuccessIntent,
   type ExternalRunImportSuccessIntent,
   type FrozenRunRow,
   type RunStore,
@@ -52,12 +70,48 @@ export class ExternalRunImportNotFoundError extends Error {
   }
 }
 
+export class ExternalRunJudgmentNotFoundError extends Error {
+  constructor() {
+    super("external run judgment target not found");
+    this.name = "ExternalRunJudgmentNotFoundError";
+  }
+}
+
+export class ExternalRunJudgmentRefusedError extends Error {
+  constructor(readonly body: ExternalRunJudgmentRefusedV1) {
+    super(body.reason);
+    this.name = "ExternalRunJudgmentRefusedError";
+  }
+}
+
+export class ExternalRunJudgmentConflictError extends Error {
+  constructor(readonly body: ExternalRunJudgmentConflictV1) {
+    super("external run judgment sequence changed");
+    this.name = "ExternalRunJudgmentConflictError";
+  }
+}
+
+export class ExternalRunJudgmentLimitError extends Error {
+  constructor() {
+    super("external run judgment limit reached");
+    this.name = "ExternalRunJudgmentLimitError";
+  }
+}
+
+export const EXTERNAL_RUN_JUDGMENT_SERVER_LIMIT = 1024 as const;
+
 function strictImportIntentDigest(request: ExternalRunImportRequestV1): string {
   const intent = { ...request } as Record<string, unknown>;
   for (const field of EXTERNAL_RUN_IMPORT_IDEMPOTENCY.excludesFromIntent) {
     delete intent[field];
   }
   return createHash("sha256").update(JSON.stringify(intent)).digest("hex");
+}
+
+function judgmentIntentDigest(request: ExternalRunJudgmentRequestV1): string {
+  return createHash("sha256")
+    .update(JSON.stringify(projectExternalRunJudgmentIdempotencyIntent(request)))
+    .digest("hex");
 }
 
 export interface ImportInput {
@@ -584,6 +638,168 @@ export class ImportService {
     return out;
   }
 
+  async listRunJudgments(
+    caseId: string,
+    runId: string,
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<ExternalRunJudgmentListV1> {
+    const run = await this.visibleRunRow(caseId, runId, actor, isAdmin);
+    if (!run) throw new ExternalRunJudgmentNotFoundError();
+    const rows = await this.runs.listJudgments(runId);
+    if (rows.length > EXTERNAL_RUN_JUDGMENT_SERVER_LIMIT) {
+      throw new Error("external run judgment store exceeds the supported list limit");
+    }
+    return parseExternalRunJudgmentList({
+      schemaId: EXTERNAL_RUN_JUDGMENT_LIST_SCHEMA_ID,
+      caseId,
+      runId,
+      judgments: rows.map((row) => this.judgmentProjection(row)),
+    });
+  }
+
+  async addRunJudgment(
+    routeCaseId: string,
+    routeRunId: string,
+    actor: Actor,
+    request: ExternalRunJudgmentRequestV1,
+    origin: string,
+    isAdmin: boolean,
+  ): Promise<ExternalRunJudgmentSuccessV1> {
+    const digest = judgmentIntentDigest(request);
+    const memoryRuns = this.runs instanceof MemoryRunStore ? this.runs : null;
+    return this.deps.cases.withAtomic(async () => {
+      const snapshot = memoryRuns ? await Promise.resolve(memoryRuns.capture()) : undefined;
+      try {
+        const lockedCase = await this.deps.cases.lockVisibleCaseForImport(
+          routeCaseId,
+          actor,
+          isAdmin,
+        );
+        if (!lockedCase) throw new ExternalRunJudgmentNotFoundError();
+        const run = await this.runs.get(routeRunId);
+        if (!run || run.caseId !== routeCaseId || !this.canView(run, actor, isAdmin)) {
+          throw new ExternalRunJudgmentNotFoundError();
+        }
+
+        const prior = await this.runs.getJudgmentSuccessIntent(
+          routeCaseId,
+          routeRunId,
+          actor.id,
+          request.idempotencyKey,
+        );
+        if (prior) return await this.replayRunJudgment(prior, request, digest, actor, run);
+
+        const judgments = await this.runs.listJudgments(routeRunId);
+        this.assertJudgmentSequence(routeCaseId, routeRunId, judgments);
+        const currentSequence = judgments.length;
+        if (request.expectedSequence !== currentSequence) {
+          throw new ExternalRunJudgmentConflictError(
+            parseExternalRunJudgmentConflict({
+              schemaId: EXTERNAL_RUN_JUDGMENT_CONFLICT_SCHEMA_ID,
+              caseId: routeCaseId,
+              runId: routeRunId,
+              expectedSequence: request.expectedSequence,
+              currentSequence,
+            }),
+          );
+        }
+        if (lockedCase.status === "archived") {
+          throw this.judgmentRefused(
+            request,
+            "case_archived",
+            "Archived investigations cannot accept external run judgments.",
+          );
+        }
+        if (currentSequence >= EXTERNAL_RUN_JUDGMENT_SERVER_LIMIT) {
+          throw new ExternalRunJudgmentLimitError();
+        }
+        if (
+          request.links.length === 0
+          && (request.judgment === "corroborates" || request.judgment === "contradicts")
+        ) {
+          throw this.judgmentRefused(
+            request,
+            "links_required",
+            "Corroborating or contradicting judgments require at least one recorded link.",
+          );
+        }
+        await this.validateJudgmentLinks(
+          routeCaseId,
+          actor,
+          isAdmin,
+          run.privacyClass,
+          request.links,
+          request,
+        );
+
+        const recordedAt = new Date().toISOString();
+        const judgment: ExternalRunJudgmentRow = {
+          caseId: routeCaseId,
+          runId: routeRunId,
+          seq: currentSequence + 1,
+          judgment: request.judgment,
+          actorId: actor.id,
+          actorUsername: actor.username,
+          links: request.links.map((link) => ({ ...link })),
+          rationale: request.rationale,
+          recordedAt,
+        };
+        const success = parseExternalRunJudgmentSuccess({
+          schemaId: EXTERNAL_RUN_JUDGMENT_SUCCESS_SCHEMA_ID,
+          caseId: routeCaseId,
+          runId: routeRunId,
+          applied: this.judgmentProjection(judgment),
+          replayed: false,
+          run: {
+            id: run.id,
+            caseId: run.caseId,
+            sourceId: run.sourceId,
+            createdAt: run.createdAt,
+          },
+        });
+        this.assertJudgmentSuccessContext(success, request, actor, run, false);
+        const successJson = JSON.stringify(success);
+
+        await this.runs.appendJudgment(judgment);
+        await this.deps.cases.appendDomainTimeline(routeCaseId, {
+          kind: "external_run_judgment_recorded",
+          actor,
+          targetId: routeRunId,
+          clientTime: null,
+          payload: {
+            judgment: request.judgment,
+            sequence: judgment.seq,
+            linkCount: request.links.length,
+          },
+        });
+        await this.deps.audit.append({
+          identity: actor.id,
+          action: "external_run_judgment_recorded",
+          target: `${routeRunId}:${judgment.seq}`,
+          origin,
+          outcome: "success",
+        });
+        await this.runs.insertJudgmentSuccessIntent({
+          caseId: routeCaseId,
+          runId: routeRunId,
+          actorId: actor.id,
+          idempotencyKey: request.idempotencyKey,
+          requestDigest: digest,
+          judgmentSeq: judgment.seq,
+          successJson,
+          createdAt: recordedAt,
+        });
+        return success;
+      } catch (error) {
+        if (memoryRuns && snapshot !== undefined) {
+          await Promise.resolve(memoryRuns.restore(snapshot));
+        }
+        throw error;
+      }
+    });
+  }
+
   async corroborate(
     caseId: string,
     runId: string,
@@ -696,6 +912,162 @@ export class ImportService {
       throw new Error("external run import success intent is incoherent");
     }
     return parseExternalRunImportSuccess({ ...original, replayed: true });
+  }
+
+  private async replayRunJudgment(
+    prior: ExternalRunJudgmentSuccessIntent,
+    request: ExternalRunJudgmentRequestV1,
+    digest: string,
+    actor: Actor,
+    run: FrozenRunRow,
+  ): Promise<ExternalRunJudgmentSuccessV1> {
+    if (prior.requestDigest !== digest) {
+      throw this.judgmentRefused(
+        request,
+        "idempotency_intent_mismatch",
+        "This idempotency key was already used with a different judgment intent.",
+      );
+    }
+    let original: ExternalRunJudgmentSuccessV1;
+    try {
+      original = parseExternalRunJudgmentSuccess(JSON.parse(prior.successJson) as unknown);
+    } catch {
+      throw new Error("external run judgment success intent is corrupt");
+    }
+    const applied = (await this.runs.listJudgments(run.id))
+      .find((row) => row.seq === prior.judgmentSeq);
+    if (
+      prior.caseId !== request.caseId
+      || prior.runId !== request.runId
+      || prior.actorId !== actor.id
+      || prior.idempotencyKey !== request.idempotencyKey
+      || !applied
+      || JSON.stringify(this.judgmentProjection(applied)) !== JSON.stringify(original.applied)
+      || original.run.id !== run.id
+      || original.run.caseId !== run.caseId
+      || original.run.sourceId !== run.sourceId
+      || original.run.createdAt !== run.createdAt
+    ) {
+      throw new Error("external run judgment success intent is incoherent");
+    }
+    this.assertJudgmentSuccessContext(original, request, actor, run, true);
+    return parseExternalRunJudgmentSuccess({ ...original, replayed: true });
+  }
+
+  private async visibleRunRow(
+    caseId: string,
+    runId: string,
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<FrozenRunRow | null> {
+    if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) return null;
+    const run = await this.runs.get(runId);
+    return run && run.caseId === caseId && this.canView(run, actor, isAdmin) ? run : null;
+  }
+
+  private async validateJudgmentLinks(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    runPrivacy: PrivacyClass,
+    links: readonly ExternalRunJudgmentLinkV1[],
+    request: ExternalRunJudgmentRequestV1,
+  ): Promise<void> {
+    if (links.length === 0) return;
+    const [artifacts, contributions, snapshots] = await Promise.all([
+      this.deps.cases.listArtifacts(caseId, actor, isAdmin),
+      this.deps.cases.listContributions(caseId, actor, isAdmin),
+      this.deps.cases.listSnapshots(caseId, actor, isAdmin),
+    ]);
+    const artifactById = new Map(artifacts.map((row) => [row.id, row]));
+    const contributionById = new Map(contributions.map((row) => [row.id, row]));
+    const snapshotById = new Map(snapshots.map((row) => [row.id, row]));
+    for (const link of links) {
+      const privacy = link.kind === "artifact"
+        ? artifactById.get(link.id)?.privacyClass
+        : link.kind === "contribution"
+          ? contributionById.get(link.id)?.privacyClass
+          : snapshotById.get(link.id)?.visibility;
+      if (privacy === undefined) throw new ExternalRunJudgmentNotFoundError();
+      if (runPrivacy === "share_safe" && privacy !== "share_safe") {
+        throw this.judgmentRefused(
+          request,
+          "privacy_mismatch",
+          "A share-safe imported run cannot cite an owner-only record.",
+        );
+      }
+    }
+  }
+
+  private assertJudgmentSequence(
+    caseId: string,
+    runId: string,
+    rows: readonly ExternalRunJudgmentRow[],
+  ): void {
+    rows.forEach((row, index) => {
+      if (row.caseId !== caseId || row.runId !== runId || row.seq !== index + 1) {
+        throw new Error("external run judgment store is incoherent");
+      }
+    });
+  }
+
+  private judgmentProjection(row: ExternalRunJudgmentRow) {
+    return {
+      schemaId: EXTERNAL_RUN_JUDGMENT_SCHEMA_ID,
+      caseId: row.caseId,
+      runId: row.runId,
+      seq: row.seq,
+      judgment: row.judgment,
+      actor: { id: row.actorId, username: row.actorUsername },
+      links: row.links.map((link) => ({ ...link })),
+      rationale: row.rationale,
+      recordedAt: row.recordedAt,
+    };
+  }
+
+  private judgmentRefused(
+    request: ExternalRunJudgmentRequestV1,
+    reason: ExternalRunJudgmentRefusedV1["reason"],
+    detail: string,
+  ): ExternalRunJudgmentRefusedError {
+    return new ExternalRunJudgmentRefusedError(
+      parseExternalRunJudgmentRefused({
+        schemaId: EXTERNAL_RUN_JUDGMENT_REFUSED_SCHEMA_ID,
+        error: "external_run_judgment_refused",
+        caseId: request.caseId,
+        runId: request.runId,
+        reason,
+        detail,
+        current: null,
+      }),
+    );
+  }
+
+  private assertJudgmentSuccessContext(
+    success: ExternalRunJudgmentSuccessV1,
+    request: ExternalRunJudgmentRequestV1,
+    actor: Actor,
+    run: FrozenRunRow,
+    replay: boolean,
+  ): void {
+    if (
+      success.caseId !== request.caseId
+      || success.runId !== request.runId
+      || success.applied.caseId !== request.caseId
+      || success.applied.runId !== request.runId
+      || success.applied.actor.id !== actor.id
+      || success.applied.actor.username !== actor.username
+      || success.applied.judgment !== request.judgment
+      || JSON.stringify(success.applied.links) !== JSON.stringify(request.links)
+      || success.applied.rationale !== request.rationale
+      || success.run.id !== run.id
+      || success.run.caseId !== run.caseId
+      || success.run.sourceId !== run.sourceId
+      || success.run.createdAt !== run.createdAt
+      || (!replay && success.applied.seq !== request.expectedSequence + 1)
+    ) {
+      throw new Error("external run judgment response context is incoherent");
+    }
   }
 
   private strictSuccess(

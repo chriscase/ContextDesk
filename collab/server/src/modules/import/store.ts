@@ -2,6 +2,8 @@ import type { Pool } from "pg";
 import type {
   Completeness,
   EvidenceVisibility,
+  ExternalRunJudgmentLinkV1,
+  ExternalRunJudgmentValue,
   ExternalRunImportMode,
 } from "@cd-collab/contracts";
 import { SOURCE_UUID_RE } from "@cd-collab/contracts";
@@ -65,6 +67,29 @@ export interface CorroborationRow {
   createdAt: string;
 }
 
+export interface ExternalRunJudgmentRow {
+  caseId: string;
+  runId: string;
+  seq: number;
+  judgment: ExternalRunJudgmentValue;
+  actorId: string;
+  actorUsername: string;
+  links: ExternalRunJudgmentLinkV1[];
+  rationale: string | null;
+  recordedAt: string;
+}
+
+export interface ExternalRunJudgmentSuccessIntent {
+  caseId: string;
+  runId: string;
+  actorId: string;
+  idempotencyKey: string;
+  requestDigest: string;
+  judgmentSeq: number;
+  successJson: string;
+  createdAt: string;
+}
+
 export interface RunStore {
   insert(row: FrozenRunRow): Promise<void>;
   get(id: string): Promise<FrozenRunRow | null>;
@@ -72,6 +97,15 @@ export interface RunStore {
   listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   listCorroborations(runId: string): Promise<CorroborationRow[]>;
   appendCorroboration(row: Omit<CorroborationRow, "seq" | "createdAt">): Promise<CorroborationRow>;
+  listJudgments(runId: string): Promise<ExternalRunJudgmentRow[]>;
+  appendJudgment(row: ExternalRunJudgmentRow): Promise<void>;
+  getJudgmentSuccessIntent(
+    caseId: string,
+    runId: string,
+    actorId: string,
+    idempotencyKey: string,
+  ): Promise<ExternalRunJudgmentSuccessIntent | null>;
+  insertJudgmentSuccessIntent(row: ExternalRunJudgmentSuccessIntent): Promise<void>;
   /** Caller must already hold the case row lock inside the case transaction. */
   lockImportSuccessIntent(
     caseId: string,
@@ -92,12 +126,16 @@ export class MemoryRunStore implements RunStore {
   private readonly runs = new Map<string, FrozenRunRow>();
   private readonly events = new Map<string, CorroborationRow[]>();
   private readonly importSuccessIntents = new Map<string, ExternalRunImportSuccessIntent>();
+  private readonly judgments = new Map<string, ExternalRunJudgmentRow[]>();
+  private readonly judgmentSuccessIntents = new Map<string, ExternalRunJudgmentSuccessIntent>();
 
   capture(): unknown {
     return structuredClone({
       runs: [...this.runs.entries()],
       events: [...this.events.entries()],
       importSuccessIntents: [...this.importSuccessIntents.entries()],
+      judgments: [...this.judgments.entries()],
+      judgmentSuccessIntents: [...this.judgmentSuccessIntents.entries()],
     });
   }
 
@@ -106,20 +144,31 @@ export class MemoryRunStore implements RunStore {
       runs: [string, FrozenRunRow][];
       events: [string, CorroborationRow[]][];
       importSuccessIntents?: [string, ExternalRunImportSuccessIntent][];
+      judgments?: [string, ExternalRunJudgmentRow[]][];
+      judgmentSuccessIntents?: [string, ExternalRunJudgmentSuccessIntent][];
     };
     this.runs.clear();
     this.events.clear();
     this.importSuccessIntents.clear();
+    this.judgments.clear();
+    this.judgmentSuccessIntents.clear();
     for (const [id, value] of row.runs) this.runs.set(id, value);
     for (const [id, value] of row.events) this.events.set(id, value);
     for (const [key, value] of row.importSuccessIntents ?? []) {
       this.importSuccessIntents.set(key, value);
+    }
+    for (const [id, value] of row.judgments ?? []) {
+      this.judgments.set(id, value.map(cloneJudgment));
+    }
+    for (const [key, value] of row.judgmentSuccessIntents ?? []) {
+      this.judgmentSuccessIntents.set(key, { ...value });
     }
   }
 
   async insert(row: FrozenRunRow): Promise<void> {
     this.runs.set(row.id, Object.freeze(cloneRun(row)));
     this.events.set(row.id, []);
+    this.judgments.set(row.id, []);
   }
 
   async probeExistingIds(ids: readonly string[]): Promise<string[]> {
@@ -165,6 +214,37 @@ export class MemoryRunStore implements RunStore {
     list.push(next);
     this.events.set(row.runId, list);
     return next;
+  }
+
+  async listJudgments(runId: string): Promise<ExternalRunJudgmentRow[]> {
+    return (this.judgments.get(runId) ?? []).map(cloneJudgment);
+  }
+
+  async appendJudgment(row: ExternalRunJudgmentRow): Promise<void> {
+    const list = this.judgments.get(row.runId);
+    if (!list) throw new Error("external run judgment target does not exist");
+    if (row.seq !== list.length + 1) throw new Error("external run judgment sequence is not contiguous");
+    list.push(Object.freeze(cloneJudgment(row)));
+  }
+
+  async getJudgmentSuccessIntent(
+    caseId: string,
+    runId: string,
+    actorId: string,
+    idempotencyKey: string,
+  ): Promise<ExternalRunJudgmentSuccessIntent | null> {
+    const row = this.judgmentSuccessIntents.get(
+      judgmentIntentKey(caseId, runId, actorId, idempotencyKey),
+    );
+    return row ? { ...row } : null;
+  }
+
+  async insertJudgmentSuccessIntent(row: ExternalRunJudgmentSuccessIntent): Promise<void> {
+    const key = judgmentIntentKey(row.caseId, row.runId, row.actorId, row.idempotencyKey);
+    if (this.judgmentSuccessIntents.has(key)) {
+      throw new Error("external run judgment success intent already exists");
+    }
+    this.judgmentSuccessIntents.set(key, Object.freeze({ ...row }));
   }
 
   async lockImportSuccessIntent(
@@ -324,6 +404,27 @@ export class PgRunStore implements RunStore {
     return { ...row, seq, createdAt };
   }
 
+  async listJudgments(_runId: string): Promise<ExternalRunJudgmentRow[]> {
+    throw new Error("external run judgment PostgreSQL persistence is not installed");
+  }
+
+  async appendJudgment(_row: ExternalRunJudgmentRow): Promise<void> {
+    throw new Error("external run judgment PostgreSQL persistence is not installed");
+  }
+
+  async getJudgmentSuccessIntent(
+    _caseId: string,
+    _runId: string,
+    _actorId: string,
+    _idempotencyKey: string,
+  ): Promise<ExternalRunJudgmentSuccessIntent | null> {
+    throw new Error("external run judgment PostgreSQL persistence is not installed");
+  }
+
+  async insertJudgmentSuccessIntent(_row: ExternalRunJudgmentSuccessIntent): Promise<void> {
+    throw new Error("external run judgment PostgreSQL persistence is not installed");
+  }
+
   async lockImportSuccessIntent(
     caseId: string,
     actorId: string,
@@ -403,6 +504,19 @@ function assertEvidenceArtifactIds(value: unknown): asserts value is string[] {
 
 function importIntentKey(caseId: string, actorId: string, idempotencyKey: string): string {
   return `${caseId}\u0000${actorId}\u0000${idempotencyKey}`;
+}
+
+function judgmentIntentKey(
+  caseId: string,
+  runId: string,
+  actorId: string,
+  idempotencyKey: string,
+): string {
+  return `${caseId}\u0000${runId}\u0000${actorId}\u0000${idempotencyKey}`;
+}
+
+function cloneJudgment(row: ExternalRunJudgmentRow): ExternalRunJudgmentRow {
+  return { ...row, links: row.links.map((link) => ({ ...link })) };
 }
 
 function asRun(row: Record<string, unknown>): FrozenRunRow {

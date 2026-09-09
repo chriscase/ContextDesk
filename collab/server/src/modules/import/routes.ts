@@ -3,7 +3,9 @@ import {
   ContractViolation,
   EXTERNAL_RUN_IMPORT_LIMITS,
   EXTERNAL_RUN_IMPORT_REQUEST_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_UUID_RE,
   parseExternalRunImportRequest,
+  parseExternalRunJudgmentRequest,
   type AuthErrorV1,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -16,6 +18,10 @@ import { CaseStoreCommitOutcomeUnknownError } from "../cases/index.js";
 import {
   ExternalRunImportNotFoundError,
   ExternalRunImportRefusedError,
+  ExternalRunJudgmentConflictError,
+  ExternalRunJudgmentLimitError,
+  ExternalRunJudgmentNotFoundError,
+  ExternalRunJudgmentRefusedError,
   type ImportService,
 } from "./service.js";
 
@@ -46,6 +52,32 @@ function strictImportError(reply: FastifyReply, error: unknown) {
   if (error instanceof ExternalRunImportNotFoundError) {
     void reply.code(404);
     return { error: "not_found" };
+  }
+  if (error instanceof CaseStoreCommitOutcomeUnknownError) {
+    void reply.code(503);
+    return { error: "commit_outcome_unknown" };
+  }
+  if (error instanceof ContractViolation) return strictInvalid(reply);
+  void reply.code(500);
+  return { error: "internal" };
+}
+
+function strictJudgmentError(reply: FastifyReply, error: unknown) {
+  if (error instanceof ExternalRunJudgmentRefusedError) {
+    void reply.code(409);
+    return error.body;
+  }
+  if (error instanceof ExternalRunJudgmentConflictError) {
+    void reply.code(409);
+    return error.body;
+  }
+  if (error instanceof ExternalRunJudgmentNotFoundError) {
+    void reply.code(404);
+    return { error: "not_found" };
+  }
+  if (error instanceof ExternalRunJudgmentLimitError) {
+    void reply.code(413);
+    return { error: "judgment_limit_reached" };
   }
   if (error instanceof CaseStoreCommitOutcomeUnknownError) {
     void reply.code(503);
@@ -212,6 +244,81 @@ export async function registerImportRoutes(
       return { error: "not_found" };
     }
     return found;
+  });
+
+  app.get("/api/cases/:caseId/runs/:runId/judgments", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const params = request.params as { caseId: string; runId: string };
+    if (
+      !EXTERNAL_RUN_JUDGMENT_UUID_RE.test(params.caseId)
+      || !EXTERNAL_RUN_JUDGMENT_UUID_RE.test(params.runId)
+    ) {
+      void reply.code(404);
+      return { error: "not_found" };
+    }
+    try {
+      return await deps.imports.listRunJudgments(
+        params.caseId,
+        params.runId,
+        ctx.actor,
+        ctx.isAdmin,
+      );
+    } catch (error) {
+      return strictJudgmentError(reply, error);
+    }
+  });
+
+  app.post("/api/cases/:caseId/runs/:runId/judgments", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
+      await deps.audit.append({
+        identity: ctx.actor.id,
+        action: "external_run_judgment_recorded",
+        target: "forbidden",
+        origin: request.ip,
+        outcome: "denied",
+      });
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    if (!ctx.has("investigation:read")) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const params = request.params as { caseId: string; runId: string };
+    if (
+      !EXTERNAL_RUN_JUDGMENT_UUID_RE.test(params.caseId)
+      || !EXTERNAL_RUN_JUDGMENT_UUID_RE.test(params.runId)
+    ) {
+      void reply.code(404);
+      return { error: "not_found" };
+    }
+    try {
+      const input = parseExternalRunJudgmentRequest(request.body);
+      if (input.caseId !== params.caseId || input.runId !== params.runId) {
+        return strictInvalid(reply);
+      }
+      const result = await deps.imports.addRunJudgment(
+        params.caseId,
+        params.runId,
+        ctx.actor,
+        input,
+        request.ip,
+        ctx.isAdmin,
+      );
+      void reply.code(result.replayed ? 200 : 201);
+      return result;
+    } catch (error) {
+      return strictJudgmentError(reply, error);
+    }
   });
 
   app.post("/api/cases/:id/imports/:rid/corroborate", async (request, reply) => {
