@@ -1300,10 +1300,12 @@ export function Cases(props: {
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
-  const recordedContextCatalog = props.recordedContextCatalog ?? {
-    status: casesLoaded ? (cases.length > 0 ? "available" : "empty") : "loading",
-    records: cases,
-  } satisfies RecordedContextCatalog;
+  const recordedContextCatalog = (!canRead
+    ? { status: "not-requested", records: [] }
+    : props.recordedContextCatalog ?? {
+        status: casesLoaded ? (cases.length > 0 ? "available" : "empty") : "loading",
+        records: cases,
+      }) satisfies RecordedContextCatalog;
   const casesByEntity = new Map<string, Set<string>>();
   for (const entry of involvementIndex) {
     const bucket = casesByEntity.get(entry.entityId) ?? new Set<string>();

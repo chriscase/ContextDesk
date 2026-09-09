@@ -77,7 +77,7 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
   const [version, setVersion] = useState("");
   const [build, setBuild] = useState("");
   const investigations = selectResourceView(runtime.resources.investigations);
-  const catalog = recordedContextCatalogFromView(investigations);
+  const catalog = recordedContextCatalogFromView(investigations, runtime.capabilities.canRead);
   const contextDraft = { productName: product, version, build };
 
   useEffect(() => { if (startSignal) titleRef.current?.focus(); }, [startSignal]);

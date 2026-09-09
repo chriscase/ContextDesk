@@ -22,6 +22,7 @@ function hint(
   normalizesOuterWhitespace: boolean,
 ): string {
   if (normalizesOuterWhitespace) {
+    if (status === "not-requested") return "Recorded values were not requested because your current access does not include reading investigations. You can still enter a value; outer whitespace will be removed when it is saved.";
     if (status === "loading") return "Recorded values are still loading, so this cannot be compared yet. Outer whitespace will be removed when it is saved.";
     if (status === "unavailable") return "Recorded values are unavailable, so this cannot be compared. Outer whitespace will be removed when it is saved.";
     if (status === "stale") return "Showing the last recorded values because refresh failed. Outer whitespace will be removed when it is saved.";
@@ -33,6 +34,7 @@ function hint(
       ? "Matches a recorded value after removing outer whitespace; it will be saved without outer whitespace."
       : "No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.";
   }
+  if (status === "not-requested") return "Recorded values were not requested because your current access does not include reading investigations. You can still enter a value.";
   if (status === "loading") return "Recorded values are loading. You can still enter a value.";
   if (status === "unavailable") return "Recorded values are unavailable. You can still enter a value.";
   if (status === "stale") return "Showing the last recorded values while refresh is unavailable. You can still enter a value.";
@@ -65,7 +67,7 @@ export function RecordedContextCombo(props: RecordedContextComboProps) {
       <datalist id={listId}>
         {props.options.map((option) => <option key={option} value={option} />)}
       </datalist>
-      <small id={hintId} className="recorded-context-combo__hint" aria-live="polite">
+      <small id={hintId} className="recorded-context-combo__hint">
         {hint(props.catalogStatus, submittedValue, props.options, props.normalizesOuterWhitespace === true)}
       </small>
     </label>

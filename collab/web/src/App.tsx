@@ -165,6 +165,7 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
         onCollectionRefresh={collection.refresh}
         recordedContextCatalog={recordedContextCatalogFromView(
           selectResourceView(runtime.resources.investigations),
+          runtime.capabilities.canRead,
         )}
         {...(props.onFocusedCaseTitle
           ? { onFocusedCaseTitle: props.onFocusedCaseTitle }

@@ -31,8 +31,20 @@ describe("recorded context options", () => {
   });
 
   it("reports stale authorized values separately from unavailable or empty state", () => {
-    expect(recordedContextCatalogFromView({ availability: "available", value: records, refresh: "failed" })).toEqual({ status: "stale", records });
-    expect(recordedContextCatalogFromView({ availability: "unavailable" })).toEqual({ status: "unavailable", records: [] });
-    expect(recordedContextCatalogFromView({ availability: "available", value: [], refresh: "settled" })).toEqual({ status: "empty", records: [] });
+    expect(recordedContextCatalogFromView({ availability: "available", value: records, refresh: "failed" }, true)).toEqual({ status: "stale", records });
+    expect(recordedContextCatalogFromView({ availability: "unavailable" }, true)).toEqual({ status: "unavailable", records: [] });
+    expect(recordedContextCatalogFromView({ availability: "available", value: [], refresh: "settled" }, true)).toEqual({ status: "empty", records: [] });
+  });
+
+  it("reports a no-read catalog as not requested without exposing retained records", () => {
+    expect(recordedContextCatalogFromView({
+      availability: "available",
+      value: records,
+      refresh: "failed",
+    }, false)).toEqual({ status: "not-requested", records: [] });
+    expect(recordedContextCatalogFromView({ availability: "idle" }, false)).toEqual({
+      status: "not-requested",
+      records: [],
+    });
   });
 });

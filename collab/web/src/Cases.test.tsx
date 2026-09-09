@@ -3163,6 +3163,37 @@ describe("War Room collection-query browse", () => {
     expect(list?.querySelector(`option[value="${item.investigationContext?.productName ?? ""}"]`)).toBeNull();
   });
 
+  it("keeps wired War Room context entry truthful and request-free with write but no read", async () => {
+    const stub = stubCaseFetch();
+    render(<Cases
+      roles={[]}
+      capabilities={["investigation:write"]}
+      view="investigations"
+      collectionPage={{ availability: "idle" }}
+      collectionQuery={DEFAULT_COLLECTION_QUERY}
+      onCollectionQueryChange={vi.fn()}
+      recordedContextCatalog={{
+        status: "available",
+        records: [{ investigationContext: { productName: "Previously visible product" } }],
+      }}
+    />);
+
+    const product = screen.getByRole("combobox", { name: "Investigation context: Software or product" });
+    const hint = document.getElementById(product.getAttribute("aria-describedby") ?? "");
+    expect(hint?.textContent).toBe("Recorded values were not requested because your current access does not include reading investigations. You can still enter a value.");
+    expect(hint?.getAttribute("aria-live")).toBeNull();
+    expect((product as HTMLInputElement).disabled).toBe(false);
+    expect(document.getElementById("investigation-context-options-productName")?.children).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: /retry recorded values/i })).toBeNull();
+    await waitFor(() => {
+      const caseReads = stub.mock.calls
+        .filter(([, init]) => (init?.method ?? "GET") === "GET")
+        .map(([input]) => String(input))
+        .filter((url) => url === "/api/cases" || url.startsWith("/api/cases?") || url.startsWith("/api/cases/"));
+      expect(caseReads).toEqual([]);
+    });
+  });
+
   it("uses server entity facets and keeps observed-date filtering local to the loaded page", async () => {
     const onQueryChange = vi.fn();
     const stub = stubCaseFetch({

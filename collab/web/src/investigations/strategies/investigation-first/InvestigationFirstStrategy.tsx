@@ -262,7 +262,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           ? `available:${props.focusCaseId}`
           : null;
   const listView = collection.enabled ? collectionView : investigations;
-  const catalog = recordedContextCatalogFromView(investigations);
+  const catalog = recordedContextCatalogFromView(investigations, runtime.capabilities.canRead);
   const evidenceSelectionKey = evidenceInventory.inventory.availability === "available"
     ? evidenceInventory.inventory.value.map(({ evidence }) => evidence.id).join("\u0000")
     : "";

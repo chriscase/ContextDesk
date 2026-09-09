@@ -1346,7 +1346,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(options?.tagName).toBe("DATALIST");
     expect([...options!.querySelectorAll("option")].map((option) => option.getAttribute("value"))).toContain("ContextDesk Storefront");
     const hint = document.getElementById(product.getAttribute("aria-describedby") ?? "");
-    expect(hint?.getAttribute("aria-live")).toBe("polite");
+    expect(hint?.getAttribute("aria-live")).toBeNull();
 
     // Keyboard: an ordinary focusable text input with nothing intercepting the
     // keys the native popup needs.

@@ -13,6 +13,7 @@ export interface RecordedContextRecord {
   readonly investigationContext?: Partial<Record<RecordedContextField, string>> | null;
 }
 export type RecordedContextCatalogStatus =
+  | "not-requested"
   | "loading"
   | "empty"
   | "unavailable"
@@ -31,7 +32,11 @@ interface ResourceViewLike {
 }
 
 /** Maps an already-authorized Runtime list into presentation-only suggestion state. */
-export function recordedContextCatalogFromView(view: ResourceViewLike): RecordedContextCatalog {
+export function recordedContextCatalogFromView(
+  view: ResourceViewLike,
+  canRead: boolean,
+): RecordedContextCatalog {
+  if (!canRead) return { status: "not-requested", records: [] };
   if (view.availability === "unavailable") return { status: "unavailable", records: [] };
   if (view.availability !== "available") return { status: "loading", records: [] };
   const records = view.value ?? [];

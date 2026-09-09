@@ -24,6 +24,18 @@ describe("RecordedContextCombo", () => {
     expect((screen.getByRole("combobox", { name: "Build" }) as HTMLInputElement).disabled).toBe(false);
   });
 
+  it("describes a no-read catalog without a live region and keeps free entry available", () => {
+    const onChange = vi.fn();
+    render(<RecordedContextCombo id="component" label="Component" value="" options={[]} catalogStatus="not-requested" onChange={onChange} />);
+    const input = screen.getByRole("combobox", { name: "Component" });
+    const hint = document.getElementById(input.getAttribute("aria-describedby") ?? "");
+    expect(hint?.textContent).toBe("Recorded values were not requested because your current access does not include reading investigations. You can still enter a value.");
+    expect(hint?.getAttribute("aria-live")).toBeNull();
+    expect((input as HTMLInputElement).disabled).toBe(false);
+    fireEvent.change(input, { target: { value: "Gateway" } });
+    expect(onChange).toHaveBeenCalledWith("Gateway");
+  });
+
   it("describes loading, empty, and outer-whitespace normalization truthfully", () => {
     const { rerender } = render(<RecordedContextCombo id="product" label="Product" value="" options={[]} catalogStatus="loading" onChange={() => undefined} />);
     expect(screen.queryByText("Recorded values are loading. You can still enter a value.")).not.toBeNull();
