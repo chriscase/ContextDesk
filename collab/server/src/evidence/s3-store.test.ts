@@ -3618,6 +3618,78 @@ describe("S3EvidenceStore", () => {
     expect(new Set(classified).size).toBe(2);
   });
 
+  it("qualifies response-lost CopyObject recovery without retrying or deleting unknown bytes", async () => {
+    const qualify = async (referenced: boolean): Promise<void> => {
+      const { fake, store } = openStore();
+      const bytes = new TextEncoder().encode(
+        referenced ? "response-lost-referenced\n" : "response-lost-unreferenced\n",
+      );
+      const stage = await store.stageStream(asAsyncChunks([bytes]), {
+        maxBytes: bytes.byteLength,
+      });
+      const hash = stage.meta.hash;
+      const canonical = blobKey(hash);
+      interceptCopyObject(fake, async (command, original, options) => {
+        await original(command, options);
+        throw attemptedTransportLossError();
+      });
+      fake.headErrors.set(
+        canonical,
+        new FakeS3Error("SlowDown", 503, `probe failed at ${SYNTHETIC_ENDPOINT}`),
+      );
+
+      const failure = await stage.promote().then(
+        () => {
+          throw new Error("expected unknown copy outcome");
+        },
+        (error: unknown) => error,
+      );
+      assertS3UnavailableClassification(
+        failure,
+        { operation: "promote", commitOutcomeUnknown: true },
+        [hash, canonical, "socket hang up"],
+      );
+      expect(
+        fake.calls.filter(
+          (call) => call.name === "CopyObjectCommand" && call.input.Key === canonical,
+        ),
+      ).toHaveLength(1);
+      expect(fake.object(canonical)).toBeDefined();
+      expect(pendingKeys(fake)).toHaveLength(1);
+      expect(
+        fake.calls.filter(
+          (call) => call.name === "DeleteObjectCommand" && call.input.Key === canonical,
+        ),
+      ).toHaveLength(0);
+
+      await stage.rollback();
+      expect(fake.object(canonical)).toBeDefined();
+      expect(pendingKeys(fake)).toHaveLength(1);
+      expect(
+        fake.calls.filter(
+          (call) => call.name === "DeleteObjectCommand" && call.input.Key === canonical,
+        ),
+      ).toHaveLength(0);
+
+      fake.headErrors.clear();
+      const recovered = await store.recoverUnreferencedWrites(
+        referenced ? new Set([hash]) : new Set(),
+      );
+      expect(recovered.reclaimed).toEqual(referenced ? [] : [hash]);
+      expect(pendingKeys(fake)).toEqual([]);
+      if (referenced) {
+        expect(await store.verify(hash)).toBe(true);
+        expect(fake.object(canonical)).toBeDefined();
+      } else {
+        expect(await store.head(hash)).toBeNull();
+        expect(fake.object(canonical)).toBeUndefined();
+      }
+    };
+
+    await qualify(true);
+    await qualify(false);
+  });
+
   it("retries partial stream cleanup and does not let stale rollback delete adopted bytes", async () => {
     const lease = leaseTracker();
     const fake = new FakeS3Client(SYNTHETIC_BUCKET);

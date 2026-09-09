@@ -186,6 +186,45 @@ lease: SQLite plus S3 is a single-process evaluation shape, and doctor reports
 that warning. Do not run multiple SQLite-backed War Room processes against one
 S3 location.
 
+### Ambiguous promote and response loss
+
+An evidence upload can receive HTTP 503 with the exact body
+`{"error":"commit_outcome_unknown"}` when the object store may have applied a
+canonical `CopyObject` but its response was lost and the immediate verification
+probe could not settle the result. This is different from an ordinary
+`storage_unavailable` response. It does not prove that the investigation record
+was committed, and it does not prove that the canonical object is absent.
+
+Fail conservatively:
+
+1. Do not delete a canonical blob, staging object, or pending-write journal to
+   make the alert disappear. Do not replay a handcrafted API request or start a
+   second upload with changed metadata while the result is unresolved.
+2. Preserve the database and object store together, restore provider health,
+   and keep all writers for that prefix quiesced if operator inspection is
+   required. An object's presence alone is not evidence that an authorized
+   artifact row committed.
+3. Restart or resume the War Room service only when its authoritative database
+   and S3 endpoint are both reachable. Startup settles pending journals before
+   listen: hashes referenced by committed records are retained, while
+   unreferenced journaled hashes are reclaimed. `/ready` stays unavailable until
+   that recovery succeeds.
+4. Refresh the investigation through the normal authenticated UI. If no
+   artifact row appears after recovery, submit again only through the product's
+   normal upload flow; content-addressed bytes make the identical content safe
+   to adopt. Do not infer success from bucket contents or bypass authorization
+   with an object-store console.
+5. Verify the final artifact through the UI and compare the downloaded bytes'
+   SHA-256 with the displayed content hash. Retain the sanitized service logs
+   and incident time; never copy access keys, signed URLs, raw object keys, or
+   request headers into the incident record.
+
+The automated Garage qualification proves ordinary provider operations and
+restart persistence. It does not inject a live network response-loss fault.
+The applied-then-response-lost branch is qualified deterministically at the
+provider boundary, including one-shot promotion, no canonical deletion before
+reconciliation, and both referenced-retain and unreferenced-reclaim recovery.
+
 ### Abandoned streamed scratch objects with external coordination
 
 PostgreSQL/external coordination intentionally does not auto-sweep unjournaled
