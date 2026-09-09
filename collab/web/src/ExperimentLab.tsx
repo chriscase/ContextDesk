@@ -550,16 +550,29 @@ function EvidencePicker(props: {
   legend: string;
   roles?: boolean;
   additionalRefs?: readonly string[];
+  initialSelectedRefs?: readonly string[];
 }) {
-  const [query, setQuery] = useState("");
-  const [selectedRefs, setSelectedRefs] = useState<Set<string>>(() => new Set());
-  const fieldsetRef = useRef<HTMLFieldSetElement>(null);
-  const previousViewId = useRef(props.view.id);
   // Resolve the whole set at once: picking one reference at a time cannot see
   // that two of them would render under the same name, and a chooser whose
   // options read identically cannot be used to choose.
   const refs = [...new Set([...evidenceRefsFor(props.view), ...(props.additionalRefs ?? [])])]
     .sort((left, right) => left.localeCompare(right));
+  // A recorded decision can only seed choices which are still present in the
+  // experiment's canonical evidence set. Never turn a stale or malformed
+  // decision reference into a new, fallback-labelled choice.
+  const availableRefs = new Set(refs);
+  const initialSelection = [...new Set(
+    (Array.isArray(props.initialSelectedRefs) ? props.initialSelectedRefs : [])
+      .filter((ref): ref is string => typeof ref === "string" && availableRefs.has(ref)),
+  )].sort((left, right) => left.localeCompare(right));
+  const initialSelectionKey = JSON.stringify(initialSelection);
+  const [query, setQuery] = useState("");
+  const [selectedRefs, setSelectedRefs] = useState<Set<string>>(
+    () => new Set(initialSelection),
+  );
+  const seededInitialRefs = useRef(new Set(initialSelection));
+  const fieldsetRef = useRef<HTMLFieldSetElement>(null);
+  const previousViewId = useRef(props.view.id);
   const identityLookup = identityContext(props.view, props.artifacts, {});
   const identities = new Map(
     disambiguateIdentities(refs.map((ref) => evidenceIdentity(ref, identityLookup)))
@@ -601,6 +614,17 @@ function EvidencePicker(props: {
     setSelectedRefs(new Set());
     setQuery("");
   }, [props.view.id]);
+
+  useEffect(() => {
+    // Snapshot evidence can arrive after the comparison. Seed each accepted
+    // reference at most once so late availability is helpful without undoing
+    // an operator's explicit removal or a form reset.
+    const pending = (JSON.parse(initialSelectionKey) as string[])
+      .filter((ref) => !seededInitialRefs.current.has(ref));
+    if (!pending.length) return;
+    for (const ref of pending) seededInitialRefs.current.add(ref);
+    setSelectedRefs((current) => new Set([...current, ...pending]));
+  }, [initialSelectionKey]);
 
   return (
     <fieldset className="experiment-lab__evidence-picker" ref={fieldsetRef}>
@@ -3844,15 +3868,21 @@ export function ExperimentLab(props: {
               </button>
             </details>
           ) : null}
-          {canLead && current.decisions.some((row) => row.status === "accepted") ? (
+          {canLead && acceptedDecision ? (
             <details className="experiment-lab__tools">
               <summary>Version the human benchmark</summary>
               <form className="composer" onSubmit={(event) => void promoteGold(event)}>
+                <p className="experiment-lab__section-note">
+                  Evidence from the accepted decision that is still available starts selected.
+                  Review the choices before explicitly creating a new benchmark version.
+                </p>
                 <EvidencePicker
+                  key={`${current.id}:${acceptedDecision.id}:${acceptedDecision.revision}`}
                   view={current}
                   artifacts={evidenceArtifacts}
                   legend="Evidence anchors for this human benchmark"
                   additionalRefs={snapshotEvidenceRefs}
+                  initialSelectedRefs={acceptedDecision.evidenceRefs}
                   roles
                 />
                 <input
