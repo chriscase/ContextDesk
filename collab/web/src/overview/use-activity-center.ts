@@ -81,6 +81,7 @@ export function useActivityCenter(options: {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [openFailure, setOpenFailure] = useState<OverviewFailure | null>(null);
+  const publishesCurrentScope = options.enabled && publishedScope.current === requestScopeKey;
 
   useEffect(() => {
     controller.current?.abort();
@@ -148,7 +149,12 @@ export function useActivityCenter(options: {
   const refresh = useCallback(() => setRefreshGeneration((value) => value + 1), []);
 
   const loadMore = useCallback(() => {
-    if (!options.enabled || !nextCursor || loadingMore) return;
+    if (
+      !publishesCurrentScope
+      || publishedScope.current !== requestScopeKey
+      || !nextCursor
+      || loadingMore
+    ) return;
     const request = new AbortController();
     controller.current?.abort();
     resolveController.current?.abort();
@@ -188,10 +194,10 @@ export function useActivityCenter(options: {
       .finally(() => {
         if (generation.current === requestGeneration) setLoadingMore(false);
       });
-  }, [gateway, loadingMore, nextCursor, options.enabled, stableFilter]);
+  }, [gateway, loadingMore, nextCursor, publishesCurrentScope, requestScopeKey, stableFilter]);
 
   const open = useCallback(async (locator: InvestigationResourceLocatorV1): Promise<string | null> => {
-    if (!options.enabled) return null;
+    if (!publishesCurrentScope || publishedScope.current !== requestScopeKey) return null;
     resolveController.current?.abort();
     const request = new AbortController();
     resolveController.current = request;
@@ -205,14 +211,16 @@ export function useActivityCenter(options: {
       return null;
     }
     return result.value.locator.pathname;
-  }, [gateway, options.enabled]);
+  }, [gateway, publishesCurrentScope, requestScopeKey]);
 
   return {
-    activity,
+    activity: publishesCurrentScope ? activity : { status: "idle" },
     investigations: investigationScopeKey === requestScopeKey ? investigations : [],
     investigationsLoading: options.enabled && (investigationScopeKey !== requestScopeKey || investigationsLoading),
     investigationsFailed: investigationScopeKey === requestScopeKey && investigationsFailed,
-    nextCursor, loadingMore,
-    openFailure, refresh, loadMore, open,
+    nextCursor: publishesCurrentScope ? nextCursor : null,
+    loadingMore: publishesCurrentScope && loadingMore,
+    openFailure: publishesCurrentScope ? openFailure : null,
+    refresh, loadMore, open,
   };
 }
