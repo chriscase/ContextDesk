@@ -20,6 +20,10 @@
       "types": "./dist/triage-lifecycle.d.ts",
       "import": "./dist/triage-lifecycle.js"
     },
+    "./triage-job": {
+      "types": "./dist/triage-job-browser.d.ts",
+      "import": "./dist/triage-job-browser.js"
+    },
     "./corpus-intake": {
       "types": "./dist/investigation-corpus-intake.d.ts",
       "import": "./dist/investigation-corpus-intake.js"
