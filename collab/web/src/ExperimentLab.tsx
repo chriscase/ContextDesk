@@ -571,6 +571,7 @@ function EvidencePicker(props: {
     () => new Set(initialSelection),
   );
   const seededInitialRefs = useRef(new Set(initialSelection));
+  const selectionWasReset = useRef(false);
   const fieldsetRef = useRef<HTMLFieldSetElement>(null);
   const previousViewId = useRef(props.view.id);
   const identityLookup = identityContext(props.view, props.artifacts, {});
@@ -601,6 +602,7 @@ function EvidencePicker(props: {
     const form = fieldsetRef.current?.form;
     if (!form) return undefined;
     const reset = () => {
+      selectionWasReset.current = true;
       setSelectedRefs(new Set());
       setQuery("");
     };
@@ -619,6 +621,7 @@ function EvidencePicker(props: {
     // Snapshot evidence can arrive after the comparison. Seed each accepted
     // reference at most once so late availability is helpful without undoing
     // an operator's explicit removal or a form reset.
+    if (selectionWasReset.current) return;
     const pending = (JSON.parse(initialSelectionKey) as string[])
       .filter((ref) => !seededInitialRefs.current.has(ref));
     if (!pending.length) return;

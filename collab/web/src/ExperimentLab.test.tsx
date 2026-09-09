@@ -649,6 +649,75 @@ describe("experiment lab", () => {
     expect((within(benchmarkEvidence).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
   });
 
+  it("keeps an explicit form reset empty when accepted snapshot evidence arrives later", async () => {
+    const snapshotAcceptedView = {
+      ...goldView,
+      agreement: {
+        sharedAnchors: [],
+        candidateSpecific: [],
+        roleConflicts: [],
+        notes: ["Provider-free simulation did not inspect evidence."],
+      },
+      decisions: [{
+        ...goldView.decisions[0],
+        evidenceRefs: ["ev-snapshot-only"],
+      }],
+    };
+    let releaseSnapshot: (() => void) | undefined;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [snapshotAcceptedView] }) };
+      }
+      if (url.endsWith("/evidence")) {
+        return {
+          ok: true,
+          json: async () => ({ artifacts: [{
+            id: "ev-snapshot-only",
+            kind: "log",
+            filename: "snapshot-only.log",
+            uri: null,
+            mediaType: "text/plain",
+            privacyClass: "owner_only",
+            verificationStatus: "verified",
+          }] }),
+        };
+      }
+      if (url.endsWith("/snapshots")) {
+        await snapshotGate;
+        return {
+          ok: true,
+          json: async () => ({ snapshots: [{
+            id: "snapshot-1",
+            fingerprint: view.snapshotFingerprint.slice("snap-".length),
+            evidence: [{ evidenceId: "ev-snapshot-only" }],
+            createdBy: "demo",
+          }] }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+
+    const benchmarkEvidence = await screen.findByRole("group", {
+      name: "Evidence anchors for this human benchmark",
+    });
+    const form = benchmarkEvidence.closest("form");
+    expect(form).not.toBeNull();
+    fireEvent.reset(form!);
+    releaseSnapshot?.();
+
+    const choice = await within(benchmarkEvidence).findByRole("checkbox") as HTMLInputElement;
+    await waitFor(() => expect(choice.checked).toBe(false));
+    expect(fetchMock.mock.calls.some(
+      ([url]) => String(url).endsWith("/gold"),
+    )).toBe(false);
+  });
+
   it("re-seeds only when the accepted decision revision changes after explicit promotion", async () => {
     const refsView = {
       ...goldView,
@@ -668,15 +737,18 @@ describe("experiment lab", () => {
         evidenceRefs: ["ev-demo-inventory-timeout"],
       }],
     };
-    let revised = false;
+    let promotionCount = 0;
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/gold") && init?.method === "POST") {
-        revised = true;
+        promotionCount += 1;
         return { ok: true, json: async () => ({}) };
       }
       if (url.endsWith("/experiments") && !init?.method) {
-        return { ok: true, json: async () => ({ experiments: [revised ? revisedView : refsView] }) };
+        return {
+          ok: true,
+          json: async () => ({ experiments: [promotionCount > 1 ? revisedView : refsView] }),
+        };
       }
       return { ok: false, json: async () => ({}) };
     });
@@ -699,11 +771,25 @@ describe("experiment lab", () => {
       expect(
         (within(benchmarkEvidence).getAllByRole("checkbox") as HTMLInputElement[])
           .map((choice) => choice.checked),
+      ).toEqual([false, false]);
+    });
+    fireEvent.click(
+      (within(benchmarkEvidence).getAllByRole("checkbox") as HTMLInputElement[])[1]!,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+
+    await waitFor(() => {
+      benchmarkEvidence = screen.getByRole("group", {
+        name: "Evidence anchors for this human benchmark",
+      });
+      expect(
+        (within(benchmarkEvidence).getAllByRole("checkbox") as HTMLInputElement[])
+          .map((choice) => choice.checked),
       ).toEqual([false, true]);
     });
     expect(fetchMock.mock.calls.filter(
       ([url, init]) => String(url).endsWith("/gold") && init?.method === "POST",
-    )).toHaveLength(1);
+    )).toHaveLength(2);
   });
 
   it("scopes accepted evidence to the selected experiment", async () => {
