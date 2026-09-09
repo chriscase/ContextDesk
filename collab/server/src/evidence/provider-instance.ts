@@ -17,6 +17,47 @@ export interface EvidenceProviderInstanceV1 {
   readonly providerKind: EvidenceProviderInstanceKind;
 }
 
+export type EvidenceProviderInstanceStorageErrorCode =
+  | "invalid"
+  | "identity_mismatch"
+  | "unavailable"
+  | "initialization_outcome_unknown";
+
+const PROVIDER_INSTANCE_STORAGE_ERRORS = new WeakSet<object>();
+
+export class EvidenceProviderInstanceStorageError extends Error {
+  readonly code: EvidenceProviderInstanceStorageErrorCode;
+
+  constructor(code: EvidenceProviderInstanceStorageErrorCode) {
+    super("evidence provider instance storage is unavailable");
+    this.name = "EvidenceProviderInstanceStorageError";
+    this.code = code;
+    PROVIDER_INSTANCE_STORAGE_ERRORS.add(this);
+  }
+}
+
+export function isEvidenceProviderInstanceStorageError(
+  value: unknown,
+): value is EvidenceProviderInstanceStorageError {
+  return (
+    typeof value === "object"
+    && value !== null
+    && PROVIDER_INSTANCE_STORAGE_ERRORS.has(value)
+  );
+}
+
+export interface EvidenceProviderInstanceInitialization {
+  readonly outcome: "created" | "existing" | "reconciled";
+  readonly manifest: EvidenceProviderInstanceV1;
+}
+
+export interface EvidenceProviderInstanceManager {
+  inspect(expectedProviderInstanceId?: string): Promise<EvidenceProviderInstanceV1 | null>;
+  initialize(
+    expectedProviderInstanceId?: string,
+  ): Promise<EvidenceProviderInstanceInitialization>;
+}
+
 export type EvidenceProviderInstanceErrorCode =
   | "too_large"
   | "invalid_utf8"
