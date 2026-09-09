@@ -31,6 +31,8 @@ export type EvidenceProviderInstanceErrorCode =
   | "invalid_id"
   | "invalid_provider";
 
+const PROVIDER_INSTANCE_ERRORS = new WeakSet<object>();
+
 export class EvidenceProviderInstanceError extends Error {
   readonly code: EvidenceProviderInstanceErrorCode;
 
@@ -38,6 +40,7 @@ export class EvidenceProviderInstanceError extends Error {
     super("evidence provider instance manifest is invalid");
     this.name = "EvidenceProviderInstanceError";
     this.code = code;
+    PROVIDER_INSTANCE_ERRORS.add(this);
   }
 }
 
@@ -100,7 +103,13 @@ function parseManifestValue(value: unknown): EvidenceProviderInstanceV1 {
   try {
     return parseManifestValueUnsafe(value);
   } catch (error) {
-    if (error instanceof EvidenceProviderInstanceError) throw error;
+    if (
+      typeof error === "object"
+      && error !== null
+      && PROVIDER_INSTANCE_ERRORS.has(error)
+    ) {
+      throw error;
+    }
     throw new EvidenceProviderInstanceError("invalid_shape");
   }
 }

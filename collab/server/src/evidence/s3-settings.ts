@@ -131,7 +131,7 @@ export interface EvidenceS3Settings {
 type EvidenceStorageBase = {
   controlRoot: string;
   storage: "postgres" | "sqlite";
-  /** Absent/null preserves legacy, unbound evidence-provider behavior. */
+  /** An absent value preserves legacy, unbound evidence-provider behavior. */
   expectedProviderInstanceId?: string;
 };
 

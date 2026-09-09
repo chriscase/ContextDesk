@@ -133,6 +133,20 @@ describe("evidence provider instance manifest", () => {
     expect(() => serializeEvidenceProviderInstance(hostile)).toThrow(
       new EvidenceProviderInstanceError("invalid_shape"),
     );
+
+    const thrownProxy = new Proxy({}, {
+      getPrototypeOf() {
+        throw new Error(`private ${ID}`);
+      },
+    });
+    const hostileThrownValue = new Proxy(valid(), {
+      ownKeys() {
+        throw thrownProxy;
+      },
+    });
+    expect(() => serializeEvidenceProviderInstance(hostileThrownValue)).toThrow(
+      new EvidenceProviderInstanceError("invalid_shape"),
+    );
   });
 
   it("fails closed across malformed scanner branches", () => {
