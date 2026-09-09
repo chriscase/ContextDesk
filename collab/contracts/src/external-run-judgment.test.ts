@@ -1186,14 +1186,27 @@ describe("external-run judgment JSON Schema / Ajv parity", () => {
     );
   });
 
-  it("JSON Schema cannot express real calendar existence or leap seconds: schema accepts 2024-02-30 and leap-second Z forms, parser rejects", () => {
+  it("Ajv date-time rejects ordinary invalid calendar values such as 2024-02-30; parser also rejects", () => {
     const impossible = "2024-02-30T09:20:00.000Z";
-    const leapSecond = "2016-12-31T23:59:60.000Z";
-    expectSchemaAcceptsParserRejects(
+    expectParserAndSchemaReject(
       parseExternalRunJudgment,
       "external-run-judgment.v1.json",
       record({ recordedAt: impossible }),
     );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ run: runProjection({ createdAt: impossible }) }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({ judgments: [record({ recordedAt: impossible })] }),
+    );
+  });
+
+  it("Ajv date-time accepts RFC3339 leap-second Z forms; parser rejects", () => {
+    const leapSecond = "2016-12-31T23:59:60.000Z";
     expectSchemaAcceptsParserRejects(
       parseExternalRunJudgment,
       "external-run-judgment.v1.json",
@@ -1202,17 +1215,7 @@ describe("external-run judgment JSON Schema / Ajv parity", () => {
     expectSchemaAcceptsParserRejects(
       parseExternalRunJudgmentSuccess,
       "external-run-judgment-success.v1.json",
-      success({ run: runProjection({ createdAt: impossible }) }),
-    );
-    expectSchemaAcceptsParserRejects(
-      parseExternalRunJudgmentSuccess,
-      "external-run-judgment-success.v1.json",
       success({ run: runProjection({ createdAt: leapSecond }) }),
-    );
-    expectSchemaAcceptsParserRejects(
-      parseExternalRunJudgmentList,
-      "external-run-judgment-list.v1.json",
-      list({ judgments: [record({ recordedAt: impossible })] }),
     );
     expectSchemaAcceptsParserRejects(
       parseExternalRunJudgmentList,

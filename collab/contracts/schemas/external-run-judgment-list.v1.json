@@ -31,8 +31,9 @@
     },
     "canonicalUtcMillisecond": {
       "type": "string",
+      "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
-      "description": "Structural millisecond-Z form only. JSON Schema cannot express real calendar existence or leap-second rejection; requireCanonicalUtcInstant on the parser rejects nonexistent dates such as 2024-02-30T09:20:00.000Z and leap seconds such as 2016-12-31T23:59:60.000Z."
+      "description": "The pattern enforces canonical millisecond UTC spelling. Ajv format date-time rejects ordinary invalid calendar values such as 2024-02-30T09:20:00.000Z. The authoritative parser additionally rejects leap seconds and canonical-roundtrip anomalies such as 2016-12-31T23:59:60.000Z."
     },
     "actorId": {
       "type": "string",
