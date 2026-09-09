@@ -238,6 +238,7 @@ function judgmentRequest(
 async function seedCaseAndRun(context: {
   app: Awaited<ReturnType<typeof buildApp>>;
   cases: CaseService;
+  caseStore: MemoryCaseStore;
   runs: MemoryRunStore;
   alice: string;
 }, overrides: Partial<FrozenRunRow> = {}) {
@@ -247,7 +248,15 @@ async function seedCaseAndRun(context: {
     headers: { cookie: context.alice },
     payload: { title: "External judgment fixture" },
   })).body));
-  await context.runs.insert(storedRun(created.id, overrides));
+  const createdEvent = (await context.caseStore.listTimeline(created.id)).find(
+    (event) => event.kind === "case_created",
+  );
+  if (!createdEvent) throw new Error("case creation did not record its authenticated actor");
+  await context.runs.insert(storedRun(created.id, {
+    ...overrides,
+    importerId: overrides.importerId ?? createdEvent.actorId,
+    importerUsername: overrides.importerUsername ?? createdEvent.actorUsername,
+  }));
   return created;
 }
 
@@ -378,6 +387,13 @@ describe("external run human judgment HTTP and memory core", () => {
   it("returns typed CAS, archived, links, privacy, and identity refusals without writes", async () => {
     await withApp(async (context) => {
       const created = await seedCaseAndRun(context);
+      const malformed = await postJudgment(context.app, context.alice, created.id, {
+        ...judgmentRequest(created.id),
+        schemaId: "cd-collab.external_run_judgment_request.v999",
+      });
+      expect(malformed.statusCode).toBe(400);
+      expect(JSON.parse(malformed.body)).toEqual({ error: "invalid" });
+      expect(await context.runs.listJudgments(RUN_ID)).toEqual([]);
       const stale = await postJudgment(context.app, context.alice, created.id, judgmentRequest(created.id, {
         expectedSequence: 2,
       }));
@@ -499,6 +515,17 @@ describe("external run human judgment HTTP and memory core", () => {
       const created = await seedCaseAndRun(context, { privacyClass: "owner_only" });
       const getSpy = vi.spyOn(context.runs, "get");
       const listSpy = vi.spyOn(context.runs, "listJudgments");
+      const ownerGet = await getJudgments(context.app, context.alice, created.id);
+      expect(ownerGet.statusCode).toBe(200);
+      const ownerPost = await postJudgment(
+        context.app,
+        context.alice,
+        created.id,
+        judgmentRequest(created.id, { idempotencyKey: "judgment-owner-positive-01" }),
+      );
+      expect(ownerPost.statusCode).toBe(201);
+      getSpy.mockClear();
+      listSpy.mockClear();
       const forbiddenGet = await getJudgments(context.app, context.none, created.id);
       const forbiddenPost = await postJudgment(
         context.app,

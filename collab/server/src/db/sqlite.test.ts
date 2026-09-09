@@ -1246,6 +1246,15 @@ describe("SQLite local runtime", () => {
       );
       expect(parseExternalRunJudgmentSuccess(replay).replayed).toBe(true);
       expect(await reopened.runs.listJudgments(runId)).toHaveLength(1);
+      const judgmentTimeline = (await reopened.cases.listTimeline(created.id)).filter(
+        (event) => event.kind === "external_run_judgment_recorded",
+      );
+      expect(judgmentTimeline.map((event) => JSON.parse(event.payload))).toEqual([
+        { sequence: 1, linkCount: 0 },
+      ]);
+      expect((await reopened.audit.list({ action: "external_run_judgment_recorded" })).filter(
+        (event) => event.outcome === "success",
+      )).toHaveLength(1);
       reopened.state.close();
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -677,7 +677,7 @@ export class ImportService {
           isAdmin,
         );
         if (!lockedCase) throw new ExternalRunJudgmentNotFoundError();
-        const run = await this.runs.get(routeRunId);
+        let run = await this.runs.get(routeRunId);
         if (!run || run.caseId !== routeCaseId || !this.canView(run, actor, isAdmin)) {
           throw new ExternalRunJudgmentNotFoundError();
         }
@@ -690,6 +690,10 @@ export class ImportService {
         );
         if (prior) return await this.replayRunJudgment(prior, request, digest, actor, run);
 
+        run = await this.runs.get(routeRunId);
+        if (!run || run.caseId !== routeCaseId || !this.canView(run, actor, isAdmin)) {
+          throw new ExternalRunJudgmentNotFoundError();
+        }
         const judgments = await this.runs.listJudgments(routeRunId);
         this.assertJudgmentSequence(routeCaseId, routeRunId, judgments);
         const currentSequence = judgments.length;

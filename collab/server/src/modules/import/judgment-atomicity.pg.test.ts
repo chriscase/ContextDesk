@@ -105,10 +105,13 @@ describe.skipIf(!adminUrl())("PostgreSQL external-run judgment atomicity", () =>
             && statement.includes("hashtextextended"));
           const intentRead = statements.findIndex((statement) =>
             statement.includes("FROM external_run_judgment_success_intents"));
+          const runReload = statements.findIndex((statement, index) =>
+            index > intentRead && statement.includes("FROM imported_runs WHERE id = $1"));
           expect(caseLock).toBeGreaterThanOrEqual(0);
           expect(advisory).toBeGreaterThan(caseLock);
           expect(intentRead).toBeGreaterThan(advisory);
           expect(statements[intentRead]).not.toContain("FOR UPDATE");
+          expect(runReload).toBeGreaterThan(intentRead);
         }
 
         const contenders = await Promise.allSettled([
