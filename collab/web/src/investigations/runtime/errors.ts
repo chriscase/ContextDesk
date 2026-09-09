@@ -6,6 +6,9 @@ import type {
   LifecycleAction,
   LifecycleRefusal,
 } from "@cd-collab/contracts/investigation-runtime";
+import type {
+  ExternalRunJudgmentRefusal,
+} from "@cd-collab/contracts/external-run-judgment";
 
 export const RUNTIME_PROTOCOL_REASONS = [
   "content_type",
@@ -68,6 +71,23 @@ export type RuntimeFailure =
       current: InvestigationLifecycleV1;
     }
   | { kind: "conflict"; status: 409 }
+  | {
+      kind: "judgment_conflict";
+      status: 409;
+      caseId: string;
+      runId: string;
+      expectedSequence: number;
+      currentSequence: number;
+    }
+  | {
+      kind: "judgment_refused";
+      status: 409;
+      caseId: string;
+      runId: string;
+      reason: ExternalRunJudgmentRefusal;
+      detail: string;
+    }
+  | { kind: "judgment_limit_reached"; status: 413 }
   | {
       kind: "unavailable";
       status: 503;

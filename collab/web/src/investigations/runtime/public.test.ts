@@ -3,6 +3,7 @@ import type { InvestigationRuntimeProviderProps } from "./public.js";
 import type {
   ArtifactAnnotationBulkResultV1,
   InvestigationCoordinationActionCommand,
+  InvestigationExternalRunJudgmentCommand,
   InvestigationNamedCoordinationParticipantCommand,
   InvestigationArtifactAnnotationsBulkCommand,
   InvestigationOperationsQueuePageV1,
@@ -66,6 +67,8 @@ describe("investigation runtime public surface", () => {
         applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
+        queryExternalRunJudgments: null,
+        createExternalRunJudgment: null,
       },
     };
     expect(command.artifactIds).toHaveLength(2);
@@ -74,6 +77,15 @@ describe("investigation runtime public surface", () => {
     expect(result).toBeNull();
     expect(runtime.presentationScopeKey).toBe("opaque-presentation-scope");
     expect(runtime.commands.createArtifactAnnotations).toBeNull();
+    const judgmentCommand: InvestigationExternalRunJudgmentCommand = {
+      runId: "22222222-2222-4222-8222-222222222222",
+      judgment: "insufficient_evidence",
+      links: [],
+      rationale: null,
+      idempotencyKey: "public-judgment-0001",
+    };
+    expect(judgmentCommand.judgment).toBe("insufficient_evidence");
+    expect(publicRuntime).not.toHaveProperty("parseExternalRunJudgmentList");
     const coordinationCommand: InvestigationCoordinationActionCommand = {
       action: "claim_self",
       idempotencyKey: "coord-public-0001",

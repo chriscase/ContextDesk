@@ -15,6 +15,7 @@ export {
   type InvestigationCreateInput,
   type InvestigationEvidenceUploadCommand,
   type InvestigationEvidencePreviewCommand,
+  type InvestigationExternalRunJudgmentCommand,
   type InvestigationRuntimeEvidencePreview,
   type InvestigationRuntime,
   type InvestigationRuntimeCommands,
@@ -40,6 +41,15 @@ export {
   type InvestigationOperationsQueueQueryInput,
   type PreviewEvidenceInput,
 } from "./gateway.js";
+export type {
+  ExternalRunJudgmentActorV1,
+  ExternalRunJudgmentLinkV1,
+  ExternalRunJudgmentListV1,
+  ExternalRunJudgmentRecordV1,
+  ExternalRunJudgmentRefusal,
+  ExternalRunJudgmentSuccessV1,
+  ExternalRunJudgmentValue,
+} from "@cd-collab/contracts/external-run-judgment";
 export {
   selectEvidenceInventory,
   selectResourceView,

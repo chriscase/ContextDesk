@@ -53,6 +53,21 @@ import {
   type InvestigationOperationsQueueQueryV1,
 } from "@cd-collab/contracts/investigation-operations-queue";
 import {
+  EXTERNAL_RUN_JUDGMENT_REQUEST_SCHEMA_ID,
+  parseExternalRunJudgmentConflict,
+  parseExternalRunJudgmentList,
+  parseExternalRunJudgmentRefused,
+  parseExternalRunJudgmentRequest,
+  parseExternalRunJudgmentSuccess,
+  type ExternalRunJudgmentConflictV1,
+  type ExternalRunJudgmentLinkV1,
+  type ExternalRunJudgmentListV1,
+  type ExternalRunJudgmentRefusedV1,
+  type ExternalRunJudgmentRequestV1,
+  type ExternalRunJudgmentSuccessV1,
+  type ExternalRunJudgmentValue,
+} from "@cd-collab/contracts/external-run-judgment";
+import {
   ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
   parseArtifactAnnotation,
   parseArtifactAnnotationBulkResult,
@@ -336,13 +351,38 @@ export interface InvestigationOperationsQueueGateway {
   ): Promise<GatewayResult<InvestigationOperationsQueuePageV1>>;
 }
 
+/** Transport-ready human judgment input; the controller owns the sequence snapshot. */
+export interface CreateExternalRunJudgmentInput {
+  readonly expectedSequence: number;
+  readonly judgment: ExternalRunJudgmentValue;
+  readonly links: readonly ExternalRunJudgmentLinkV1[];
+  readonly rationale: string | null;
+  readonly idempotencyKey: string;
+}
+
+/** Optional run-level judgment transport, resolved independently from legacy corroboration. */
+export interface InvestigationExternalRunJudgmentGateway {
+  listExternalRunJudgments(
+    investigationId: string,
+    runId: string,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<ExternalRunJudgmentListV1>>;
+  createExternalRunJudgment(
+    investigationId: string,
+    runId: string,
+    input: CreateExternalRunJudgmentInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<ExternalRunJudgmentSuccessV1>>;
+}
+
 export interface InvestigationGateway
   extends
     Partial<InvestigationWriteGateway>,
     Partial<InvestigationAnnotationGateway>,
     Partial<InvestigationCollectionQueryGateway>,
     Partial<InvestigationCoordinationGateway>,
-    Partial<InvestigationOperationsQueueGateway>
+    Partial<InvestigationOperationsQueueGateway>,
+    Partial<InvestigationExternalRunJudgmentGateway>
 {
   listInvestigations(
     options: GatewayRequestOptions,
@@ -607,6 +647,23 @@ function coordinationActionBody(
   return body;
 }
 
+function externalRunJudgmentBody(
+  investigationId: string,
+  runId: string,
+  input: CreateExternalRunJudgmentInput,
+): Record<string, unknown> {
+  return {
+    schemaId: EXTERNAL_RUN_JUDGMENT_REQUEST_SCHEMA_ID,
+    caseId: investigationId,
+    runId,
+    expectedSequence: input.expectedSequence,
+    idempotencyKey: input.idempotencyKey,
+    judgment: input.judgment,
+    links: Array.from(input.links, ({ kind, id }) => ({ kind, id })),
+    rationale: input.rationale,
+  };
+}
+
 function isJsonResponse(response: Response): boolean {
   const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   return mediaType === "application/json"
@@ -815,6 +872,75 @@ async function parseUploadFailure(
   signal: AbortSignal,
 ): Promise<GatewayResult<EvidenceUploadSuccessV1>> {
   return parseCommitOutcomeUnknownFailure<EvidenceUploadSuccessV1>(response, signal);
+}
+
+async function parseExternalRunJudgmentFailure<T>(
+  response: Response,
+  investigationId: string,
+  runId: string,
+  expectedSequence: number,
+  signal: AbortSignal,
+): Promise<GatewayResult<T>> {
+  if (signal.aborted) return aborted();
+  if (response.status === 401 || response.status === 403) {
+    return failed(classifyHttpFailure(response.status));
+  }
+  if (response.status === 413) {
+    return failed({ kind: "judgment_limit_reached", status: 413 });
+  }
+  if (response.status !== 409) {
+    return parseCommitOutcomeUnknownFailure(response, signal);
+  }
+  if (!isJsonResponse(response)) return signal.aborted ? aborted() : failed(protocolFailure("content_type"));
+  const bounded = await readBoundedFailureBody(response, signal);
+  if (bounded.kind === "aborted") return aborted();
+  if (bounded.kind === "invalid") return failed(protocolFailure("json"));
+  let raw: unknown;
+  try {
+    raw = JSON.parse(bounded.text);
+  } catch {
+    return signal.aborted ? aborted() : failed(protocolFailure("json"));
+  }
+  if (signal.aborted) return aborted();
+  try {
+    const conflict: ExternalRunJudgmentConflictV1 = parseExternalRunJudgmentConflict(raw);
+    if (
+      conflict.caseId !== investigationId
+      || conflict.runId !== runId
+      || conflict.expectedSequence !== expectedSequence
+    ) return failed(protocolFailure("identity"));
+    return failed(deepFreezeDto({
+      kind: "judgment_conflict" as const,
+      status: 409 as const,
+      caseId: conflict.caseId,
+      runId: conflict.runId,
+      expectedSequence: conflict.expectedSequence,
+      currentSequence: conflict.currentSequence,
+    }));
+  } catch (cause) {
+    if (!(cause instanceof ContractViolation)) {
+      return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+    }
+  }
+  try {
+    const refusal: ExternalRunJudgmentRefusedV1 = parseExternalRunJudgmentRefused(raw);
+    if (refusal.caseId !== investigationId || refusal.runId !== runId) {
+      return failed(protocolFailure("identity"));
+    }
+    return failed(deepFreezeDto({
+      kind: "judgment_refused" as const,
+      status: 409 as const,
+      caseId: refusal.caseId,
+      runId: refusal.runId,
+      reason: refusal.reason,
+      detail: refusal.detail,
+    }));
+  } catch (cause) {
+    if (signal.aborted) return aborted();
+    return cause instanceof ContractViolation
+      ? failed(protocolFailure("contract"))
+      : failed({ kind: "unexpected" });
+  }
 }
 
 function caseCollectionIdentity(cases: readonly CaseV1[]): boolean {
@@ -1562,6 +1688,14 @@ const UNAVAILABLE_OPERATIONS_QUEUE_GATEWAY: InvestigationOperationsQueueGateway 
     Promise.resolve(failed<InvestigationOperationsQueuePageV1>(QUERY_SEAM_UNAVAILABLE)),
 });
 
+const UNAVAILABLE_EXTERNAL_RUN_JUDGMENT_GATEWAY: InvestigationExternalRunJudgmentGateway =
+  Object.freeze({
+    listExternalRunJudgments: () =>
+      Promise.resolve(failed<ExternalRunJudgmentListV1>(QUERY_SEAM_UNAVAILABLE)),
+    createExternalRunJudgment: () =>
+      Promise.resolve(failed<ExternalRunJudgmentSuccessV1>(WRITE_SEAM_UNAVAILABLE)),
+  });
+
 /**
  * Resolve the write seams a gateway actually implements.
  *
@@ -1701,10 +1835,38 @@ export function investigationOperationsQueueGateway(
   return Object.freeze(resolved);
 }
 
+/** Resolve the run-level read/write pair together; an older gateway fails closed. */
+export function investigationExternalRunJudgmentGateway(
+  gateway: InvestigationGateway,
+): InvestigationExternalRunJudgmentGateway {
+  const { listExternalRunJudgments, createExternalRunJudgment } = gateway;
+  if (listExternalRunJudgments === undefined || createExternalRunJudgment === undefined) {
+    return UNAVAILABLE_EXTERNAL_RUN_JUDGMENT_GATEWAY;
+  }
+  return Object.freeze({
+    listExternalRunJudgments(
+      investigationId: string,
+      runId: string,
+      options: GatewayRequestOptions,
+    ) {
+      return listExternalRunJudgments.call(gateway, investigationId, runId, options);
+    },
+    createExternalRunJudgment(
+      investigationId: string,
+      runId: string,
+      input: CreateExternalRunJudgmentInput,
+      options: GatewayRequestOptions,
+    ) {
+      return createExternalRunJudgment.call(gateway, investigationId, runId, input, options);
+    },
+  });
+}
+
 export const investigationGateway: InvestigationGatewayWithWrites
   & InvestigationCollectionQueryGateway
   & InvestigationCoordinationGateway
-  & InvestigationOperationsQueueGateway = {
+  & InvestigationOperationsQueueGateway
+  & InvestigationExternalRunJudgmentGateway = {
   async listInvestigations({ signal }) {
     const result = await requestParsed(
       "/api/cases",
@@ -1814,6 +1976,72 @@ export const investigationGateway: InvestigationGatewayWithWrites
     return result.ok
       ? { ok: true, value: deepFreezeDto([...result.value.annotations]) }
       : result;
+  },
+
+  listExternalRunJudgments(investigationId, runId, { signal }) {
+    return requestParsed(
+      caseRoute(investigationId, `/runs/${encodeURIComponent(runId)}/judgments`),
+      {},
+      signal,
+      parseExternalRunJudgmentList,
+      (value) => value.caseId === investigationId && value.runId === runId,
+    );
+  },
+
+  async createExternalRunJudgment(investigationId, runId, input, { signal }) {
+    let request: ExternalRunJudgmentRequestV1;
+    try {
+      request = parseExternalRunJudgmentRequest(
+        externalRunJudgmentBody(investigationId, runId, input),
+      );
+    } catch (cause) {
+      return signal.aborted
+        ? aborted()
+        : cause instanceof ContractViolation
+        ? failed(protocolFailure("contract"))
+        : failed({ kind: "unexpected" });
+    }
+    const serialized = serializeMutationBody(signal, () => ({
+      schemaId: request.schemaId,
+      caseId: request.caseId,
+      runId: request.runId,
+      expectedSequence: request.expectedSequence,
+      idempotencyKey: request.idempotencyKey,
+      judgment: request.judgment,
+      links: request.links.map(({ kind, id }) => ({ kind, id })),
+      rationale: request.rationale,
+    }));
+    if (!serialized.ok) return failed(serialized.error);
+    const fetched = await fetchProtected(
+      caseRoute(investigationId, `/runs/${encodeURIComponent(runId)}/judgments`),
+      { method: "POST", headers: JSON_HEADERS, body: serialized.value },
+      signal,
+    );
+    if (!fetched.ok) return failed(fetched.error);
+    if (!fetched.response.ok) {
+      return parseExternalRunJudgmentFailure(
+        fetched.response,
+        investigationId,
+        runId,
+        request.expectedSequence,
+        signal,
+      );
+    }
+    return parseSuccessfulResponse(
+      fetched.response,
+      signal,
+      parseExternalRunJudgmentSuccess,
+      (value) => value.caseId === investigationId
+        && value.runId === runId
+        && value.run.caseId === investigationId
+        && value.run.id === runId
+        && value.applied.caseId === investigationId
+        && value.applied.runId === runId
+        && (value.replayed
+          ? fetched.response.status === 200
+          : fetched.response.status === 201
+            && value.applied.seq === request.expectedSequence + 1),
+    );
   },
 
   async createArtifactAnnotationsBulk(investigationId, input, { signal }) {
