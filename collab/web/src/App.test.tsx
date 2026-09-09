@@ -2076,6 +2076,28 @@ describe("War Room human assessments mount", () => {
   const uuid = "77777777-7777-4777-8777-777777777771";
   const run1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
   const run2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+  const focusedInvestigation = {
+    schemaId: CASE_SCHEMA_ID,
+    id: uuid,
+    title: "Imported output review",
+    problemStatement: "Review the imported model output.",
+    affectedParties: "On-call investigators",
+    impact: "The imported finding needs a human assessment.",
+    scope: "One imported run",
+    openQuestions: [],
+    situationVersion: 1,
+    investigationContext: null,
+    occurredAt: null,
+    occurredAtPrecision: "unknown",
+    occurredAtZone: "unspecified",
+    severity: "high",
+    status: "open",
+    legalHold: false,
+    retentionClass: "standard",
+    participants: [],
+    createdAt: "2026-09-09T12:00:00.000Z",
+    createdBy: "dave",
+  };
 
   function importedRun(
     id: string,
@@ -2207,13 +2229,20 @@ describe("War Room human assessments mount", () => {
             source: "user",
           }));
         }
+        if (url === `/api/cases/${uuid}`) {
+          return Promise.resolve(jsonOk(focusedInvestigation));
+        }
         return null;
       },
     );
     render(<App />);
-    await waitFor(() => {
-      expect(screen.queryByRole("heading", { name: "Capture evidence and observations" })).toBeNull();
-    });
+    expect(await screen.findByRole("heading", { name: "Imported output review" })).toBeTruthy();
+    expect(within(screen.getByRole("main")).getByText({
+      "keystone": "Keystone · Engineer workbench",
+      "investigation-first": "Investigation First",
+      "beacon": "Beacon · Rapid Intake",
+    }[strategyId])).toBeTruthy();
+    expect(screen.queryByText("Investigation unavailable")).toBeNull();
     expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
     expect(screen.queryByText("First imported output")).toBeNull();
     expect(screen.queryByRole("button", { name: "Save review" })).toBeNull();

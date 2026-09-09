@@ -445,6 +445,18 @@ describe("runtime external run judgments adapter", () => {
       /already being recorded/,
       false,
     ],
+    [
+      "stale",
+      { status: "ignored", reason: "stale" },
+      /view changed before the submission result could be accepted/,
+      false,
+    ],
+    [
+      "not ready",
+      { status: "ignored", reason: "not_ready" },
+      /writing became unavailable before this submission could start/,
+      false,
+    ],
   ] as const)("maps the dedicated %s command outcome", async (_label, outcome, copy, blocked) => {
     const create = vi.fn<NonNullable<InvestigationRuntime["commands"]["createExternalRunJudgment"]>>(
       async () => outcome,
