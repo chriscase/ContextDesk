@@ -3279,3 +3279,132 @@ describe("War Room collection-query browse", () => {
     expect(stub).toHaveBeenCalled();
   });
 });
+
+describe("War Room human assessments pass-through", () => {
+  const importedRuns = [
+    {
+      id: "run-1",
+      sourceId: "src-1",
+      outputText: "First imported output",
+      corroborationState: "unverified",
+      evidenceVisibility: "unknown",
+      snapshotBinding: null,
+      importerUsername: "alice",
+      operatorUsername: "alice",
+      promptText: null,
+      promptCompleteness: "unknown",
+    },
+    {
+      id: "run-2",
+      sourceId: "src-1",
+      outputText: "Second imported output",
+      corroborationState: "corroborated",
+      evidenceVisibility: "unknown",
+      snapshotBinding: null,
+      importerUsername: "alice",
+      operatorUsername: "alice",
+      promptText: null,
+      promptCompleteness: "unknown",
+    },
+  ];
+
+  function stubImportedRuns() {
+    stubCaseFetch({
+      onRequest: (url) => {
+        if (url === "/api/cases/c1/imports") {
+          return Promise.resolve({ ok: true, json: async () => ({ runs: importedRuns }) });
+        }
+        if (url === "/api/cases/c1/contributions") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              contributions: [{
+                id: "n1",
+                kind: "note",
+                body: "Queue depth spiked at 14:02",
+                privacyClass: "owner_only",
+                tombstoned: false,
+              }],
+            }),
+          });
+        }
+        return null;
+      },
+    });
+  }
+
+  it("places the supplied panel after the exact focused imported run only", async () => {
+    stubImportedRuns();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId="c1"
+        stage="capture"
+        focus={{
+          section: "triage-capture",
+          item: "run-1",
+          itemKind: "imported-run",
+          lane: null,
+          experiment: null,
+        }}
+        humanAssessmentsPanel={<div data-testid="human-assessments-slot">Human assessments slot</div>}
+        onOpenCase={vi.fn()}
+      />,
+    );
+    const firstOutput = await screen.findByText("First imported output", {
+      selector: "pre.imported-run__text",
+    });
+    const first = firstOutput.closest("article");
+    expect(first).toBeTruthy();
+    expect(screen.getByText("Second imported output")).toBeTruthy();
+    const slot = screen.getByTestId("human-assessments-slot");
+    expect(first?.nextElementSibling).toBe(slot);
+    expect(screen.getAllByTestId("human-assessments-slot")).toHaveLength(1);
+  });
+
+  it("does not render a supplied panel for another kind, and invents none when omitted", async () => {
+    stubImportedRuns();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId="c1"
+        stage="capture"
+        focus={{
+          section: "triage-capture",
+          item: "n1",
+          itemKind: "contribution",
+          lane: null,
+          experiment: null,
+        }}
+        humanAssessmentsPanel={<div data-testid="human-assessments-slot">Human assessments slot</div>}
+        onOpenCase={vi.fn()}
+      />,
+    );
+    await screen.findByText("First imported output", { selector: "pre.imported-run__text" });
+    expect(screen.queryByTestId("human-assessments-slot")).toBeNull();
+  });
+
+  it("does not invent a human assessments panel when the shell omits one", async () => {
+    stubImportedRuns();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId="c1"
+        stage="capture"
+        focus={{
+          section: "triage-capture",
+          item: "run-1",
+          itemKind: "imported-run",
+          lane: null,
+          experiment: null,
+        }}
+        onOpenCase={vi.fn()}
+      />,
+    );
+    await screen.findByText("First imported output", { selector: "pre.imported-run__text" });
+    expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
+  });
+});

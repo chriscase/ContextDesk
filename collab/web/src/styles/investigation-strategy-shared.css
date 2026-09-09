@@ -658,3 +658,164 @@
     transition: none !important;
   }
 }
+
+/* Shared human-assessments presentation. Scope stays on this exact class. */
+.strategy-kit__human-assessments {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+  margin-top: 0.85rem;
+  color: var(--fg);
+}
+
+.strategy-kit__human-assessments-panel,
+.strategy-kit__human-assessments-history,
+.strategy-kit__human-assessments-form,
+.strategy-kit__human-assessments-fieldset,
+.strategy-kit__human-assessments-item {
+  display: grid;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.strategy-kit__human-assessments-history,
+.strategy-kit__human-assessments-form,
+.strategy-kit__human-assessments-fieldset,
+.strategy-kit__human-assessments-item {
+  padding: 0.8rem 0.85rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.strategy-kit__human-assessments-history h4,
+.strategy-kit__human-assessments-form h4,
+.strategy-kit__human-assessments-value,
+.strategy-kit__human-assessments-meta,
+.strategy-kit__human-assessments-rationale,
+.strategy-kit__human-assessments-help,
+.strategy-kit__human-assessments-count {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__human-assessments-meta,
+.strategy-kit__human-assessments-help,
+.strategy-kit__human-assessments-count {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.strategy-kit__human-assessments-value {
+  font-weight: 650;
+}
+
+.strategy-kit__human-assessments-history-list,
+.strategy-kit__human-assessments-citations {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+  margin: 0;
+  padding-inline-start: 1.2rem;
+}
+
+.strategy-kit__human-assessments-choice,
+.strategy-kit__human-assessments-rationale-field {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.65rem;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.strategy-kit__human-assessments-rationale-field {
+  display: grid;
+}
+
+.strategy-kit__human-assessments-choice span,
+.strategy-kit__human-assessments-rationale-field span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__human-assessments-form textarea,
+.strategy-kit__human-assessments-form button,
+.strategy-kit__human-assessments-form input {
+  min-width: 0;
+  max-width: 100%;
+  font: inherit;
+}
+
+.strategy-kit__human-assessments-form textarea {
+  width: 100%;
+  min-height: 5.5rem;
+  padding: 0.62rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  resize: vertical;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__human-assessments-actions {
+  flex-wrap: wrap;
+}
+
+.strategy-kit__human-assessments :where(button, input, textarea, summary) {
+  border: 1px solid var(--border);
+}
+
+.strategy-kit__human-assessments :where(button, input, textarea, summary):focus-visible {
+  outline: 0.18rem solid var(--accent);
+  outline-offset: 0.14rem;
+}
+
+@media (max-width: 390px) {
+  .strategy-kit__human-assessments,
+  .strategy-kit__human-assessments-panel,
+  .strategy-kit__human-assessments-history,
+  .strategy-kit__human-assessments-form,
+  .strategy-kit__human-assessments-fieldset,
+  .strategy-kit__human-assessments-actions,
+  .strategy-kit__human-assessments-choice {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .strategy-kit__human-assessments-form button,
+  .strategy-kit__human-assessments-form textarea {
+    width: 100%;
+    max-width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .strategy-kit__human-assessments,
+  .strategy-kit__human-assessments-history,
+  .strategy-kit__human-assessments-form,
+  .strategy-kit__human-assessments-fieldset,
+  .strategy-kit__human-assessments-item,
+  .strategy-kit__human-assessments :where(button, input, textarea) {
+    border: 1px solid CanvasText;
+    forced-color-adjust: auto;
+  }
+
+  .strategy-kit__human-assessments :where(button, input, textarea, summary):focus-visible,
+  .strategy-kit__human-assessments :where(button, input, textarea, summary):focus {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .strategy-kit__human-assessments,
+  .strategy-kit__human-assessments * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

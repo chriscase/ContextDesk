@@ -66,6 +66,7 @@ import {
   useInvestigationRuntime,
 } from "./investigations/runtime/public.js";
 import { RuntimeHandoffPanel } from "./investigations/strategies/runtime-handoff.js";
+import { RuntimeExternalRunJudgments } from "./investigations/strategies/runtime-external-run-judgments.js";
 import {
   InvestigationStrategyRenderer,
 } from "./investigations/strategies/StrategyRenderer.js";
@@ -143,6 +144,16 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
   );
   if (bindings === null) return null;
 
+  const focusedImportedRunId = props.stage === "capture"
+    && props.focus?.itemKind === "imported-run"
+    && typeof props.focus.item === "string"
+    && props.focus.item.length > 0
+      ? props.focus.item
+      : null;
+  const humanAssessmentsPanel = focusedImportedRunId === null
+    ? undefined
+    : <RuntimeExternalRunJudgments runId={focusedImportedRunId} />;
+
   return (
     <>
       <Cases
@@ -155,6 +166,7 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
         stage={props.stage}
         {...(props.focus ? { focus: props.focus } : {})}
         {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })}
+        {...(humanAssessmentsPanel === undefined ? {} : { humanAssessmentsPanel })}
         onOpenCase={props.onOpenCase}
         onStageChange={bindings.onStageChange}
         onDeepNavigate={bindings.onDeepNavigate}
