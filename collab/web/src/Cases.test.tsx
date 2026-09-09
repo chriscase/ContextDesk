@@ -3132,6 +3132,37 @@ describe("War Room collection-query browse", () => {
     });
   });
 
+  it("uses the separately authorized Runtime list for create suggestions in collection mode", async () => {
+    stubCaseFetch();
+    const item = makePopulatedCase();
+    const page: InvestigationCollectionPageV1 = {
+      schemaId: "cd-collab.investigation_collection_page.v1",
+      items: [item],
+      nextCursor: null,
+      hiddenArchivedCount: 0,
+      facets: {
+        status: { top: [], otherCount: 0 }, entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 }, contributor: { top: [], otherCount: 0 },
+      },
+    };
+    render(<Cases
+      roles={["case-lead"]}
+      capabilities={["investigation:read", "investigation:write"]}
+      view="investigations"
+      collectionPage={{ availability: "available", value: page, refresh: "settled" }}
+      collectionQuery={DEFAULT_COLLECTION_QUERY}
+      onCollectionQueryChange={vi.fn()}
+      recordedContextCatalog={{
+        status: "available",
+        records: [{ investigationContext: { productName: "Authorized off-page product" } }],
+      }}
+    />);
+    await screen.findByRole("button", { name: item.title });
+    const list = document.getElementById("investigation-context-options-productName");
+    expect(list?.querySelector('option[value="Authorized off-page product"]')).toBeTruthy();
+    expect(list?.querySelector(`option[value="${item.investigationContext?.productName ?? ""}"]`)).toBeNull();
+  });
+
   it("uses server entity facets and keeps observed-date filtering local to the loaded page", async () => {
     const onQueryChange = vi.fn();
     const stub = stubCaseFetch({

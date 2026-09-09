@@ -63,8 +63,10 @@ import { BrandMark } from "./graphics.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
 import {
   InvestigationRuntimeProvider,
+  selectResourceView,
   useInvestigationRuntime,
 } from "./investigations/runtime/public.js";
+import { recordedContextCatalogFromView } from "./investigations/strategies/shared/index.js";
 import { RuntimeHandoffPanel } from "./investigations/strategies/runtime-handoff.js";
 import {
   InvestigationStrategyRenderer,
@@ -161,6 +163,9 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
         onActivityOpen={bindings.onActivityOpen}
         onExitFocus={bindings.onExitFocus}
         onCollectionRefresh={collection.refresh}
+        recordedContextCatalog={recordedContextCatalogFromView(
+          selectResourceView(runtime.resources.investigations),
+        )}
         {...(props.onFocusedCaseTitle
           ? { onFocusedCaseTitle: props.onFocusedCaseTitle }
           : {})}
