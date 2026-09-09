@@ -620,6 +620,53 @@ describe("portable investigation service", () => {
       .toBe(true);
   });
 
+  it("refuses export when judgment timeline exists without portable judgment rows", async () => {
+    const row = await fixture();
+    await row.caseStore.appendTimeline(row.caseId, {
+      kind: "external_run_judgment_recorded",
+      actor: ACTOR,
+      targetId: "33333333-3333-4333-8333-333333333333",
+      clientTime: null,
+      payload: { judgment: "insufficient_evidence", sequence: 1, linkCount: 0 },
+    });
+
+    await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
+      code: "unsupported_state",
+    });
+  });
+
+  it("blocks an incoming archive that names a judgment without portable judgment rows", async () => {
+    const row = await fixture();
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const runId = original.investigation.importedAiRuns[0]?.id;
+    const last = original.investigation.timeline.at(-1);
+    if (!runId || !last) throw new Error("synthetic portable fixture is incomplete");
+    const archive = resealArchive(original, (investigation) => {
+      investigation.timeline.push({
+        ...last,
+        seq: last.seq + 1,
+        kind: "external_run_judgment_recorded",
+        targetNamespace: "imported_ai_run",
+        targetId: runId,
+      });
+    });
+    const preflight = await row.portable.preflight(
+      archive,
+      {
+        mode: "dry_run",
+        collisionPolicy: "remap_deterministic",
+        identityMap: identityMapFor(archive),
+      },
+      ACTOR,
+      false,
+    );
+    expect(preflight.report.exactReconstruction).toBe(false);
+    expect(preflight.report.reconstructionReasons).toContainEqual(expect.objectContaining({
+      path: "$.investigation.timeline",
+      detail: "external-run judgments are not exact-applyable",
+    }));
+  });
+
   it("refuses export while any triage job or candidate remains nonterminal", async () => {
     const row = await fixture();
     const snapshot = (await row.cases.listSnapshots(row.caseId, ACTOR, false))[0];

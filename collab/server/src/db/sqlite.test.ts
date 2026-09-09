@@ -7,9 +7,11 @@ import {
   UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
   UI_STRATEGY_PREFERENCE_UPDATE_SCHEMA_ID,
   INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_REQUEST_SCHEMA_ID,
   SOURCE_CREATE_REQUEST_SCHEMA_ID,
   SOURCE_RETIRE_REQUEST_SCHEMA_ID,
   parseInvestigationCoordinationActionSuccess,
+  parseExternalRunJudgmentSuccess,
   parseSourceMutationSuccess,
 } from "@cd-collab/contracts";
 import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../evidence/store.js";
@@ -27,6 +29,19 @@ const EXPERIMENT_SUMMARY = JSON.parse(
 
 type StoredRun = Parameters<RunStore["insert"]>[0];
 type StoredImportIntent = Parameters<RunStore["insertImportSuccessIntent"]>[0];
+
+function judgmentRequest(caseId: string, runId: string, idempotencyKey: string) {
+  return {
+    schemaId: EXTERNAL_RUN_JUDGMENT_REQUEST_SCHEMA_ID,
+    caseId,
+    runId,
+    expectedSequence: 0,
+    idempotencyKey,
+    judgment: "insufficient_evidence" as const,
+    links: [],
+    rationale: "A human must compare this output with recorded evidence.",
+  };
+}
 
 function strictStoredRun(caseId: string, id: string): StoredRun {
   return {
@@ -1160,6 +1175,100 @@ describe("SQLite local runtime", () => {
       expect(await reopened.runs.listCorroborations(imported.id)).toEqual([]);
       expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "run_corroboration")).toBe(false);
       expect(await reopened.audit.list({ action: "run_corroboration" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists a judgment and exact replay across SQLite reopen", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-run-judgment-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    const runId = "33333333-3333-4333-8333-333333333333";
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const imports = new ImportService({ evidence, audit: runtime.audit, cases, catalog, runs: runtime.runs });
+      const created = await cases.createCase(actor, { title: "SQLite run judgment" }, "test");
+      await runtime.runs.insert(strictStoredRun(created.id, runId));
+      const request = judgmentRequest(created.id, runId, "sqlite-judgment-01");
+      const fresh = await imports.addRunJudgment(created.id, runId, actor, request, "test", false);
+      expect(parseExternalRunJudgmentSuccess(fresh).replayed).toBe(false);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      const reopenedEvidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const reopenedCatalog = new CatalogService(reopened.catalog, reopened.audit);
+      const reopenedCases = new CaseService(
+        reopenedEvidence,
+        reopened.audit,
+        reopened.cases,
+        reopenedCatalog,
+      );
+      const reopenedImports = new ImportService({
+        evidence: reopenedEvidence,
+        audit: reopened.audit,
+        cases: reopenedCases,
+        catalog: reopenedCatalog,
+        runs: reopened.runs,
+      });
+      expect(await reopened.runs.listJudgments(runId)).toHaveLength(1);
+      const replay = await reopenedImports.addRunJudgment(
+        created.id,
+        runId,
+        actor,
+        { ...request, expectedSequence: 99 },
+        "test",
+        false,
+      );
+      expect(parseExternalRunJudgmentSuccess(replay).replayed).toBe(true);
+      expect(await reopened.runs.listJudgments(runId)).toHaveLength(1);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls a judgment and replay intent back across SQLite reopen after timeline failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-run-judgment-rollback-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    const runId = "33333333-3333-4333-8333-333333333333";
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const imports = new ImportService({ evidence, audit: runtime.audit, cases, catalog, runs: runtime.runs });
+      const created = await cases.createCase(actor, { title: "SQLite judgment rollback" }, "test");
+      await runtime.runs.insert(strictStoredRun(created.id, runId));
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "external_run_judgment_recorded") {
+          throw new Error("injected timeline failure:external_run_judgment_recorded");
+        }
+        return originalAppend(caseId, event);
+      };
+      await expect(imports.addRunJudgment(
+        created.id,
+        runId,
+        actor,
+        judgmentRequest(created.id, runId, "sqlite-judgment-rollback-01"),
+        "test",
+        false,
+      )).rejects.toThrow(/injected timeline failure:external_run_judgment_recorded/);
+      expect(await runtime.runs.listJudgments(runId)).toEqual([]);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.runs.listJudgments(runId)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some(
+        (event) => event.kind === "external_run_judgment_recorded",
+      )).toBe(false);
+      expect(await reopened.audit.list({ action: "external_run_judgment_recorded" })).toEqual([]);
       reopened.state.close();
     } finally {
       await rm(root, { recursive: true, force: true });

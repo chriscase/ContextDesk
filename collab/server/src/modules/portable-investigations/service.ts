@@ -672,6 +672,12 @@ function applySupportReasons(
       "imported-run corroboration is not exact-applyable",
     );
   }
+  if (bundle.timeline.some((row) => row.kind === "external_run_judgment_recorded")) {
+    block(
+      "$.investigation.timeline",
+      "external-run judgments are not exact-applyable",
+    );
+  }
   if (bundle.timeline.some((row, index) => row.seq !== index + 1)) {
     block("$.investigation.timeline", "timeline sequence must be contiguous from one");
   }
@@ -1256,6 +1262,12 @@ export class PortableInvestigationService {
         throw new PortableServerError(
           "unsupported_state",
           "imported-run corroboration is not exact-applyable",
+        );
+      }
+      if (row.kind === "external_run_judgment_recorded") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "external-run judgments are not exact-applyable",
         );
       }
       if (

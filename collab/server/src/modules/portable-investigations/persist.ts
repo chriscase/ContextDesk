@@ -852,6 +852,9 @@ export async function persistPortableArchive(input: {
     if (event.kind === "run_corroboration") {
       throw new Error("imported-run corroboration is not exact-applyable");
     }
+    if (event.kind === "external_run_judgment_recorded") {
+      throw new Error("external-run judgments are not exact-applyable");
+    }
     if (
       (/^contribution_/.test(event.kind) || event.kind === "hypothesis_status")
       && (event.targetNamespace !== "contribution" || !event.targetId)
