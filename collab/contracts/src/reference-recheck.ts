@@ -24,24 +24,24 @@ export const REFERENCE_RECHECK_CHANGED_SCHEMA_ID =
 export const REFERENCE_RECHECK_REFUSED_SCHEMA_ID =
   "cd-collab.reference_recheck_refused.v1" as const;
 
-export const REFERENCE_RECHECK_OUTCOMES = [
+export const REFERENCE_RECHECK_OUTCOMES = Object.freeze([
   "reachable_metadata",
   "unreachable",
-] as const;
+] as const);
 export type ReferenceRecheckOutcome =
   (typeof REFERENCE_RECHECK_OUTCOMES)[number];
 
-export const REFERENCE_RECHECK_CHANGE_REASONS = [
+export const REFERENCE_RECHECK_CHANGE_REASONS = Object.freeze([
   "reference_identity_changed",
   "idempotency_intent_mismatch",
-] as const;
+] as const);
 export type ReferenceRecheckChangeReason =
   (typeof REFERENCE_RECHECK_CHANGE_REASONS)[number];
 
-export const REFERENCE_RECHECK_REFUSALS = [
+export const REFERENCE_RECHECK_REFUSALS = Object.freeze([
   "investigation_archived",
   "observation_unsupported",
-] as const;
+] as const);
 export type ReferenceRecheckRefusal =
   (typeof REFERENCE_RECHECK_REFUSALS)[number];
 
@@ -228,6 +228,87 @@ function plainRecord(raw: unknown, path: string): Record<string, unknown> {
   return raw as Record<string, unknown>;
 }
 
+/**
+ * Reject values that are not representable as inert JSON-like contract data.
+ * Descriptor traversal is deliberate: validation must not invoke caller-owned
+ * accessors before deciding whether a value is safe to inspect.
+ */
+function assertPlainDataTree(
+  raw: unknown,
+  path: string,
+  ancestors = new Set<object>(),
+): void {
+  if (typeof raw !== "object" || raw === null) return;
+
+  const object = raw as object;
+  if (ancestors.has(object)) {
+    throw new ContractViolation(path, "cyclic values are not valid contract data");
+  }
+
+  const array = Array.isArray(raw);
+  const prototype = Object.getPrototypeOf(object);
+  if (
+    (array && prototype !== Array.prototype)
+    || (!array && prototype !== Object.prototype && prototype !== null)
+  ) {
+    throw new ContractViolation(path, "expected plain data with no inherited properties");
+  }
+
+  if (Object.getOwnPropertySymbols(object).length > 0) {
+    throw new ContractViolation(path, "symbol keys are not valid contract data");
+  }
+
+  const descriptors = Object.getOwnPropertyDescriptors(object);
+  if (array) {
+    if (raw.length > REFERENCE_RECHECK_LIMITS.pageMaxItems) {
+      throw new ContractViolation(
+        path,
+        `expected at most ${REFERENCE_RECHECK_LIMITS.pageMaxItems} items`,
+      );
+    }
+    for (let index = 0; index < raw.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(descriptors, String(index))) {
+        throw new ContractViolation(
+          `${path}[${index}]`,
+          "sparse arrays are not valid contract data",
+        );
+      }
+    }
+    for (const key of Object.keys(descriptors)) {
+      if (key === "length") continue;
+      const index = Number(key);
+      if (
+        !/^(0|[1-9][0-9]*)$/.test(key)
+        || !Number.isSafeInteger(index)
+        || index >= raw.length
+      ) {
+        throw new ContractViolation(`${path}.${key}`, "unknown array key (contract drift)");
+      }
+    }
+  }
+
+  ancestors.add(object);
+  try {
+    for (const key of Object.keys(descriptors)) {
+      if (array && key === "length") continue;
+      const descriptor = descriptors[key]!;
+      const fieldPath = array ? `${path}[${key}]` : `${path}.${key}`;
+      if (!descriptor.enumerable) {
+        throw new ContractViolation(
+          fieldPath,
+          "non-enumerable properties are not valid contract data",
+        );
+      }
+      if (!("value" in descriptor)) {
+        throw new ContractViolation(fieldPath, "accessor properties are not valid contract data");
+      }
+      assertPlainDataTree(descriptor.value, fieldPath, ancestors);
+    }
+  } finally {
+    ancestors.delete(object);
+  }
+}
+
 function nestedSentinels(
   raw: Record<string, unknown>,
   fields: readonly string[],
@@ -312,6 +393,7 @@ function recheck(raw: unknown, path: string): ReferenceRecheckV1 {
 }
 
 export function parseReferenceRecheckRequest(raw: unknown): ReferenceRecheckRequestV1 {
+  assertPlainDataTree(raw, "$");
   const record = plainRecord(raw, "$");
   checkObject("$", requestShape, nestedSentinels(record, ["expectedReference"]));
   const idempotencyKey = record.idempotencyKey as string;
@@ -332,10 +414,12 @@ export function parseReferenceRecheckRequest(raw: unknown): ReferenceRecheckRequ
 }
 
 export function parseReferenceRecheck(raw: unknown): ReferenceRecheckV1 {
+  assertPlainDataTree(raw, "$");
   return recheck(raw, "$");
 }
 
 export function parseReferenceRecheckSuccess(raw: unknown): ReferenceRecheckSuccessV1 {
+  assertPlainDataTree(raw, "$");
   const record = plainRecord(raw, "$");
   checkObject("$", successShape, nestedSentinels(record, ["applied"]));
   const caseId = uuid(record.caseId as string, "$.caseId");
@@ -356,6 +440,7 @@ export function parseReferenceRecheckSuccess(raw: unknown): ReferenceRecheckSucc
 }
 
 export function parseReferenceRecheckPage(raw: unknown): ReferenceRecheckPageV1 {
+  assertPlainDataTree(raw, "$");
   const record = plainRecord(raw, "$");
   assertDenseArray(record.items, "$.items");
   if (record.items.length > REFERENCE_RECHECK_LIMITS.pageMaxItems) {
@@ -402,6 +487,7 @@ export function parseReferenceRecheckPage(raw: unknown): ReferenceRecheckPageV1 
 }
 
 export function parseReferenceRecheckChanged(raw: unknown): ReferenceRecheckChangedV1 {
+  assertPlainDataTree(raw, "$");
   const record = plainRecord(raw, "$");
   checkObject("$", changedShape, nestedSentinels(record, ["currentReference"]));
   return Object.freeze({
@@ -415,6 +501,7 @@ export function parseReferenceRecheckChanged(raw: unknown): ReferenceRecheckChan
 }
 
 export function parseReferenceRecheckRefused(raw: unknown): ReferenceRecheckRefusedV1 {
+  assertPlainDataTree(raw, "$");
   const record = plainRecord(raw, "$");
   checkObject("$", refusedShape, nestedSentinels(record, ["currentReference"]));
   return Object.freeze({

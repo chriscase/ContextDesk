@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   REFERENCE_RECHECK_CHANGED_SCHEMA_ID,
+  REFERENCE_RECHECK_CHANGE_REASONS,
   REFERENCE_RECHECK_IDEMPOTENCY,
   REFERENCE_RECHECK_LIMITS,
+  REFERENCE_RECHECK_OUTCOMES,
   REFERENCE_RECHECK_PAGE_SCHEMA_ID,
   REFERENCE_RECHECK_REFUSED_SCHEMA_ID,
+  REFERENCE_RECHECK_REFUSALS,
   REFERENCE_RECHECK_REQUEST_SCHEMA_ID,
   REFERENCE_RECHECK_RESPONSE_CONTEXT,
   REFERENCE_RECHECK_SCHEMA_ID,
@@ -233,6 +236,9 @@ describe("reference recheck contracts", () => {
   });
 
   it("freezes server-owned observation, authority, and ambiguous-outcome rules", () => {
+    expect(Object.isFrozen(REFERENCE_RECHECK_OUTCOMES)).toBe(true);
+    expect(Object.isFrozen(REFERENCE_RECHECK_CHANGE_REASONS)).toBe(true);
+    expect(Object.isFrozen(REFERENCE_RECHECK_REFUSALS)).toBe(true);
     expect(REFERENCE_RECHECK_RESPONSE_CONTEXT).toEqual({
       routeIdentity:
         "request_and_response_case_and_artifact_equal_authoritative_route_identities",

@@ -104,6 +104,161 @@ describe("reference recheck adversarial parsing", () => {
     ).toThrow(/unknown key/);
   });
 
+  it("rejects non-plain roots before every public parser reads a property", () => {
+    const validEnvelopes: readonly [
+      parser: (raw: unknown) => unknown,
+      raw: Record<string, unknown>,
+    ][] = [
+      [parseReferenceRecheckRequest, request()],
+      [parseReferenceRecheck, result()],
+      [parseReferenceRecheckSuccess, {
+        schemaId: REFERENCE_RECHECK_SUCCESS_SCHEMA_ID,
+        caseId: CASE_ID,
+        artifactId: ARTIFACT_ID,
+        applied: result(),
+      }],
+      [parseReferenceRecheckPage, {
+        schemaId: REFERENCE_RECHECK_PAGE_SCHEMA_ID,
+        caseId: CASE_ID,
+        artifactId: ARTIFACT_ID,
+        items: [result()],
+        nextCursor: null,
+      }],
+      [parseReferenceRecheckChanged, {
+        schemaId: REFERENCE_RECHECK_CHANGED_SCHEMA_ID,
+        error: "reference_recheck_changed",
+        caseId: CASE_ID,
+        artifactId: ARTIFACT_ID,
+        reason: "reference_identity_changed",
+        currentReference: reference(),
+      }],
+      [parseReferenceRecheckRefused, {
+        schemaId: REFERENCE_RECHECK_REFUSED_SCHEMA_ID,
+        error: "reference_recheck_refused",
+        caseId: CASE_ID,
+        artifactId: ARTIFACT_ID,
+        reason: "observation_unsupported",
+        detail: "No trusted observer supports this reference.",
+        currentReference: reference(),
+      }],
+    ];
+
+    for (const [parser, valid] of validEnvelopes) {
+      let getterCalls = 0;
+      const accessor = { ...valid };
+      Object.defineProperty(accessor, "caseId", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          getterCalls += 1;
+          return CASE_ID;
+        },
+      });
+      expect(() => parser(accessor)).toThrow(/accessor properties/);
+      expect(getterCalls).toBe(0);
+
+      const inherited = Object.assign(Object.create({ role: "admin" }), valid);
+      expect(() => parser(inherited)).toThrow(/plain data with no inherited properties/);
+    }
+  });
+
+  it("rejects nested accessors, symbols, cycles, hidden fields, and custom array keys", () => {
+    let getterCalls = 0;
+    const accessorReference = reference();
+    Object.defineProperty(accessorReference, "uri", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "https://attacker.invalid/observed";
+      },
+    });
+    expect(() =>
+      parseReferenceRecheckRequest(request({ expectedReference: accessorReference })),
+    ).toThrow(/accessor properties/);
+    expect(getterCalls).toBe(0);
+
+    const symbolReference = reference() as Record<PropertyKey, unknown>;
+    symbolReference[Symbol("provider-secret")] = "secret";
+    expect(() =>
+      parseReferenceRecheckRequest(request({ expectedReference: symbolReference })),
+    ).toThrow(/symbol keys/);
+
+    const cyclicReference = reference() as Record<string, unknown>;
+    cyclicReference.loop = cyclicReference;
+    expect(() =>
+      parseReferenceRecheckRequest(request({ expectedReference: cyclicReference })),
+    ).toThrow(/cyclic values/);
+
+    const hiddenReference = reference();
+    Object.defineProperty(hiddenReference, "provider", {
+      configurable: true,
+      enumerable: false,
+      value: "secret",
+    });
+    expect(() =>
+      parseReferenceRecheckRequest(request({ expectedReference: hiddenReference })),
+    ).toThrow(/non-enumerable properties/);
+
+    const items = [result()] as unknown[] & { authority?: string };
+    items.authority = "admin";
+    expect(() =>
+      parseReferenceRecheckPage({
+        schemaId: REFERENCE_RECHECK_PAGE_SCHEMA_ID,
+        caseId: CASE_ID,
+        artifactId: ARTIFACT_ID,
+        items,
+        nextCursor: null,
+      }),
+    ).toThrow(/unknown array key/);
+
+    const numericCustomKeyItems = [result()];
+    Object.defineProperty(numericCustomKeyItems, "4294967295", {
+      configurable: true,
+      enumerable: true,
+      value: result(),
+    });
+    expect(() =>
+      parseReferenceRecheckPage({
+        schemaId: REFERENCE_RECHECK_PAGE_SCHEMA_ID,
+        caseId: CASE_ID,
+        artifactId: ARTIFACT_ID,
+        items: numericCustomKeyItems,
+        nextCursor: null,
+      }),
+    ).toThrow(/unknown array key/);
+
+    let itemGetterCalls = 0;
+    const accessorItems = [result()];
+    Object.defineProperty(accessorItems, "0", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        itemGetterCalls += 1;
+        return result();
+      },
+    });
+    expect(() =>
+      parseReferenceRecheckPage({
+        schemaId: REFERENCE_RECHECK_PAGE_SCHEMA_ID,
+        caseId: CASE_ID,
+        artifactId: ARTIFACT_ID,
+        items: accessorItems,
+        nextCursor: null,
+      }),
+    ).toThrow(/accessor properties/);
+    expect(itemGetterCalls).toBe(0);
+  });
+
+  it("accepts null-prototype records as inert plain data", () => {
+    const expectedReference = Object.assign(Object.create(null), reference());
+    const plainRequest = Object.assign(
+      Object.create(null),
+      request({ expectedReference }),
+    );
+    expect(parseReferenceRecheckRequest(plainRequest)).toEqual(request());
+  });
+
   it("rejects malformed identities, digests, keys, clocks, and cursors", () => {
     for (const invalidId of [
       "",
