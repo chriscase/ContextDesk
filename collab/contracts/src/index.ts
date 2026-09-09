@@ -688,6 +688,39 @@ export type {
 } from "./evidence.js";
 
 export {
+  REFERENCE_RECHECK_CHANGED_SCHEMA_ID,
+  REFERENCE_RECHECK_CHANGE_REASONS,
+  REFERENCE_RECHECK_IDEMPOTENCY,
+  REFERENCE_RECHECK_LIMITS,
+  REFERENCE_RECHECK_OUTCOMES,
+  REFERENCE_RECHECK_PAGE_SCHEMA_ID,
+  REFERENCE_RECHECK_REFUSED_SCHEMA_ID,
+  REFERENCE_RECHECK_REFUSALS,
+  REFERENCE_RECHECK_REQUEST_SCHEMA_ID,
+  REFERENCE_RECHECK_RESPONSE_CONTEXT,
+  REFERENCE_RECHECK_SCHEMA_ID,
+  REFERENCE_RECHECK_SUCCESS_SCHEMA_ID,
+  parseReferenceRecheck,
+  parseReferenceRecheckChanged,
+  parseReferenceRecheckPage,
+  parseReferenceRecheckRefused,
+  parseReferenceRecheckRequest,
+  parseReferenceRecheckSuccess,
+} from "./reference-recheck.js";
+export type {
+  ReferenceIdentityV1,
+  ReferenceRecheckChangeReason,
+  ReferenceRecheckChangedV1,
+  ReferenceRecheckOutcome,
+  ReferenceRecheckPageV1,
+  ReferenceRecheckRefusal,
+  ReferenceRecheckRefusedV1,
+  ReferenceRecheckRequestV1,
+  ReferenceRecheckSuccessV1,
+  ReferenceRecheckV1,
+} from "./reference-recheck.js";
+
+export {
   BRIEF_SCHEMA_ID,
   IMPORTED_RESPONSE_PRESENTATION,
   SHARE_SAFE_ENTITY_HANDLE_PREFIX,
