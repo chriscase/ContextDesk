@@ -2,11 +2,11 @@
  * Browser-safe External-run Human Judgment V1.
  *
  * Append-only human judgments about one imported external run. Parsers never
- * treat a judgment as a correctness verdict: the success run projection is an
- * immutable identity stub `{id, caseId, sourceId, createdAt,
- * corroborationState:"unverified"}` and never mirrors legacy latest
- * corroboration. Empty links parse for every judgment value; server policy may
- * later refuse empty `corroborates` / `contradicts` with `links_required`.
+ * treat a judgment as a correctness verdict: the success run projection is a
+ * pure immutable identity/provenance stub `{id, caseId, sourceId, createdAt}`
+ * and never fabricates or mirrors legacy ExternalRunV1 corroboration. Empty
+ * links parse for every judgment value; server policy may later refuse empty
+ * `corroborates` / `contradicts` with `links_required`.
  *
  * This module must stay free of `node:*` and must not import `./run.js`.
  */
@@ -133,7 +133,13 @@ export const EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT = Object.freeze({
   parserCannotProveRequestOrAuth:
     "parsers_cannot_prove_request_or_auth_facts_server_or_gateway_enforces_those_bindings",
   runProjection:
-    "success_run_projection_is_an_immutable_identity_stub_stays_unverified_and_never_mirrors_legacy_latest_corroboration",
+    "success_run_projection_is_an_immutable_identity_stub_id_caseId_sourceId_createdAt_and_never_mirrors_or_fabricates_legacy_corroboration",
+  runProvenance:
+    "server_or_gateway_enforces_success_run_sourceId_and_createdAt_exactly_equal_stored_ExternalRunV1_identified_by_run_id_and_runId",
+  listRunProvenance:
+    "server_or_gateway_enforces_list_runId_identifies_the_same_stored_ExternalRunV1_the_list_envelope_does_not_project_sourceId_or_createdAt",
+  parserCannotProveStoredRun:
+    "parsers_validate_canonical_run_sourceId_and_createdAt_structurally_and_cannot_look_up_the_stored_run",
   list: "complete_unpaged_ordered_contiguous_seq_starting_at_1_bounded_by_later_server_policy",
   links: "parser_allows_empty_links_for_every_judgment_value",
   noAutomaticWrites: "no_automatic_or_background_writes",
@@ -177,7 +183,6 @@ export interface ExternalRunJudgmentRunProjectionV1 {
   readonly caseId: string;
   readonly sourceId: string;
   readonly createdAt: string;
-  readonly corroborationState: "unverified";
 }
 
 export interface ExternalRunJudgmentSuccessV1 {
@@ -260,7 +265,6 @@ const runProjectionShape: ObjectShape = {
   caseId: f.req(f.str),
   sourceId: f.req(f.str),
   createdAt: f.req(f.str),
-  corroborationState: f.req(f.en("unverified")),
 };
 
 const successShape: ObjectShape = {
@@ -614,18 +618,11 @@ function parseRunProjection(
   if (projectedCaseId !== caseId) {
     throw new ContractViolation(`${path}.caseId`, "must match caseId");
   }
-  if (record.corroborationState !== "unverified") {
-    throw new ContractViolation(
-      `${path}.corroborationState`,
-      "run projection must stay unverified and must not imply correctness",
-    );
-  }
   return {
     id,
     caseId: projectedCaseId,
     sourceId: requireUuid(record.sourceId, `${path}.sourceId`),
     createdAt: requireCanonicalUtcInstant(record.createdAt, `${path}.createdAt`),
-    corroborationState: "unverified",
   };
 }
 

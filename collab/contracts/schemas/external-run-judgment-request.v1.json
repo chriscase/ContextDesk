@@ -46,6 +46,7 @@
       "type": ["string", "null"],
       "minLength": 1,
       "maxLength": 4000,
+      "description": "JSON Schema cannot express NFKC or trim; schema-only validation is structural. The authoritative parser normalizes with NFKC and trim. Ordinary newlines are allowed.",
       "allOf": [
         { "pattern": "\\S" },
         {

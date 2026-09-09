@@ -150,7 +150,6 @@ function runProjection(overrides: Record<string, unknown> = {}) {
     caseId: CASE_ID,
     sourceId: SOURCE_ID,
     createdAt: CREATED_AT,
-    corroborationState: "unverified",
     ...overrides,
   };
 }
@@ -353,9 +352,21 @@ describe("external-run judgment constants", () => {
     expect(EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT.runProjection).toMatch(
       /immutable_identity_stub/,
     );
-    expect(EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT.runProjection).toMatch(/unverified/);
     expect(EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT.runProjection).toMatch(
-      /never_mirrors_legacy_latest_corroboration/,
+      /id_caseId_sourceId_createdAt/,
+    );
+    expect(EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT.runProjection).not.toMatch(/unverified/);
+    expect(EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT.runProjection).toMatch(
+      /never_mirrors_or_fabricates_legacy_corroboration/,
+    );
+    expect(EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT.runProvenance).toBe(
+      "server_or_gateway_enforces_success_run_sourceId_and_createdAt_exactly_equal_stored_ExternalRunV1_identified_by_run_id_and_runId",
+    );
+    expect(EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT.listRunProvenance).toBe(
+      "server_or_gateway_enforces_list_runId_identifies_the_same_stored_ExternalRunV1_the_list_envelope_does_not_project_sourceId_or_createdAt",
+    );
+    expect(EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT.parserCannotProveStoredRun).toBe(
+      "parsers_validate_canonical_run_sourceId_and_createdAt_structurally_and_cannot_look_up_the_stored_run",
     );
     expect(EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT.list).toBe(
       "complete_unpaged_ordered_contiguous_seq_starting_at_1_bounded_by_later_server_policy",
@@ -402,7 +413,14 @@ describe("external-run judgment constants", () => {
     const graph = walkProductionImportGraph(entry);
     expect(graph.nodeSpecifiers).toEqual([]);
     const repoRelative = graph.files.map((file) => relative(repoRoot, file).split(sep).join("/"));
-    expect(repoRelative).toContain("collab/contracts/src/external-run-judgment.ts");
+    expect([...repoRelative].sort()).toEqual(
+      [
+        "collab/contracts/src/external-run-judgment.ts",
+        "collab/contracts/src/parse.ts",
+        "collab/contracts/src/temporal.ts",
+        "collab/contracts/src/user-profile.ts",
+      ].sort(),
+    );
     expect(repoRelative.some((file) => file.endsWith("/run.ts") || file.endsWith("/run.js"))).toBe(
       false,
     );
@@ -465,6 +483,20 @@ describe("external-run judgment record", () => {
   it("normalizes actor username whitespace without rewriting already-canonical text", () => {
     const parsed = parseExternalRunJudgment(record({ actor: actor({ username: "  operator  " }) }));
     expect(parsed.actor.username).toBe("operator");
+  });
+
+  it("normalizes username, rationale, and already-canonical text via the parser", () => {
+    const parsed = parseExternalRunJudgment(
+      record({
+        actor: actor({ username: "  Cafe\u0301  " }),
+        rationale: "  Cafe\u0301 note  ",
+      }),
+    );
+    expect(parsed.actor.username).toBe("Café");
+    expect(parsed.rationale).toBe("Café note");
+    const canonical = parseExternalRunJudgment(record());
+    expect(canonical.actor.username).toBe("operator");
+    expect(canonical.rationale).toBe("The linked checkout log matches the imported output.");
   });
 
   it("accepts LDAP DN and opaque actor ids without requiring UUID", () => {
@@ -559,7 +591,7 @@ describe("external-run judgment request", () => {
 });
 
 describe("external-run judgment success", () => {
-  it("parses a frozen success envelope whose run projection stays an unverified identity stub", () => {
+  it("parses a frozen success envelope whose run projection is a pure identity stub", () => {
     const parsed = parseExternalRunJudgmentSuccess(success());
     expect(parsed.schemaId).toBe(EXTERNAL_RUN_JUDGMENT_SUCCESS_SCHEMA_ID);
     expect(parsed.replayed).toBe(false);
@@ -569,11 +601,14 @@ describe("external-run judgment success", () => {
       caseId: CASE_ID,
       sourceId: SOURCE_ID,
       createdAt: CREATED_AT,
-      corroborationState: "unverified",
     });
-    expect(parsed.run.corroborationState).toBe("unverified");
+    expect(Object.keys(parsed.run)).toEqual(["id", "caseId", "sourceId", "createdAt"]);
+    expect("corroborationState" in parsed.run).toBe(false);
     expect("title" in parsed.run).toBe(false);
     expect("source" in parsed.run).toBe(false);
+    expect(EXTERNAL_RUN_JUDGMENT_NOT_CORRECTNESS).toBe(
+      "A human judgment records corroboration, contradiction, or insufficient evidence; it is not a correctness verdict.",
+    );
     expect(EXTERNAL_RUN_JUDGMENT_NOT_CORRECTNESS).not.toMatch(/correct$/);
     expectFrozen(parsed);
   });
@@ -581,7 +616,8 @@ describe("external-run judgment success", () => {
   it("accepts a replayed success without treating the judgment as a correctness flip", () => {
     const parsed = parseExternalRunJudgmentSuccess(success({ replayed: true }));
     expect(parsed.replayed).toBe(true);
-    expect(parsed.run.corroborationState).toBe("unverified");
+    expect("corroborationState" in parsed.run).toBe(false);
+    expect(Object.keys(parsed.run)).toEqual(["id", "caseId", "sourceId", "createdAt"]);
   });
 });
 
@@ -595,6 +631,13 @@ describe("external-run judgment refusal", () => {
       expect(parsed.current).toBeNull();
       expectFrozen(parsed);
     }
+  });
+
+  it("normalizes refusal detail with NFKC and trim", () => {
+    const parsed = parseExternalRunJudgmentRefused(
+      refusal("case_archived", { detail: "  Cafe\u0301 detail  " }),
+    );
+    expect(parsed.detail).toBe("Café detail");
   });
 
   it("parses links_required as a server-policy refusal, not a request-parser failure", () => {
@@ -630,6 +673,8 @@ describe("external-run judgment list", () => {
     expect(parsed.schemaId).toBe(EXTERNAL_RUN_JUDGMENT_LIST_SCHEMA_ID);
     expect(parsed.judgments.map((row) => row.seq)).toEqual([1, 2]);
     expect("nextCursor" in parsed).toBe(false);
+    expect("run" in parsed).toBe(false);
+    expect("corroborationState" in parsed).toBe(false);
     expectFrozen(parsed);
   });
 
@@ -732,6 +777,16 @@ describe("external-run judgment JSON Schema / Ajv parity", () => {
       parseExternalRunJudgmentRequest,
       "external-run-judgment-request.v1.json",
       request({ judgment: "corroborates", links: [] }),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ rationale: null }),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({ rationale: null }),
     );
     expectParserAndSchemaAccept(
       parseExternalRunJudgmentSuccess,
@@ -914,7 +969,7 @@ describe("external-run judgment JSON Schema / Ajv parity", () => {
     );
   });
 
-  it("rejects bad judgment, refusal, and run-projection enums", () => {
+  it("rejects bad judgment and refusal enums", () => {
     expectParserAndSchemaReject(
       parseExternalRunJudgment,
       "external-run-judgment.v1.json",
@@ -925,10 +980,23 @@ describe("external-run judgment JSON Schema / Ajv parity", () => {
       "external-run-judgment-refused.v1.json",
       refusal("case_archived", { reason: "run_not_found" }),
     );
+  });
+
+  it("rejects a fabricated run.corroborationState as unknown key on parser and schema", () => {
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ run: runProjection({ corroborationState: "unverified" }) }),
+    );
     expectParserAndSchemaReject(
       parseExternalRunJudgmentSuccess,
       "external-run-judgment-success.v1.json",
       success({ run: runProjection({ corroborationState: "corroborated" }) }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({ run: runProjection() }),
     );
   });
 
@@ -1018,6 +1086,41 @@ describe("external-run judgment JSON Schema / Ajv parity", () => {
     );
   });
 
+  it("JSON Schema cannot express NFKC/trim: schema-only validation is structural; the parser normalizes username, rationale, and refusal detail", () => {
+    const usernameWire = "  Cafe\u0301  ";
+    const rationaleWire = "  Cafe\u0301 note  ";
+    const detailWire = "  Cafe\u0301 detail  ";
+    const recordPayload = record({
+      actor: actor({ username: usernameWire }),
+      rationale: rationaleWire,
+    });
+    const requestPayload = request({ rationale: rationaleWire });
+    const refusalPayload = refusal("case_archived", { detail: detailWire });
+    expect(validator("external-run-judgment.v1.json")(recordPayload)).toBe(true);
+    expect(parseExternalRunJudgment(recordPayload).actor.username).toBe("Café");
+    expect(parseExternalRunJudgment(recordPayload).rationale).toBe("Café note");
+    expect(validator("external-run-judgment-request.v1.json")(requestPayload)).toBe(true);
+    expect(parseExternalRunJudgmentRequest(requestPayload).rationale).toBe("Café note");
+    expect(validator("external-run-judgment-refused.v1.json")(refusalPayload)).toBe(true);
+    expect(parseExternalRunJudgmentRefused(refusalPayload).detail).toBe("Café detail");
+    expect(validator("external-run-judgment-list.v1.json")(list({ judgments: [recordPayload] }))).toBe(
+      true,
+    );
+    expect(
+      parseExternalRunJudgmentList(list({ judgments: [recordPayload] })).judgments[0]?.actor
+        .username,
+    ).toBe("Café");
+    expect(
+      parseExternalRunJudgmentList(list({ judgments: [recordPayload] })).judgments[0]?.rationale,
+    ).toBe("Café note");
+    const successPayload = success({
+      applied: recordPayload,
+      run: runProjection(),
+    });
+    expect(validator("external-run-judgment-success.v1.json")(successPayload)).toBe(true);
+    expect(parseExternalRunJudgmentSuccess(successPayload).applied.actor.username).toBe("Café");
+  });
+
   it("JSON Schema cannot compare nested envelope identities: schema accepts mismatched success identities, parser rejects", () => {
     expectSchemaAcceptsParserRejects(
       parseExternalRunJudgmentSuccess,
@@ -1073,6 +1176,48 @@ describe("external-run judgment JSON Schema / Ajv parity", () => {
       list({
         judgments: [record({ caseId: "99999999-9999-4999-8999-999999999999" })],
       }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({
+        judgments: [record({ runId: "99999999-9999-4999-8999-999999999999" })],
+      }),
+    );
+  });
+
+  it("JSON Schema cannot express real calendar existence or leap seconds: schema accepts 2024-02-30 and leap-second Z forms, parser rejects", () => {
+    const impossible = "2024-02-30T09:20:00.000Z";
+    const leapSecond = "2016-12-31T23:59:60.000Z";
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ recordedAt: impossible }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ recordedAt: leapSecond }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ run: runProjection({ createdAt: impossible }) }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ run: runProjection({ createdAt: leapSecond }) }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({ judgments: [record({ recordedAt: impossible })] }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({ judgments: [record({ recordedAt: leapSecond })] }),
     );
   });
 });

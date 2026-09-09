@@ -72,7 +72,6 @@ function runProjection(overrides: Record<string, unknown> = {}) {
     caseId: CASE_ID,
     sourceId: SOURCE_ID,
     createdAt: CREATED_AT,
-    corroborationState: "unverified",
     ...overrides,
   };
 }
@@ -159,6 +158,14 @@ describe("unknown keys and envelope drift", () => {
     expect(() =>
       parseExternalRunJudgmentSuccess(success({ run: { ...runProjection(), source: "Invented" } })),
     ).toThrow(/unknown key/);
+    expect(() =>
+      parseExternalRunJudgmentSuccess(
+        success({ run: { ...runProjection(), corroborationState: "unverified" } }),
+      ),
+    ).toThrow(/unknown key/);
+    expect(() => parseExternalRunJudgmentList(list({ run: runProjection() }))).toThrow(
+      /unknown key/,
+    );
   });
 
   it("refuses JSON.parse __proto__ injection rather than silently accepting it", () => {
@@ -428,7 +435,7 @@ describe("prohibited text", () => {
       parseExternalRunJudgmentSuccess(
         success({ run: runProjection({ corroborationState: "corroborated" }) }),
       ),
-    ).toThrow(/one of/);
+    ).toThrow(/unknown key/);
   });
 });
 

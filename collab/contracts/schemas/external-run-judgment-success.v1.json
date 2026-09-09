@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cd-collab.local/schemas/external-run-judgment-success.v1.json",
   "title": "cd-collab External Run Judgment Success v1",
-  "description": "Applied judgment plus an immutable unverified run identity stub. JSON Schema cannot compare nested applied/run identities with the envelope caseId and runId; the parser requires those identities to match.",
+  "description": "Applied judgment plus an immutable run identity/provenance stub {id, caseId, sourceId, createdAt}. JSON Schema cannot compare nested applied/run identities with the envelope caseId and runId, nor look up the stored ExternalRunV1; the parser requires nested identities to match. Server/gateway must bind run.sourceId and run.createdAt exactly to that stored run.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaId", "caseId", "runId", "applied", "replayed", "run"],
@@ -30,8 +30,8 @@
     },
     "canonicalUtcMillisecond": {
       "type": "string",
-      "format": "date-time",
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "description": "Structural millisecond-Z form only. JSON Schema cannot express real calendar existence or leap-second rejection; requireCanonicalUtcInstant on the parser rejects nonexistent dates such as 2024-02-30T09:20:00.000Z and leap seconds such as 2016-12-31T23:59:60.000Z."
     },
     "actorId": {
       "type": "string",
@@ -49,6 +49,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 200,
+      "description": "JSON Schema cannot express NFKC or trim; schema-only validation is structural. The authoritative parser normalizes with NFKC and trim.",
       "allOf": [
         { "pattern": "\\S" },
         {
@@ -60,6 +61,7 @@
       "type": ["string", "null"],
       "minLength": 1,
       "maxLength": 4000,
+      "description": "JSON Schema cannot express NFKC or trim; schema-only validation is structural. The authoritative parser normalizes with NFKC and trim. Ordinary newlines are allowed.",
       "allOf": [
         { "pattern": "\\S" },
         {
@@ -121,13 +123,13 @@
     "runProjection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "caseId", "sourceId", "createdAt", "corroborationState"],
+      "required": ["id", "caseId", "sourceId", "createdAt"],
+      "description": "Immutable identity/provenance stub. JSON Schema cannot look up the stored ExternalRunV1; the parser validates UUID/canonical time and nested id/caseId match. Server/gateway binds sourceId and createdAt exactly to that stored run.",
       "properties": {
         "id": { "$ref": "#/$defs/uuid" },
         "caseId": { "$ref": "#/$defs/uuid" },
         "sourceId": { "$ref": "#/$defs/uuid" },
-        "createdAt": { "$ref": "#/$defs/canonicalUtcMillisecond" },
-        "corroborationState": { "type": "string", "const": "unverified" }
+        "createdAt": { "$ref": "#/$defs/canonicalUtcMillisecond" }
       }
     }
   }
