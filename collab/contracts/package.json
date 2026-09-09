@@ -60,6 +60,10 @@
       "types": "./dist/source-catalog-browser.d.ts",
       "import": "./dist/source-catalog-browser.js"
     },
+    "./export": {
+      "types": "./dist/export-browser.d.ts",
+      "import": "./dist/export-browser.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [

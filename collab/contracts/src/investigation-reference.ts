@@ -44,6 +44,10 @@ import {
   type OccurredAtPrecision,
   type OccurredAtZone,
 } from "./temporal.js";
+import { REFERENCE_STATES, type ReferenceState } from "./investigation-reference-vocabulary.js";
+
+export { REFERENCE_STATES } from "./investigation-reference-vocabulary.js";
+export type { ReferenceState } from "./investigation-reference-vocabulary.js";
 
 export const INVESTIGATION_REFERENCE_SCHEMA_ID =
   "cd-collab.investigation_reference.v1" as const;
@@ -52,9 +56,6 @@ export const INVESTIGATION_REFERENCE_LIST_SCHEMA_ID =
 
 export const REFERENCE_VISIBILITIES = ["resolved", "restricted"] as const;
 export type ReferenceVisibility = (typeof REFERENCE_VISIBILITIES)[number];
-
-export const REFERENCE_STATES = ["active", "withdrawn"] as const;
-export type ReferenceState = (typeof REFERENCE_STATES)[number];
 
 export const REFERENCE_NOTE_MAX_LENGTH = 600;
 

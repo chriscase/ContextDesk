@@ -13,9 +13,15 @@ import {
   INVESTIGATION_PROVENANCE_CLASSES,
   type InvestigationProvenanceClassV1,
   type InvestigationResourceKindV1,
-} from "./investigation-activity.js";
-import { REFERENCE_STATES, type ReferenceState } from "./investigation-reference.js";
-import { RESOLUTION_BASES, type ResolutionBasis } from "./investigation-resolution.js";
+} from "./investigation-activity-browser.js";
+import {
+  REFERENCE_STATES,
+  type ReferenceState,
+} from "./investigation-reference-vocabulary.js";
+import {
+  RESOLUTION_BASES,
+  type ResolutionBasis,
+} from "./investigation-resolution-vocabulary.js";
 import {
   OCCURRED_AT_PRECISIONS,
   OCCURRED_AT_ZONES,
@@ -23,7 +29,7 @@ import {
   type OccurredAtZone,
 } from "./temporal.js";
 import { HYPOTHESIS_STATUSES } from "./contribution.js";
-import { CORROBORATION_STATES } from "./run.js";
+import { CORROBORATION_STATES } from "./corroboration.js";
 
 export const BRIEF_SCHEMA_ID = "cd-collab.brief.v1" as const;
 export const IMPORTED_RESPONSE_PRESENTATION = "imported_response" as const;
