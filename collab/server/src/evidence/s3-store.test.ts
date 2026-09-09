@@ -19,6 +19,7 @@ import {
   abandonS3WriteBatchForCrashTest,
   createS3ClientConfig,
   createTrackedAbortUploadClient,
+  isS3CommitOutcomeUnknown,
   S3EvidenceError,
   S3EvidenceStore,
 } from "./s3-store.js";
@@ -841,6 +842,47 @@ function assertSanitized(error: unknown, extra: string[] = []): void {
   expect(message).not.toContain("http://");
   expect(message).not.toContain("https://");
   for (const value of extra) expect(message).not.toContain(value);
+}
+
+function assertS3UnavailableClassification(
+  error: unknown,
+  expected: { operation: string; commitOutcomeUnknown: boolean },
+  extra: string[] = [],
+): void {
+  expect(error).toBeInstanceOf(S3EvidenceError);
+  const s3 = error as S3EvidenceError;
+  expect(s3.operation).toBe(expected.operation);
+  expect(s3.commitOutcomeUnknown).toBe(expected.commitOutcomeUnknown);
+  expect(isS3CommitOutcomeUnknown(error)).toBe(expected.commitOutcomeUnknown);
+  expect(s3.message).toBe(`s3 evidence ${expected.operation} failed: unavailable`);
+  assertSanitized(error, extra);
+}
+
+function attemptedTransportLossError(): Error {
+  const error = new Error("socket hang up");
+  error.name = "TimeoutError";
+  Object.assign(error, {
+    code: "ECONNRESET",
+    $metadata: { attempts: 1 },
+  });
+  return error;
+}
+
+function interceptCopyObject(
+  fake: FakeS3Client,
+  onCopy: (
+    command: unknown,
+    original: FakeS3Client["send"],
+    options?: { abortSignal?: AbortSignal },
+  ) => Promise<unknown> | unknown,
+): void {
+  const original = fake.send.bind(fake);
+  fake.send = async (command, options) => {
+    if (command instanceof CopyObjectCommand) {
+      return await onCopy(command, original, options);
+    }
+    return original(command, options);
+  };
 }
 
 function leaseTracker(): {
@@ -1890,6 +1932,8 @@ describe("S3EvidenceStore", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(S3EvidenceError);
         expect((error as S3EvidenceError).operation).toBe("commit");
+        expect((error as S3EvidenceError).commitOutcomeUnknown).toBe(false);
+        expect(isS3CommitOutcomeUnknown(error)).toBe(false);
         assertSanitized(error, [stage.meta.hash, canonical]);
       }
       expect(fake.throwAfterApplyHits).toBe(1);
@@ -3305,6 +3349,8 @@ describe("S3EvidenceStore", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(S3EvidenceError);
       expect((error as S3EvidenceError).operation).toBe("promote");
+      expect((error as S3EvidenceError).commitOutcomeUnknown).toBe(false);
+      expect(isS3CommitOutcomeUnknown(error)).toBe(false);
       assertSanitized(error, [unknownStage.meta.hash, canonical]);
     }
     expect(unknown.fake.throwAfterApplyHits).toBe(1);
@@ -3314,6 +3360,262 @@ describe("S3EvidenceStore", () => {
     await unknownStage.rollback();
     expect(pendingKeys(unknown.fake)).toHaveLength(1);
     expect(unknown.fake.object(canonical)).toBeDefined();
+  });
+
+  it("classifies only undetermined CopyObject/promote completion as commitOutcomeUnknown", async () => {
+    const classified: boolean[] = [];
+
+    const lost = openStore();
+    const lostBytes = new TextEncoder().encode("stream-copy-dispatch-lost\n");
+    const lostStage = await lost.store.stageStream(asAsyncChunks([lostBytes]), {
+      maxBytes: lostBytes.byteLength,
+    });
+    interceptCopyObject(lost.fake, () => {
+      const truncated = new Error("truncated copy result");
+      Object.assign(truncated, { $metadata: { httpStatusCode: 200, attempts: 1 } });
+      throw truncated;
+    });
+    try {
+      await lostStage.promote();
+      throw new Error("expected unknown copy outcome");
+    } catch (error) {
+      assertS3UnavailableClassification(
+        error,
+        { operation: "promote", commitOutcomeUnknown: true },
+        [lostStage.meta.hash, "truncated copy result"],
+      );
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+    expect(lost.fake.object(blobKey(lostStage.meta.hash))).toBeUndefined();
+    expect(pendingKeys(lost.fake)).toHaveLength(1);
+    await lostStage.rollback();
+    expect(pendingKeys(lost.fake)).toHaveLength(1);
+
+    const transportAbsent = openStore();
+    const transportAbsentBytes = new TextEncoder().encode("stream-copy-transport-absent\n");
+    const transportAbsentStage = await transportAbsent.store.stageStream(
+      asAsyncChunks([transportAbsentBytes]),
+      { maxBytes: transportAbsentBytes.byteLength },
+    );
+    interceptCopyObject(transportAbsent.fake, () => {
+      throw attemptedTransportLossError();
+    });
+    try {
+      await transportAbsentStage.promote();
+      throw new Error("expected unknown copy outcome");
+    } catch (error) {
+      assertS3UnavailableClassification(
+        error,
+        { operation: "promote", commitOutcomeUnknown: true },
+        [transportAbsentStage.meta.hash, "socket hang up"],
+      );
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+    expect(transportAbsent.fake.object(blobKey(transportAbsentStage.meta.hash))).toBeUndefined();
+    expect(pendingKeys(transportAbsent.fake)).toHaveLength(1);
+    await transportAbsentStage.rollback();
+    expect(pendingKeys(transportAbsent.fake)).toHaveLength(1);
+
+    const transportProbe = openStore();
+    const transportProbeBytes = new TextEncoder().encode("stream-copy-transport-probe\n");
+    const transportProbeStage = await transportProbe.store.stageStream(
+      asAsyncChunks([transportProbeBytes]),
+      { maxBytes: transportProbeBytes.byteLength },
+    );
+    const transportProbeKey = blobKey(transportProbeStage.meta.hash);
+    interceptCopyObject(transportProbe.fake, async (command, original, options) => {
+      await original(command, options);
+      throw attemptedTransportLossError();
+    });
+    transportProbe.fake.headErrors.set(
+      transportProbeKey,
+      new FakeS3Error("SlowDown", 503, `probe failed at ${SYNTHETIC_ENDPOINT}`),
+    );
+    try {
+      await transportProbeStage.promote();
+      throw new Error("expected unknown copy outcome");
+    } catch (error) {
+      assertS3UnavailableClassification(
+        error,
+        { operation: "promote", commitOutcomeUnknown: true },
+        [transportProbeStage.meta.hash, transportProbeKey, "socket hang up"],
+      );
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+    expect(pendingKeys(transportProbe.fake)).toHaveLength(1);
+    await transportProbeStage.rollback();
+    expect(pendingKeys(transportProbe.fake)).toHaveLength(1);
+
+    const copy500 = openStore();
+    const copy500Bytes = new TextEncoder().encode("stream-copy-500-head-503\n");
+    const copy500Stage = await copy500.store.stageStream(asAsyncChunks([copy500Bytes]), {
+      maxBytes: copy500Bytes.byteLength,
+    });
+    const copy500Key = blobKey(copy500Stage.meta.hash);
+    copy500.fake.throwAfterApplyKeys.add(copy500Key);
+    copy500.fake.headErrors.set(
+      copy500Key,
+      new FakeS3Error("SlowDown", 503, `probe failed at ${SYNTHETIC_ENDPOINT}`),
+    );
+    try {
+      await copy500Stage.promote();
+      throw new Error("expected ordinary promote failure");
+    } catch (error) {
+      assertS3UnavailableClassification(
+        error,
+        { operation: "promote", commitOutcomeUnknown: false },
+        [copy500Stage.meta.hash, copy500Key],
+      );
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+    expect(copy500.fake.throwAfterApplyHits).toBe(1);
+    expect(copy500.fake.object(copy500Key)).toBeDefined();
+    expect(pendingKeys(copy500.fake)).toHaveLength(1);
+    await copy500Stage.rollback();
+    expect(pendingKeys(copy500.fake)).toHaveLength(1);
+
+    const successProbe = openStore();
+    const successProbeBytes = new TextEncoder().encode("stream-copy-success-head-503\n");
+    const successProbeStage = await successProbe.store.stageStream(
+      asAsyncChunks([successProbeBytes]),
+      { maxBytes: successProbeBytes.byteLength },
+    );
+    const successProbeKey = blobKey(successProbeStage.meta.hash);
+    successProbe.fake.headErrors.set(
+      successProbeKey,
+      new FakeS3Error("SlowDown", 503, `probe failed at ${SYNTHETIC_ENDPOINT}`),
+    );
+    try {
+      await successProbeStage.promote();
+      throw new Error("expected ordinary promote failure");
+    } catch (error) {
+      assertS3UnavailableClassification(
+        error,
+        { operation: "promote", commitOutcomeUnknown: false },
+        [successProbeStage.meta.hash, successProbeKey],
+      );
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+    expect(successProbe.fake.object(successProbeKey)).toBeDefined();
+    expect(pendingKeys(successProbe.fake)).toHaveLength(1);
+    await successProbeStage.rollback();
+    expect(pendingKeys(successProbe.fake)).toHaveLength(1);
+
+    const refused = openStore();
+    const refusedBytes = new TextEncoder().encode("stream-copy-before-apply\n");
+    const refusedStage = await refused.store.stageStream(asAsyncChunks([refusedBytes]), {
+      maxBytes: refusedBytes.byteLength,
+    });
+    refused.fake.throwBeforeApplyKeys.add(blobKey(refusedStage.meta.hash));
+    try {
+      await refusedStage.promote();
+      throw new Error("expected ordinary promote failure");
+    } catch (error) {
+      assertS3UnavailableClassification(
+        error,
+        { operation: "promote", commitOutcomeUnknown: false },
+        [refusedStage.meta.hash],
+      );
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+    expect(refused.fake.throwBeforeApplyHits).toBe(1);
+    expect(refused.fake.object(blobKey(refusedStage.meta.hash))).toBeUndefined();
+    await refusedStage.rollback();
+
+    const redirect = openStore();
+    const redirectBytes = new TextEncoder().encode("stream-copy-301\n");
+    const redirectStage = await redirect.store.stageStream(asAsyncChunks([redirectBytes]), {
+      maxBytes: redirectBytes.byteLength,
+    });
+    interceptCopyObject(redirect.fake, () => {
+      throw new FakeS3Error(
+        "PermanentRedirect",
+        301,
+        `redirect at ${SYNTHETIC_ENDPOINT} bucket=${SYNTHETIC_BUCKET} accessKey=${SYNTHETIC_ACCESS}`,
+      );
+    });
+    try {
+      await redirectStage.promote();
+      throw new Error("expected ordinary promote failure");
+    } catch (error) {
+      assertS3UnavailableClassification(
+        error,
+        { operation: "promote", commitOutcomeUnknown: false },
+        [redirectStage.meta.hash],
+      );
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+    await redirectStage.rollback();
+
+    const credentials = openStore();
+    const credentialsBytes = new TextEncoder().encode("stream-copy-credentials\n");
+    const credentialsStage = await credentials.store.stageStream(
+      asAsyncChunks([credentialsBytes]),
+      { maxBytes: credentialsBytes.byteLength },
+    );
+    interceptCopyObject(credentials.fake, () => {
+      const error = new Error("Could not load credentials from any providers");
+      error.name = "CredentialsProviderError";
+      throw error;
+    });
+    try {
+      await credentialsStage.promote();
+      throw new Error("expected ordinary promote failure");
+    } catch (error) {
+      assertS3UnavailableClassification(
+        error,
+        { operation: "promote", commitOutcomeUnknown: false },
+        [credentialsStage.meta.hash, "Could not load credentials from any providers"],
+      );
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+    await credentialsStage.rollback();
+
+    const statusless = openStore();
+    const statuslessBytes = new TextEncoder().encode("stream-copy-statusless\n");
+    const statuslessStage = await statusless.store.stageStream(asAsyncChunks([statuslessBytes]), {
+      maxBytes: statuslessBytes.byteLength,
+    });
+    interceptCopyObject(statusless.fake, () => {
+      throw new Error("ECONNRESET");
+    });
+    try {
+      await statuslessStage.promote();
+      throw new Error("expected ordinary promote failure");
+    } catch (error) {
+      assertS3UnavailableClassification(
+        error,
+        { operation: "promote", commitOutcomeUnknown: false },
+        [statuslessStage.meta.hash, "ECONNRESET"],
+      );
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+    await statuslessStage.rollback();
+
+    const put = openStore();
+    put.fake.nextError = new FakeS3Error(
+      "SlowDown",
+      503,
+      `SlowDown at ${SYNTHETIC_ENDPOINT} bucket=${SYNTHETIC_BUCKET} accessKey=${SYNTHETIC_ACCESS} secret=${SYNTHETIC_SECRET}`,
+    );
+    const putBytes = new TextEncoder().encode("stream-put-unavailable\n");
+    try {
+      await put.store.stageStream(asAsyncChunks([putBytes]), { maxBytes: putBytes.byteLength });
+      throw new Error("expected ordinary stageStream failure");
+    } catch (error) {
+      assertS3UnavailableClassification(error, {
+        operation: "stageStream",
+        commitOutcomeUnknown: false,
+      });
+      classified.push((error as S3EvidenceError).commitOutcomeUnknown);
+    }
+
+    const stray = new S3EvidenceError("put", "unavailable", { commitOutcomeUnknown: true });
+    expect(stray.commitOutcomeUnknown).toBe(true);
+    expect(isS3CommitOutcomeUnknown(stray)).toBe(false);
+
+    expect(classified).toEqual([true, true, true, false, false, false, false, false, false, false]);
+    expect(new Set(classified).size).toBe(2);
   });
 
   it("retries partial stream cleanup and does not let stale rollback delete adopted bytes", async () => {

@@ -67,6 +67,7 @@ import {
   requestsInvestigationCollectionPage,
   requestsInvestigationOperationsQueuePage,
 } from "./collection-query.js";
+import { isS3CommitOutcomeUnknown } from "../../evidence/s3-store.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -651,6 +652,10 @@ function streamUploadError(
   if (/aborted/i.test(message)) {
     void reply.code(400);
     return { error: "upload_aborted" };
+  }
+  if (isS3CommitOutcomeUnknown(err)) {
+    void reply.code(503);
+    return { error: "commit_outcome_unknown" };
   }
   if (
     /evidence (blob|metadata)|failed verification|s3 evidence|hash verification failed after storage/i
