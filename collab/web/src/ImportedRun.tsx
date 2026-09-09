@@ -49,6 +49,14 @@ function evidenceVisibilityLabel(value: string): string {
     : "Unknown — not recorded";
 }
 
+function redactionLabel(value: boolean | undefined): string {
+  if (value === true) {
+    return "Importer recorded that secrets were redacted; ContextDesk did not verify that claim";
+  }
+  if (value === false) return "Importer recorded that secret redaction was not applied";
+  return "Not recorded";
+}
+
 function timestampLabel(value: string | undefined): string {
   if (!value) return "Not recorded";
   const parsed = new Date(value);
@@ -176,11 +184,7 @@ export function ImportedRun(props: {
             <div><dt>Privacy</dt><dd>{privacyLabel(run.privacyClass)}</dd></div>
             <div>
               <dt>Secret redaction</dt>
-              <dd>
-                {run.redacted === true
-                  ? "Importer recorded that secrets were redacted; ContextDesk did not verify that claim"
-                  : "No redaction was recorded"}
-              </dd>
+              <dd>{redactionLabel(run.redacted)}</dd>
             </div>
           </dl>
           {run.visibilityNote?.trim() ? (

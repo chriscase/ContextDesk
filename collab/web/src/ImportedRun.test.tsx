@@ -23,6 +23,7 @@ describe("imported run rendering", () => {
           operatorUsername: "operator",
           promptText: null,
           promptCompleteness: "unknown",
+          redacted: false,
         }}
         onCorroborate={vi.fn()}
       />,
@@ -34,6 +35,7 @@ describe("imported run rendering", () => {
     expect(item.dataset.routeItem).toBe("r1");
     expect(item.dataset.routeKind).toBe("imported-run");
     expect(screen.getByRole("button", { name: "Save review" })).toBeTruthy();
+    expect(item.textContent).toContain("Secret redactionImporter recorded that secret redaction was not applied");
   });
 
   it("renders contradicted runs distinctly", () => {
@@ -191,7 +193,8 @@ describe("imported run rendering", () => {
     expect(technical.textContent).toContain("Run timingNot recorded");
     expect(technical.textContent).toContain("Recorded costNot recorded");
     expect(technical.textContent).toContain("PrivacyNot recorded");
-    expect(technical.textContent).toContain("No redaction was recorded");
+    expect(technical.textContent).toContain("Secret redactionNot recorded");
+    expect(technical.textContent).not.toContain("redaction was not applied");
     expect(technical.textContent).toContain("Recorded uncertainty: None recorded");
     expect(technical.textContent).toContain("No claimed traces were recorded.");
     expect(technical.textContent).toContain("Original prompt was not recorded.");
