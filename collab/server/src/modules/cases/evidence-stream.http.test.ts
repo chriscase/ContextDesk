@@ -883,8 +883,9 @@ describe("POST /api/cases/:id/evidence/stream", () => {
         }),
       ]);
       expect(Date.now() - started).toBeLessThan(750);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(await listScratch(root)).toEqual([]);
+      await vi.waitFor(async () => {
+        expect(await listScratch(root)).toEqual([]);
+      }, { timeout: 500 });
     }, { transferTimeoutMs: 25 });
   });
 
