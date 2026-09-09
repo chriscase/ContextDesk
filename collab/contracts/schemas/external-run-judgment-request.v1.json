@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/external-run-judgment-request.v1.json",
+  "title": "cd-collab External Run Judgment Request v1",
+  "description": "Create-judgment request. Empty links are permitted here; links_required is a later server-policy refusal, not a request-schema failure. uniqueItems enforces unique {kind,id} links. Canonical lexical order (kind then id) cannot be expressed across array items in JSON Schema and is enforced by the parser.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "caseId",
+    "runId",
+    "expectedSequence",
+    "idempotencyKey",
+    "judgment",
+    "links",
+    "rationale"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.external_run_judgment_request.v1" },
+    "caseId": { "$ref": "#/$defs/uuid" },
+    "runId": { "$ref": "#/$defs/uuid" },
+    "expectedSequence": { "$ref": "#/$defs/unsignedSafeInteger" },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    },
+    "judgment": { "$ref": "#/$defs/judgment" },
+    "links": { "$ref": "#/$defs/links" },
+    "rationale": { "$ref": "#/$defs/rationale" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "unsignedSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "judgment": {
+      "type": "string",
+      "enum": ["corroborates", "contradicts", "insufficient_evidence"]
+    },
+    "rationale": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 4000,
+      "allOf": [
+        { "pattern": "\\S" },
+        {
+          "pattern": "^[^\\u0000-\\u0009\\u000B-\\u001F\\u007F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u2069\\uFEFF]+$"
+        }
+      ]
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["artifact", "contribution", "snapshot"] },
+        "id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "links": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "description": "Unique {kind,id} pairs, max 64, including the empty array. uniqueItems covers duplicates. Sorted canonical lexical order is parser-enforced because JSON Schema cannot compare cross-item order.",
+      "items": { "$ref": "#/$defs/link" }
+    }
+  }
+}

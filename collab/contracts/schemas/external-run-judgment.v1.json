@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/external-run-judgment.v1.json",
+  "title": "cd-collab External Run Judgment v1",
+  "description": "Append-only human judgment record. uniqueItems enforces unique {kind,id} links. Canonical lexical order (kind then id) cannot be expressed across array items in JSON Schema and is enforced by the parser. Empty links are permitted; server policy may later refuse empty corroborates or contradicts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "caseId",
+    "runId",
+    "seq",
+    "judgment",
+    "actor",
+    "links",
+    "rationale",
+    "recordedAt"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.external_run_judgment.v1" },
+    "caseId": { "$ref": "#/$defs/uuid" },
+    "runId": { "$ref": "#/$defs/uuid" },
+    "seq": { "$ref": "#/$defs/seq" },
+    "judgment": { "$ref": "#/$defs/judgment" },
+    "actor": { "$ref": "#/$defs/actor" },
+    "links": { "$ref": "#/$defs/links" },
+    "rationale": { "$ref": "#/$defs/rationale" },
+    "recordedAt": { "$ref": "#/$defs/canonicalUtcMillisecond" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "unsignedSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "judgment": {
+      "type": "string",
+      "enum": ["corroborates", "contradicts", "insufficient_evidence"]
+    },
+    "canonicalUtcMillisecond": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "actorId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Opaque actor identity, not a UUID field. LDAP DN and operator-42 are valid. JSON Schema cannot express NFKC; the parser requires the value already be NFKC-normalized.",
+      "allOf": [
+        { "pattern": "^\\S(.*\\S)?$" },
+        {
+          "pattern": "^[^\\u0000-\\u001F\\u007F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u2069\\uFEFF]+$"
+        }
+      ]
+    },
+    "username": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "allOf": [
+        { "pattern": "\\S" },
+        {
+          "pattern": "^[^\\u0000-\\u001F\\u007F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u2069\\uFEFF]+$"
+        }
+      ]
+    },
+    "rationale": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 4000,
+      "allOf": [
+        { "pattern": "\\S" },
+        {
+          "pattern": "^[^\\u0000-\\u0009\\u000B-\\u001F\\u007F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u2069\\uFEFF]+$"
+        }
+      ]
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "username"],
+      "properties": {
+        "id": { "$ref": "#/$defs/actorId" },
+        "username": { "$ref": "#/$defs/username" }
+      }
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["artifact", "contribution", "snapshot"] },
+        "id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "links": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "description": "Unique {kind,id} pairs, max 64. uniqueItems covers duplicates. Sorted canonical lexical order is parser-enforced because JSON Schema cannot compare cross-item order.",
+      "items": { "$ref": "#/$defs/link" }
+    }
+  }
+}

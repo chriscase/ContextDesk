@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import Ajv2020Import from "ajv/dist/2020.js";
+import addFormatsImport from "ajv-formats";
 import { describe, expect, it } from "vitest";
 import { ContractViolation } from "./parse.js";
 import {
@@ -41,6 +43,50 @@ const RECORDED_AT = "2024-02-11T09:20:00.000Z";
 const CREATED_AT = "2024-02-11T08:00:00.000Z";
 const LDAP_DN = "uid=operator,ou=people,dc=example,dc=test";
 const OPAQUE_ACTOR_ID = "operator-42";
+
+const Ajv2020 = (Ajv2020Import as unknown as { default?: unknown }).default ?? Ajv2020Import;
+const addFormats =
+  (addFormatsImport as unknown as { default?: unknown }).default ?? addFormatsImport;
+
+const here = dirname(fileURLToPath(import.meta.url));
+const loadSchema = (name: string): object =>
+  JSON.parse(readFileSync(join(here, "..", "schemas", name), "utf8")) as object;
+
+function validator(schemaName: string) {
+  const AjvCtor = Ajv2020 as unknown as new (opts: object) => {
+    compile: (schema: object) => (data: unknown) => boolean;
+  };
+  const ajv = new AjvCtor({ strict: true, allErrors: true });
+  (addFormats as unknown as (a: unknown) => void)(ajv);
+  return ajv.compile(loadSchema(schemaName));
+}
+
+const JUDGMENT_SCHEMA_FILES = [
+  {
+    file: "external-run-judgment.v1.json",
+    schemaId: EXTERNAL_RUN_JUDGMENT_SCHEMA_ID,
+  },
+  {
+    file: "external-run-judgment-request.v1.json",
+    schemaId: EXTERNAL_RUN_JUDGMENT_REQUEST_SCHEMA_ID,
+  },
+  {
+    file: "external-run-judgment-success.v1.json",
+    schemaId: EXTERNAL_RUN_JUDGMENT_SUCCESS_SCHEMA_ID,
+  },
+  {
+    file: "external-run-judgment-refused.v1.json",
+    schemaId: EXTERNAL_RUN_JUDGMENT_REFUSED_SCHEMA_ID,
+  },
+  {
+    file: "external-run-judgment-conflict.v1.json",
+    schemaId: EXTERNAL_RUN_JUDGMENT_CONFLICT_SCHEMA_ID,
+  },
+  {
+    file: "external-run-judgment-list.v1.json",
+    schemaId: EXTERNAL_RUN_JUDGMENT_LIST_SCHEMA_ID,
+  },
+] as const;
 
 function expectFrozen(value: unknown): void {
   expect(Object.isFrozen(value)).toBe(true);
@@ -604,3 +650,431 @@ describe("external-run judgment type exports", () => {
     expect(() => parseExternalRunJudgment(record({ extra: true }))).toThrow(ContractViolation);
   });
 });
+
+type SchemaDocument = {
+  $id: string;
+  additionalProperties: boolean;
+  properties: { schemaId: { const: string } };
+};
+
+function expectParserAndSchemaAccept(
+  parse: (raw: unknown) => unknown,
+  schemaFile: string,
+  payload: unknown,
+): void {
+  expect(parse(payload)).toBeTruthy();
+  expect(validator(schemaFile)(payload)).toBe(true);
+}
+
+function expectParserAndSchemaReject(
+  parse: (raw: unknown) => unknown,
+  schemaFile: string,
+  payload: unknown,
+): void {
+  expect(() => parse(payload)).toThrow(ContractViolation);
+  expect(validator(schemaFile)(payload)).toBe(false);
+}
+
+function expectSchemaAcceptsParserRejects(
+  parse: (raw: unknown) => unknown,
+  schemaFile: string,
+  payload: unknown,
+): void {
+  expect(validator(schemaFile)(payload)).toBe(true);
+  expect(() => parse(payload)).toThrow(ContractViolation);
+}
+
+function tooManyLinks() {
+  return Array.from({ length: EXTERNAL_RUN_JUDGMENT_LIMITS.linksMax + 1 }, (_, index) => ({
+    kind: "artifact" as const,
+    id: `dddddddd-dddd-4ddd-8ddd-${String(index).padStart(12, "0")}`,
+  }));
+}
+
+describe("external-run judgment JSON Schema / Ajv parity", () => {
+  it("loads all six schemas into one Ajv instance and keeps $id aligned with TypeScript schema constants", () => {
+    const AjvCtor = Ajv2020 as unknown as new (opts: object) => {
+      compile: (schema: object) => (data: unknown) => boolean;
+    };
+    const ajv = new AjvCtor({ strict: true, allErrors: true });
+    (addFormats as unknown as (a: unknown) => void)(ajv);
+    expect(JUDGMENT_SCHEMA_FILES).toHaveLength(6);
+    for (const { file, schemaId } of JUDGMENT_SCHEMA_FILES) {
+      const schema = loadSchema(file) as SchemaDocument;
+      expect(schema.$id).toBe(`https://cd-collab.local/schemas/${file}`);
+      expect(schema.properties.schemaId.const).toBe(schemaId);
+      expect(schema.additionalProperties).toBe(false);
+      expect(() => ajv.compile(schema)).not.toThrow();
+    }
+  });
+
+  it("accepts valid parser+schema pairs for record, request, success, refusal, conflict, and list", () => {
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record(),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ actor: actor({ id: LDAP_DN }) }),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ actor: actor({ id: OPAQUE_ACTOR_ID }) }),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request(),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({ judgment: "corroborates", links: [] }),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success(),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgmentRefused,
+      "external-run-judgment-refused.v1.json",
+      refusal(),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgmentRefused,
+      "external-run-judgment-refused.v1.json",
+      refusal("links_required"),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgmentConflict,
+      "external-run-judgment-conflict.v1.json",
+      conflict(),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list(),
+    );
+    expectParserAndSchemaAccept(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({ judgments: [] }),
+    );
+  });
+
+  it("rejects malformed schema IDs on every envelope", () => {
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ schemaId: "cd-collab.external_run_judgment.v2" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({ schemaId: EXTERNAL_RUN_JUDGMENT_SCHEMA_ID }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ schemaId: "cd-collab.external_run_import_success.v1" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRefused,
+      "external-run-judgment-refused.v1.json",
+      refusal("case_archived", { schemaId: "cd-collab.external_run_judgment.v1" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentConflict,
+      "external-run-judgment-conflict.v1.json",
+      conflict({ schemaId: "cd-collab.external_run_judgment_list.v1" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({ schemaId: "not-a-schema" }),
+    );
+  });
+
+  it("rejects unknown keys on every judgment schema", () => {
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ extra: true }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({ actorId: ACTOR_ID }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ leak: true }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRefused,
+      "external-run-judgment-refused.v1.json",
+      refusal("case_archived", { retryable: false }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentConflict,
+      "external-run-judgment-conflict.v1.json",
+      conflict({ applied: record() }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({ nextCursor: null }),
+    );
+  });
+
+  it("rejects mixed-case UUIDs on case, run, source, and link ids", () => {
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({ caseId: CASE_ID.toUpperCase() }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({ runId: RUN_ID.toUpperCase() }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ links: [{ kind: "artifact", id: ARTIFACT_A.toUpperCase() }] }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ run: runProjection({ sourceId: SOURCE_ID.toUpperCase() }) }),
+    );
+  });
+
+  it("rejects invalid actor ids, bounded text, and non-canonical times that JSON Schema can express", () => {
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ actor: actor({ id: " operator-42" }) }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ actor: actor({ id: "operator-42 " }) }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ actor: actor({ id: "op\nerator" }) }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ actor: actor({ id: "op\u202eerator" }) }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({
+        actor: actor({ id: "x".repeat(EXTERNAL_RUN_JUDGMENT_LIMITS.actorIdMaxLength + 1) }),
+      }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ actor: actor({ username: "op\nerator" }) }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ rationale: "because\r\n" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ recordedAt: "yesterday" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ recordedAt: "2024-02-11T09:20:00Z" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ recordedAt: "2024-02-11T09:20:00+00:00" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ run: runProjection({ createdAt: "2024-02-11T10:00:00+02:00" }) }),
+    );
+  });
+
+  it("rejects bad judgment, refusal, and run-projection enums", () => {
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ judgment: "corroborated" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRefused,
+      "external-run-judgment-refused.v1.json",
+      refusal("case_archived", { reason: "run_not_found" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ run: runProjection({ corroborationState: "corroborated" }) }),
+    );
+  });
+
+  it("rejects too many and duplicate links that JSON Schema can express", () => {
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({ links: tooManyLinks() }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({
+        links: [
+          { kind: "artifact", id: ARTIFACT_A },
+          { kind: "artifact", id: ARTIFACT_A },
+        ],
+      }),
+    );
+  });
+
+  it("rejects seq below 1 and expectedSequence below 0", () => {
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ seq: 0 }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ seq: 1.5 }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({ expectedSequence: -1 }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      request({ expectedSequence: Number.MAX_SAFE_INTEGER + 1 }),
+    );
+  });
+
+  it("rejects a non-null refusal current", () => {
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRefused,
+      "external-run-judgment-refused.v1.json",
+      refusal("case_archived", { current: "present" }),
+    );
+    expectParserAndSchemaReject(
+      parseExternalRunJudgmentRefused,
+      "external-run-judgment-refused.v1.json",
+      refusal("links_required", { current: record() }),
+    );
+  });
+
+  it("JSON Schema cannot express cross-item lexical link order: schema accepts unsorted unique links, parser rejects", () => {
+    const unsorted = request({
+      links: [
+        { kind: "contribution", id: CONTRIBUTION_ID },
+        { kind: "artifact", id: ARTIFACT_A },
+      ],
+    });
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentRequest,
+      "external-run-judgment-request.v1.json",
+      unsorted,
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({
+        links: [
+          { kind: "artifact", id: ARTIFACT_B },
+          { kind: "artifact", id: ARTIFACT_A },
+        ],
+      }),
+    );
+  });
+
+  it("JSON Schema cannot express NFKC actor identity: schema accepts decomposed text, parser rejects", () => {
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgment,
+      "external-run-judgment.v1.json",
+      record({ actor: actor({ id: "Cafe\u0301" }) }),
+    );
+  });
+
+  it("JSON Schema cannot compare nested envelope identities: schema accepts mismatched success identities, parser rejects", () => {
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ applied: record({ caseId: "99999999-9999-4999-8999-999999999999" }) }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ applied: record({ runId: "99999999-9999-4999-8999-999999999999" }) }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ run: runProjection({ id: "99999999-9999-4999-8999-999999999999" }) }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentSuccess,
+      "external-run-judgment-success.v1.json",
+      success({ run: runProjection({ caseId: "99999999-9999-4999-8999-999999999999" }) }),
+    );
+  });
+
+  it("JSON Schema cannot compare conflict sequence values: schema accepts equal versions, parser rejects", () => {
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentConflict,
+      "external-run-judgment-conflict.v1.json",
+      conflict({ expectedSequence: 2, currentSequence: 2 }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentConflict,
+      "external-run-judgment-conflict.v1.json",
+      conflict({ expectedSequence: 0, currentSequence: 0 }),
+    );
+  });
+
+  it("JSON Schema cannot express contiguous list identity/sequence: schema accepts a gap or identity drift, parser rejects", () => {
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({ judgments: [record({ seq: 2 })] }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({
+        judgments: [record(), record({ seq: 3, links: [], rationale: null })],
+      }),
+    );
+    expectSchemaAcceptsParserRejects(
+      parseExternalRunJudgmentList,
+      "external-run-judgment-list.v1.json",
+      list({
+        judgments: [record({ caseId: "99999999-9999-4999-8999-999999999999" })],
+      }),
+    );
+  });
+});
+
