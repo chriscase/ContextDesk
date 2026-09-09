@@ -64,12 +64,11 @@ export interface ExternalRunJudgmentsController {
 interface QueryRequest {
   readonly identityKey: string;
   readonly authorityKey: string;
+  readonly investigationId: string;
   readonly runId: string;
 }
 
-interface JudgmentScope extends QueryRequest {
-  readonly investigationId: string;
-}
+type JudgmentScope = QueryRequest;
 
 interface CommandSnapshot {
   readonly runId: string;
@@ -159,14 +158,23 @@ export function useExternalRunJudgments(
 
   const query = useCallback((runId: string) => {
     const latest = latestRef.current;
-    if (typeof runId !== "string" || runId.trim() === "") return;
+    if (
+      typeof runId !== "string"
+      || runId.trim() === ""
+      || !latest.active
+      || !latest.canRead
+      || latest.investigationId === null
+    ) return;
+    const investigationId = latest.investigationId;
     setRequested((current) => current?.identityKey === latest.identityKey
       && current.authorityKey === latest.authorityKey
+      && current.investigationId === investigationId
       && current.runId === runId
       ? current
       : Object.freeze({
         identityKey: latest.identityKey,
         authorityKey: latest.authorityKey,
+        investigationId,
         runId,
       }));
   }, []);
@@ -179,8 +187,9 @@ export function useExternalRunJudgments(
       || requested === null
       || requested.identityKey !== options.identityKey
       || requested.authorityKey !== options.authorityKey
+      || requested.investigationId !== options.investigationId
     ) return null;
-    return Object.freeze({ ...requested, investigationId: options.investigationId });
+    return requested;
   }, [
     options.active,
     options.authorityKey,

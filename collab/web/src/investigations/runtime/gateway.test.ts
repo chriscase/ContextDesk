@@ -107,6 +107,16 @@ describe("external run judgment transport", () => {
     };
     expect(investigationExternalRunJudgmentGateway(half)).toBe(unavailable);
     expect(half.listExternalRunJudgments).not.toHaveBeenCalled();
+
+    const reverseHalf = {
+      ...legacy,
+      createExternalRunJudgment: vi.fn(async () => ({
+        ok: true,
+        value: makeExternalRunJudgmentSuccess(),
+      } as const)),
+    };
+    expect(investigationExternalRunJudgmentGateway(reverseHalf)).toBe(unavailable);
+    expect(reverseHalf.createExternalRunJudgment).not.toHaveBeenCalled();
   });
 
   it("GETs the exact run route and rejects an envelope identity mismatch", async () => {

@@ -111,6 +111,38 @@ describe("useExternalRunJudgments", () => {
     expect(gateway.createExternalRunJudgment).not.toHaveBeenCalled();
   });
 
+  it("requires focus before query and never carries an explicit query into another case", async () => {
+    const list = vi.fn(async () => ({
+      ok: true as const,
+      value: makeExternalRunJudgmentList(),
+    }));
+    const gateway = transport({ listExternalRunJudgments: list });
+    const base = options(gateway);
+    const { result, rerender } = renderHook(
+      ({ value }) => useExternalRunJudgments(value),
+      { initialProps: {
+        value: { ...base, investigationId: null } as UseExternalRunJudgmentsOptions,
+      } },
+    );
+
+    act(() => result.current.query(RUN_ID));
+    rerender({ value: base });
+    expect(result.current.judgments).toEqual({ status: "idle" });
+    expect(list).not.toHaveBeenCalled();
+
+    act(() => result.current.query(RUN_ID));
+    await waitFor(() => expect(result.current.judgments.status).toBe("ready"));
+    expect(list).toHaveBeenCalledOnce();
+    expect(list).toHaveBeenCalledWith(CASE_ID, RUN_ID, { signal: expect.any(AbortSignal) });
+
+    rerender({ value: {
+      ...base,
+      investigationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    } });
+    await waitFor(() => expect(result.current.judgments).toEqual({ status: "idle" }));
+    expect(list).toHaveBeenCalledOnce();
+  });
+
   it("allows reads but no write in viewer and static read-only modes", async () => {
     for (const restricted of [
       { canRecordRunJudgment: false },

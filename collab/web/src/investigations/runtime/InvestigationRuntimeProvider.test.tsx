@@ -412,6 +412,9 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().capabilities.canRecordRunJudgment).toBe(true);
     expect(currentRuntime().commands.createExternalRunJudgment).toEqual(expect.any(Function));
 
+    act(() => currentRuntime().refresh.activeInvestigation());
+    await waitFor(() => expect(listExternalRunJudgments).toHaveBeenCalledTimes(2));
+
     await act(async () => {
       await expect(currentRuntime().commands.createExternalRunJudgment!({
         runId: RUNTIME_JUDGMENT_FIXTURE_IDS.runId,

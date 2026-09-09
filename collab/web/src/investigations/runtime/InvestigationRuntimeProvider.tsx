@@ -748,10 +748,12 @@ export function InvestigationRuntimeProvider({
     activeInvestigation.refreshAll();
     coordinationController.refresh();
     artifactAnnotationsController.refresh();
+    externalRunJudgmentsController.refresh();
   }, [
     activeInvestigation.refreshAll,
     artifactAnnotationsController.refresh,
     coordinationController.refresh,
+    externalRunJudgmentsController.refresh,
   ]);
 
   const value = useMemo<InvestigationRuntime>(() => deepFreezeDto({
