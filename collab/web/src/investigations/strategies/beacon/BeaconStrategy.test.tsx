@@ -12,6 +12,7 @@ import {
   gatewayOk,
   InvestigationRuntimeGatewayHarness,
   makeContributionList,
+  makeEvidenceList,
   makePopulatedCase,
   RUNTIME_FIXTURE_IDS,
   type GatewayResult,
@@ -46,6 +47,7 @@ function mount(options: {
   readonly shell?: Partial<InvestigationStrategyShellProps>;
   readonly capabilities?: readonly string[];
   readonly identity?: InvestigationRuntimeIdentity;
+  readonly readOnly?: boolean;
 } = {}) {
   const gateway = options.gateway ?? createInvestigationGatewayDouble();
   const shell = { ...SHELL, ...options.shell };
@@ -59,7 +61,7 @@ function mount(options: {
         identity={identity}
         authorityKey="alice-authority"
         capabilities={capabilities}
-        readOnly={false}
+        readOnly={options.readOnly ?? false}
         active
         focusCaseId={shell.focusCaseId}
         isInvestigationLocation
@@ -244,11 +246,7 @@ describe("Beacon rapid-intake strategy", () => {
     await waitFor(() => expect(createContribution).toHaveBeenCalledTimes(1));
     expect(updateSituation).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByRole("textbox", { name: "New problem statement" }), { target: { value: updated.problemStatement } });
-    fireEvent.click(screen.getByRole("button", { name: "Promote to Situation" }));
-    await waitFor(() => expect(updateSituation).toHaveBeenCalledTimes(1));
-    expect(createContribution).toHaveBeenCalledTimes(1);
-
+    fireEvent.click(screen.getByRole("checkbox", { name: /checkout-timeout\.log/u }));
     fireEvent.change(screen.getByRole("textbox", { name: "Hypothesis" }), { target: { value: recordedHypothesis.body } });
     fireEvent.change(screen.getByRole("combobox", { name: "Source entry (optional)" }), { target: { value: makeContributionList().contributions[0]!.id } });
     const recordHypothesis = screen.getByRole("button", { name: "Record hypothesis" });
@@ -258,9 +256,105 @@ describe("Beacon rapid-intake strategy", () => {
     expect(createContribution.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
       kind: "hypothesis",
       body: recordedHypothesis.body,
-      hypothesisLinks: [{ kind: "contribution", id: makeContributionList().contributions[0]!.id }],
+      hypothesisLinks: [
+        { kind: "artifact", id: makeEvidenceList().artifacts[0]!.id },
+        { kind: "contribution", id: makeContributionList().contributions[0]!.id },
+      ],
+      idempotencyKey: expect.stringMatching(/^beacon-hypothesis-/u),
     }));
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "New problem statement" }), { target: { value: updated.problemStatement } });
+    fireEvent.click(screen.getByRole("button", { name: "Promote to Situation" }));
+    await waitFor(() => expect(updateSituation).toHaveBeenCalledTimes(1));
+    expect(createContribution).toHaveBeenCalledTimes(2);
+  });
+
+  it("submits the canonical current evidence working set in inventory order through one shared composer", async () => {
+    const baseEvidence = makeEvidenceList().artifacts[0]!;
+    const evidenceSecond = {
+      ...baseEvidence,
+      id: "22222222-2222-4222-8222-222222222222",
+      filename: "second-in-inventory.log",
+    };
+    const evidenceFirst = {
+      ...baseEvidence,
+      id: "11111111-1111-4111-8111-111111111111",
+      filename: "first-selected.log",
+    };
+    const createContribution = vi.fn<NonNullable<InvestigationGateway["createContribution"]>>(async () => gatewayOk({
+      ...makeContributionList().contributions[0]!,
+      id: "beacon-working-set-hypothesis",
+      kind: "hypothesis" as const,
+    }));
+    const gateway = createInvestigationGatewayDouble({
+      createContribution,
+      listEvidence: vi.fn(async () => gatewayOk([evidenceSecond, evidenceFirst])),
+    });
+    mount({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+
+    const first = await screen.findByRole("checkbox", { name: /first-selected\.log/u });
+    const second = screen.getByRole("checkbox", { name: /second-in-inventory\.log/u });
+    fireEvent.click(first);
+    fireEvent.click(second);
+    expect(screen.getAllByRole("textbox", { name: "Hypothesis" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Record hypothesis" })).toHaveLength(1);
+    fireEvent.change(screen.getByRole("textbox", { name: "Hypothesis" }), {
+      target: { value: "Both artifacts show the same timeout transition." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Record hypothesis" }));
+
+    await waitFor(() => expect(createContribution).toHaveBeenCalledTimes(1));
+    expect(createContribution.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      kind: "hypothesis",
+      body: "Both artifacts show the same timeout transition.",
+      hypothesisLinks: [
+        { kind: "artifact", id: evidenceSecond.id },
+        { kind: "artifact", id: evidenceFirst.id },
+      ],
+      idempotencyKey: expect.stringMatching(/^beacon-hypothesis-/u),
+    }));
+    expect(Object.keys(createContribution.mock.calls[0]?.[1] ?? {}).sort()).toEqual([
+      "body",
+      "hypothesisLinks",
+      "idempotencyKey",
+      "kind",
+    ]);
+  });
+
+  it("keeps an explicit removal across descriptive rerenders and fences the working set on username change", async () => {
+    const { rerenderIdentity } = mount({
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    const choice = await screen.findByRole("checkbox", { name: /checkout-timeout\.log/u }) as HTMLInputElement;
+    fireEvent.click(choice);
+    expect(choice.checked).toBe(true);
+    fireEvent.click(choice);
+    expect(choice.checked).toBe(false);
+
+    rerenderIdentity({ ...ALICE, displayName: "Alice N." });
+    expect((screen.getByRole("checkbox", { name: /checkout-timeout\.log/u }) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole("checkbox", { name: /checkout-timeout\.log/u }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Hypothesis" }), {
+      target: { value: "Do not carry this draft to another username." },
+    });
+
+    rerenderIdentity({ ...ALICE, username: "alice-renamed" });
+    await waitFor(() => expect((screen.getByRole("checkbox", { name: /checkout-timeout\.log/u }) as HTMLInputElement).checked).toBe(false));
+    expect((screen.getByRole("textbox", { name: "Hypothesis" }) as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("shows a truthful read-only composer boundary and issues no contribution write", async () => {
+    const gateway = createInvestigationGatewayDouble();
+    mount({
+      gateway,
+      readOnly: true,
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByText("Hypothesis writing unavailable");
+    expect(screen.queryByRole("textbox", { name: "Hypothesis" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Record hypothesis" })).toBeNull();
+    expect(gateway.createContribution).not.toHaveBeenCalled();
   });
 
   it("records a handoff through the shared panel without inventing workflow state", async () => {
@@ -304,6 +398,7 @@ describe("Beacon rapid-intake strategy", () => {
     mount({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     await screen.findByRole("heading", { name: "Handoff" });
 
+    fireEvent.click(screen.getByRole("checkbox", { name: /checkout-timeout\.log/u }));
     fireEvent.change(screen.getByRole("textbox", { name: "Hypothesis" }), {
       target: { value: "The rollout is correlated with the timeout increase." },
     });

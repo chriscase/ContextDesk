@@ -272,7 +272,7 @@
 }
 
 .beacon__stream header,
-.beacon__evidence-list li {
+.beacon__evidence-choice {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -292,20 +292,69 @@
 }
 
 .beacon__evidence-list li {
-  padding: 0.65rem 0.75rem;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-card);
 }
 
-.beacon__evidence-list li > span:first-child {
+.beacon__evidence-choice {
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.beacon__evidence-choice:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.beacon__evidence-choice > input {
+  flex: 0 0 auto;
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.beacon__evidence-choice > span:nth-child(2) {
   display: grid;
   gap: 0.2rem;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .beacon__evidence-list strong,
 .beacon__evidence-list small {
   overflow-wrap: anywhere;
+}
+
+.beacon__working-set-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.8rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.beacon .strategy-kit__hypothesis-source {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.7rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.beacon .strategy-kit__hypothesis-source select {
+  min-width: 0;
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  font: inherit;
 }
 
 .beacon__upload {
@@ -383,7 +432,8 @@
 
   .beacon__case-list button,
   .beacon__stream header,
-  .beacon__evidence-list li {
+  .beacon__evidence-choice,
+  .beacon__working-set-actions {
     align-items: stretch;
     flex-direction: column;
   }
@@ -401,5 +451,21 @@
   .beacon__stream-marker {
     border-color: CanvasText;
     background: Canvas;
+  }
+
+  .beacon__evidence-list li,
+  .beacon__evidence-choice:focus-within {
+    border-color: CanvasText;
+  }
+}
+
+@media (max-width: 390px) {
+  .beacon__evidence-choice,
+  .beacon__working-set-actions {
+    min-width: 0;
+  }
+
+  .beacon__working-set-actions button {
+    width: 100%;
   }
 }

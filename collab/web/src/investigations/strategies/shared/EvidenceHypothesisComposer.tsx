@@ -45,7 +45,10 @@ type MutationState<T> =
 interface CreateHypothesisInput {
   readonly kind: "hypothesis";
   readonly body: string;
-  readonly hypothesisLinks: readonly { readonly kind: "artifact"; readonly id: string }[];
+  readonly hypothesisLinks: readonly {
+    readonly kind: "artifact" | "contribution";
+    readonly id: string;
+  }[];
   readonly idempotencyKey: string;
 }
 type CreateContributionCommand<T> = (
@@ -53,6 +56,11 @@ type CreateContributionCommand<T> = (
 ) => Promise<CommandOutcome<T>>;
 
 export interface EvidenceHypothesisEvidence {
+  readonly id: string;
+  readonly name: string;
+}
+
+export interface EvidenceHypothesisContribution {
   readonly id: string;
   readonly name: string;
 }
@@ -65,6 +73,8 @@ export interface EvidenceHypothesisComposerProps<TContribution = unknown> {
   readonly scopeKey: string;
   /** The current presentation-owned working set. Only these artifact IDs may be cited. */
   readonly selectedEvidence: readonly EvidenceHypothesisEvidence[];
+  /** Optional current-record contribution choices. At most one may accompany the artifact working set. */
+  readonly contributionSources?: readonly EvidenceHypothesisContribution[];
   /** A resolved public Runtime command. Null means this presentation cannot write. */
   readonly createContribution: CreateContributionCommand<TContribution> | null;
   readonly mutationState: MutationState<TContribution>;
@@ -74,7 +84,11 @@ export interface EvidenceHypothesisComposerProps<TContribution = unknown> {
 }
 
 type SubmissionFeedback =
-  | { readonly status: "succeeded"; readonly citationCount: number }
+  | {
+      readonly status: "succeeded";
+      readonly artifactCount: number;
+      readonly contributionCited: boolean;
+    }
   | { readonly status: "failed"; readonly error: RuntimeFailureView | null }
   | { readonly status: "ignored"; readonly reason: CommandIgnoredReason };
 
@@ -158,6 +172,23 @@ function snapshotArtifactLinks(
   return links;
 }
 
+function snapshotHypothesisLinks(
+  selectedEvidence: readonly EvidenceHypothesisEvidence[],
+  contributionSources: readonly EvidenceHypothesisContribution[],
+  selectedContributionId: string,
+): Array<{ kind: "artifact" | "contribution"; id: string }> {
+  const links: Array<{ kind: "artifact" | "contribution"; id: string }> = [
+    ...snapshotArtifactLinks(selectedEvidence),
+  ];
+  const contribution = contributionSources.find(({ id }) => (
+    id.length > 0 && id === selectedContributionId
+  ));
+  if (contribution !== undefined) {
+    links.push({ kind: "contribution", id: contribution.id });
+  }
+  return links;
+}
+
 function newHypothesisIdempotencyKey(prefix: string): string {
   const random =
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -168,7 +199,7 @@ function newHypothesisIdempotencyKey(prefix: string): string {
 
 function fingerprintSubmissionIntent(
   body: string,
-  links: readonly { readonly kind: "artifact"; readonly id: string }[],
+  links: readonly { readonly kind: "artifact" | "contribution"; readonly id: string }[],
 ): string {
   return JSON.stringify([body, links]);
 }
@@ -186,6 +217,7 @@ interface EvidenceHypothesisComposerScopeProps<TContribution>
 
 function EvidenceHypothesisComposerScope<TContribution>({
   selectedEvidence,
+  contributionSources = [],
   createContribution,
   mutationState,
   onSuccess,
@@ -199,20 +231,38 @@ function EvidenceHypothesisComposerScope<TContribution>({
   const bodyHintId = `${id}-body-hint`;
   const evidenceTitleId = `${id}-evidence-title`;
   const [body, setBody] = useState("");
+  const [selectedContributionId, setSelectedContributionId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<SubmissionFeedback | null>(null);
   const [lastSubmittedFingerprint, setLastSubmittedFingerprint] = useState<string | null>(null);
   const submittingRef = useRef(false);
   const submissionIntentRef = useRef<SubmissionIntent | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
-  const links = snapshotArtifactLinks(selectedEvidence);
+  const artifactLinks = snapshotArtifactLinks(selectedEvidence);
+  const selectedContribution = contributionSources.find(({ id }) => (
+    id.length > 0 && id === selectedContributionId
+  ));
+  const links = snapshotHypothesisLinks(
+    selectedEvidence,
+    contributionSources,
+    selectedContributionId,
+  );
   const currentLinksRef = useRef(links);
   currentLinksRef.current = links;
-  const running = submitting || mutationState.status === "running";
+  const bodyValueRef = useRef(body);
+  bodyValueRef.current = body;
+  const anotherContributionRunning = !submitting && mutationState.status === "running";
   const canSubmit = createContribution !== null
     && body.trim().length > 0
-    && links.length > 0
-    && !running;
+    && artifactLinks.length > 0
+    && !submitting
+    && !anotherContributionRunning;
+
+  useEffect(() => {
+    if (selectedContributionId !== "" && selectedContribution === undefined) {
+      setSelectedContributionId("");
+    }
+  }, [selectedContribution, selectedContributionId]);
 
   if (createContribution === null) {
     return (
@@ -238,12 +288,17 @@ function EvidenceHypothesisComposerScope<TContribution>({
     if (submittingRef.current || mutationState.status === "running") return;
 
     const submittedBody = body;
-    const submittedLinks = snapshotArtifactLinks(selectedEvidence);
+    const submittedArtifactLinks = snapshotArtifactLinks(selectedEvidence);
+    const submittedLinks = snapshotHypothesisLinks(
+      selectedEvidence,
+      contributionSources,
+      selectedContributionId,
+    );
     if (submittedBody.trim().length === 0) {
       bodyRef.current?.focus();
       return;
     }
-    if (submittedLinks.length === 0) return;
+    if (submittedArtifactLinks.length === 0) return;
 
     const fingerprint = fingerprintSubmissionIntent(submittedBody, submittedLinks);
     const priorIntent = submissionIntentRef.current;
@@ -281,12 +336,15 @@ function EvidenceHypothesisComposerScope<TContribution>({
         submissionIntentRef.current = null;
       }
       setLastSubmittedFingerprint(null);
-      setBody((current) => (
-        fingerprintSubmissionIntent(current, currentLinksRef.current) === fingerprint
-          ? ""
-          : current
-      ));
-      setFeedback({ status: "succeeded", citationCount: submittedLinks.length });
+      if (fingerprintSubmissionIntent(bodyValueRef.current, currentLinksRef.current) === fingerprint) {
+        setBody("");
+        setSelectedContributionId("");
+      }
+      setFeedback({
+        status: "succeeded",
+        artifactCount: submittedArtifactLinks.length,
+        contributionCited: submittedLinks.some(({ kind }) => kind === "contribution"),
+      });
       bodyRef.current?.focus();
       onSuccess?.(outcome.value);
       return;
@@ -300,6 +358,7 @@ function EvidenceHypothesisComposerScope<TContribution>({
 
   function clearDraft() {
     setBody("");
+    setSelectedContributionId("");
     setFeedback(null);
     setLastSubmittedFingerprint(null);
     submissionIntentRef.current = null;
@@ -315,7 +374,7 @@ function EvidenceHypothesisComposerScope<TContribution>({
 
   const currentFingerprint = fingerprintSubmissionIntent(body, links);
   const failureAppliesToCurrentIntent = lastSubmittedFingerprint === currentFingerprint;
-  const reportedFailure = !running && failureAppliesToCurrentIntent
+  const reportedFailure = !submitting && failureAppliesToCurrentIntent
     ? mutationState.status === "failed"
       ? mutationState.error
       : feedback?.status === "failed"
@@ -328,7 +387,7 @@ function EvidenceHypothesisComposerScope<TContribution>({
   const mutationOutcomeUnknown = reportedFailure === null
     ? false
     : failureOutcomeIsUnknown(reportedFailure);
-  const fallbackFailure = !running
+  const fallbackFailure = !submitting
     && failureAppliesToCurrentIntent
     && reportedFailure === null
     && feedback?.status === "failed"
@@ -341,26 +400,48 @@ function EvidenceHypothesisComposerScope<TContribution>({
       titleId={titleId}
       description={<p>Record one testable claim against the current evidence working set.</p>}
       actions={<StrategyBadge>Hypothesis</StrategyBadge>}
-      busy={running}
+      busy={submitting}
     >
-      <form aria-labelledby={titleId} aria-busy={running} onSubmit={(event) => void submit(event)}>
+      <form aria-labelledby={titleId} aria-busy={submitting} onSubmit={(event) => void submit(event)}>
         <div className="strategy-kit__hypothesis-evidence" aria-labelledby={evidenceTitleId}>
           <div>
             <h4 id={evidenceTitleId}>Evidence cited on submit</h4>
-            <p>Only artifacts in the current working set are attached to this hypothesis.</p>
+            <p>Artifacts come from the current working set; one current recorded entry may also be cited.</p>
           </div>
-          {links.length === 0 ? (
+          {artifactLinks.length === 0 ? (
             <span role="status">Select at least one evidence artifact before submitting.</span>
           ) : (
             <ul>
               {links.map((link) => (
-                <li key={link.id}>
-                  <span>{selectedEvidence.find(({ id: evidenceId }) => evidenceId === link.id)?.name.trim() || link.id}</span>
+                <li key={`${link.kind}:${link.id}`}>
+                  <span>{(
+                    link.kind === "artifact"
+                      ? selectedEvidence.find(({ id: evidenceId }) => evidenceId === link.id)?.name
+                      : contributionSources.find(({ id: contributionId }) => contributionId === link.id)?.name
+                  )?.trim() || link.id}</span>
                   <span className="strategy-kit__breakable">{link.id}</span>
                 </li>
               ))}
             </ul>
           )}
+          {contributionSources.length > 0 ? (
+            <label className="strategy-kit__hypothesis-source">
+              <span>Source entry (optional)</span>
+              <select
+                value={selectedContribution?.id ?? ""}
+                disabled={submitting}
+                onChange={(event) => {
+                  setSelectedContributionId(event.target.value);
+                  setFeedback(null);
+                }}
+              >
+                <option value="">No source entry selected</option>
+                {contributionSources.filter(({ id }) => id.length > 0).map((source) => (
+                  <option key={source.id} value={source.id}>{source.name}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
         </div>
 
         <div className="strategy-kit__hypothesis-editor">
@@ -386,19 +467,33 @@ function EvidenceHypothesisComposerScope<TContribution>({
           <p>No privacy value is chosen here. The server applies its default when you submit.</p>
           <StrategyActionRow>
             <button type="submit" disabled={!canSubmit}>
-              {running ? "Recording hypothesis…" : "Record hypothesis"}
+              {submitting
+                ? "Recording hypothesis…"
+                : anotherContributionRunning
+                  ? contributionSources.length > 0
+                    ? "Wait for other contribution…"
+                    : "Recording hypothesis…"
+                  : "Record hypothesis"}
             </button>
-            <button type="button" disabled={running || body.length === 0} onClick={clearDraft}>
+            <button
+              type="button"
+              disabled={submitting || (body.length === 0 && selectedContributionId === "")}
+              onClick={clearDraft}
+            >
               Clear draft
             </button>
           </StrategyActionRow>
         </div>
       </form>
 
-      {running ? (
+      {submitting ? (
         <StrategyStateNotice busy>Recording the hypothesis once…</StrategyStateNotice>
+      ) : anotherContributionRunning ? (
+        <StrategyStateNotice busy>
+          Another contribution is being recorded. This draft remains editable and can be submitted when it finishes.
+        </StrategyStateNotice>
       ) : null}
-      {mutationFailure !== null ? (
+      {!anotherContributionRunning && mutationFailure !== null ? (
         <StrategyStateNotice
           role="alert"
           tone="danger"
@@ -406,17 +501,19 @@ function EvidenceHypothesisComposerScope<TContribution>({
         >
           {mutationFailure}
         </StrategyStateNotice>
-      ) : fallbackFailure !== null ? (
+      ) : !anotherContributionRunning && fallbackFailure !== null ? (
         <StrategyStateNotice role="alert" tone="danger" title="Hypothesis outcome unknown">
           {fallbackFailure}
         </StrategyStateNotice>
-      ) : feedback?.status === "ignored" ? (
+      ) : !anotherContributionRunning && feedback?.status === "ignored" ? (
         <StrategyStateNotice title="Submission not accepted by this view">
           {ignoredCopy(feedback.reason)}
         </StrategyStateNotice>
-      ) : feedback?.status === "succeeded" ? (
+      ) : !anotherContributionRunning && feedback?.status === "succeeded" ? (
         <StrategyStateNotice tone="success" title="Hypothesis recorded">
-          Recorded with {feedback.citationCount} evidence {feedback.citationCount === 1 ? "citation" : "citations"}.
+          {feedback.contributionCited
+            ? `Recorded with ${feedback.artifactCount} evidence ${feedback.artifactCount === 1 ? "artifact" : "artifacts"} and one source entry.`
+            : `Recorded with ${feedback.artifactCount} evidence ${feedback.artifactCount === 1 ? "citation" : "citations"}.`}
         </StrategyStateNotice>
       ) : null}
     </StrategyPanel>

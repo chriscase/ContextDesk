@@ -19,6 +19,7 @@ import {
   StrategyActionRow,
   StrategyBadge,
   CollectionPagination,
+  EvidenceHypothesisComposer,
   RecordedContextCombo,
   StrategyHero,
   StrategyPanel,
@@ -246,7 +247,13 @@ function EntryComposer({ investigation }: { readonly investigation: CaseV1 }) {
   );
 }
 
-function EvidenceCard() {
+function EvidenceCard({
+  selectedEvidenceIds,
+  onSelectionChange,
+}: {
+  readonly selectedEvidenceIds: readonly string[];
+  readonly onSelectionChange: (ids: readonly string[]) => void;
+}) {
   const runtime = useInvestigationRuntime();
   const view = selectResourceView(runtime.resources.evidence);
   const [kind, setKind] = useState<ArtifactKind>("attachment");
@@ -255,6 +262,19 @@ function EvidenceCard() {
   const [feedback, setFeedback] = useState<{ tone: "danger" | "success"; text: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const busy = runtime.mutations.uploadEvidence.status === "running";
+  const availableEvidence = view.availability === "available" ? view.value : [];
+  const selectedAvailableIds = availableEvidence
+    .filter(({ id }) => selectedEvidenceIds.includes(id))
+    .map(({ id }) => id);
+
+  function updateWorkingSet(id: string, selected: boolean) {
+    const requested = new Set(selectedEvidenceIds);
+    if (selected) requested.add(id);
+    else requested.delete(id);
+    onSelectionChange(
+      availableEvidence.filter((item) => requested.has(item.id)).map((item) => item.id),
+    );
+  }
   useEffect(() => {
     if (!runtime.capabilities.canReadPrivate && privacyClass === "owner_only") {
       // Do not silently broaden a private draft to share-safe. The person
@@ -289,24 +309,46 @@ function EvidenceCard() {
     }
   }
   return (
-    <StrategyPanel title="Supporting material" titleId="beacon-evidence-title" description="Attach logs, emails, and files to the shared evidence inventory." busy={busy}>
+    <StrategyPanel
+      title="Supporting material"
+      titleId="beacon-evidence-title"
+      description="Attach logs, emails, and files, then choose the current evidence working set for a hypothesis."
+      actions={<StrategyBadge>{selectedAvailableIds.length} selected</StrategyBadge>}
+      busy={busy}
+    >
       {view.availability === "idle" || view.availability === "loading" ? <StrategyStateNotice busy>Loading evidence…</StrategyStateNotice> : null}
       {view.availability === "unavailable" ? <StrategyStateNotice tone="danger" role="alert" title="Evidence unavailable" action={<button type="button" onClick={runtime.refresh.evidence}>Retry</button>}>{failureCopy(view.error, "Evidence")}</StrategyStateNotice> : null}
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Evidence refresh failed" action={<button type="button" onClick={runtime.refresh.evidence}>Retry</button>}>The previously loaded inventory remains visible.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length === 0 ? <StrategyStateNotice>No supporting material has been recorded yet.</StrategyStateNotice> : null}
-      {view.availability === "available" && view.value.length > 0 ? <ul className="beacon__evidence-list">{view.value.map((item) => <li key={item.id}><span><strong>{item.filename || item.uri || "Unnamed evidence"}</strong><small>{item.kind} · {item.mediaType || "media type not recorded"} · {item.privacyClass === "owner_only" ? "owner only" : "share safe"}</small></span><StrategyBadge>{item.verificationStatus || "verification not recorded"}</StrategyBadge></li>)}</ul> : null}
+      {view.availability === "available" && view.value.length > 0 ? <>
+        <ul className="beacon__evidence-list" aria-label="Evidence working set choices">{view.value.map((item) => {
+          const name = item.filename || item.uri || "Unnamed evidence";
+          return <li key={item.id}>
+            <label className="beacon__evidence-choice">
+              <input
+                type="checkbox"
+                checked={selectedAvailableIds.includes(item.id)}
+                onChange={(event) => updateWorkingSet(item.id, event.target.checked)}
+              />
+              <span><strong>{name}</strong><small>{item.kind} · {item.mediaType || "media type not recorded"} · {item.privacyClass === "owner_only" ? "owner only" : "share safe"}</small></span>
+              <StrategyBadge>{item.verificationStatus || "verification not recorded"}</StrategyBadge>
+            </label>
+          </li>;
+        })}</ul>
+        <div className="beacon__working-set-actions">
+          <span role="status">{selectedAvailableIds.length === 0 ? "No evidence selected for the hypothesis." : `${selectedAvailableIds.length} evidence ${selectedAvailableIds.length === 1 ? "artifact" : "artifacts"} selected for the hypothesis.`}</span>
+          <button type="button" disabled={selectedAvailableIds.length === 0} onClick={() => onSelectionChange([])}>Clear working set</button>
+        </div>
+      </> : null}
       {runtime.capabilities.canUpload ? <form className="beacon__upload" onSubmit={(event) => void submit(event)}><label className="beacon__field"><span>File (server-configured limit)</span><input ref={fileRef} type="file" required /></label><label className="beacon__field"><span>Kind</span><select value={kind} onChange={(event) => setKind(event.target.value as ArtifactKind)}><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option></select></label><label className="beacon__field"><span>Privacy</span><select value={privacyClass} required onChange={(event) => { const next = event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : event.target.value === "share_safe" ? "share_safe" : ""; setPrivacyClass(next); if (next && feedback?.text.startsWith("Private evidence access changed")) setFeedback(null); }}><option value="">Choose privacy</option><option value="share_safe">Share safe</option>{runtime.capabilities.canReadPrivate ? <option value="owner_only">Owner only</option> : null}</select></label><label className="beacon__field beacon__field--wide"><span>Why does this matter?</span><input value={summary} onChange={(event) => setSummary(event.target.value)} required /></label>{feedback ? <StrategyStateNotice tone={feedback.tone} role={feedback.tone === "danger" ? "alert" : "status"}>{feedback.text}</StrategyStateNotice> : null}<button type="submit" disabled={busy || !privacyClass || !runtime.commands.uploadEvidence}>{busy ? "Attaching…" : runtime.commands.uploadEvidence ? "Attach evidence" : "Preparing upload…"}</button></form> : <StrategyStateNotice title="Evidence upload is read-only">You can review supporting material, but your current access cannot attach a file.</StrategyStateNotice>}
     </StrategyPanel>
   );
 }
 
-function PromoteCard({ investigation, contributions }: { readonly investigation: CaseV1; readonly contributions: readonly ContributionV1[] }) {
+function PromoteCard({ investigation }: { readonly investigation: CaseV1 }) {
   const runtime = useInvestigationRuntime();
   const [situation, setSituation] = useState("");
-  const [hypothesis, setHypothesis] = useState("");
-  const [sourceId, setSourceId] = useState("");
   const [situationFeedback, setSituationFeedback] = useState<{ tone: "danger" | "success"; text: string } | null>(null);
-  const [hypothesisFeedback, setHypothesisFeedback] = useState<{ tone: "danger" | "success"; text: string } | null>(null);
   async function promoteSituation() {
     const command = runtime.commands.updateSituation;
     if (!command || !situation.trim()) return;
@@ -319,28 +361,10 @@ function PromoteCard({ investigation, contributions }: { readonly investigation:
       setSituationFeedback({ tone: "danger", text: commandFailureCopy(result, "The Situation update") });
     }
   }
-  async function promoteHypothesis() {
-    const command = runtime.commands.createContribution;
-    if (!command || !hypothesis.trim()) return;
-    setHypothesisFeedback(null);
-    const result = await command({
-      kind: "hypothesis",
-      body: hypothesis,
-      ...(sourceId ? { hypothesisLinks: [{ kind: "contribution" as const, id: sourceId }] } : {}),
-      clientTime: new Date().toISOString(),
-    });
-    if (result.status === "succeeded") {
-      setHypothesis(""); setSourceId("");
-      setHypothesisFeedback({ tone: "success", text: "Cited hypothesis recorded in the dated stream." });
-    } else {
-      setHypothesisFeedback({ tone: "danger", text: commandFailureCopy(result, "The hypothesis") });
-    }
-  }
   return (
     <StrategyPanel title="Promote a recorded entry" titleId="beacon-promote-title" description="Promotion is always a separate, explicit action. The original dated entry remains in the stream.">
       <div className="beacon__promote-grid">
         <section><h4>Update the Situation</h4><p>Replace the recorded problem statement after reviewing the current value: <strong>{recorded(investigation.problemStatement)}</strong></p>{runtime.capabilities.canEditSituation ? <><label className="beacon__field"><span>New problem statement</span><textarea value={situation} onChange={(event) => setSituation(event.target.value)} rows={3} /></label><button type="button" onClick={() => void promoteSituation()} disabled={!situation.trim() || runtime.mutations.updateSituation.status === "running" || !runtime.commands.updateSituation}>Promote to Situation</button>{situationFeedback ? <StrategyStateNotice tone={situationFeedback.tone} role={situationFeedback.tone === "danger" ? "alert" : "status"}>{situationFeedback.text}</StrategyStateNotice> : null}</> : <StrategyStateNotice title="Situation is read-only">Your current access can review this statement but cannot replace it.</StrategyStateNotice>}</section>
-        <section><h4>Record a cited hypothesis</h4>{runtime.capabilities.canContribute ? <><label className="beacon__field"><span>Hypothesis</span><textarea value={hypothesis} onChange={(event) => setHypothesis(event.target.value)} rows={3} /></label><label className="beacon__field"><span>Source entry (optional)</span><select value={sourceId} onChange={(event) => setSourceId(event.target.value)}><option value="">No source selected</option>{contributions.filter((item) => !item.tombstoned).map((item) => <option key={item.id} value={item.id}>{contributionLabel(item)} · {dateLabel(item.createdAt)}</option>)}</select></label><button type="button" onClick={() => void promoteHypothesis()} disabled={!hypothesis.trim() || runtime.mutations.createContribution.status === "running" || !runtime.commands.createContribution}>Record hypothesis</button>{hypothesisFeedback ? <StrategyStateNotice tone={hypothesisFeedback.tone} role={hypothesisFeedback.tone === "danger" ? "alert" : "status"}>{hypothesisFeedback.text}</StrategyStateNotice> : null}</> : <StrategyStateNotice title="Hypothesis entry is read-only">Your current access can review hypotheses but cannot add one.</StrategyStateNotice>}</section>
       </div>
     </StrategyPanel>
   );
@@ -350,6 +374,8 @@ function Detail(props: InvestigationStrategyShellProps) {
   const runtime = useInvestigationRuntime();
   const investigation = selectResourceView(runtime.resources.investigation);
   const contributions = selectResourceView(runtime.resources.contributions);
+  const evidence = selectResourceView(runtime.resources.evidence);
+  const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<readonly string[]>([]);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const focusedArrival = useRef<string | null>(null);
   const arrival = !runtime.capabilities.canRead ? `denied:${props.focusCaseId}`
@@ -387,6 +413,22 @@ function Detail(props: InvestigationStrategyShellProps) {
   </>;
   const selected = investigation.value;
   const entries = contributions.availability === "available" ? [...contributions.value].sort((left, right) => left.createdAt.localeCompare(right.createdAt)) : [];
+  const selectedEvidence = evidence.availability === "available"
+    ? evidence.value
+      .filter(({ id }) => selectedEvidenceIds.includes(id))
+      .map((item) => ({
+        id: item.id,
+        name: item.filename || item.uri || "Unnamed evidence",
+      }))
+    : [];
+  const contributionSources = entries
+    .filter((item) => !item.tombstoned)
+    .map((item) => ({
+      id: item.id,
+      name: `${contributionLabel(item)} · ${dateLabel(item.createdAt)}`,
+    }));
+  const hypothesisWritingAvailable = runtime.capabilities.canContribute
+    && runtime.commands.createContribution !== null;
   return (
     <>
       <StrategyHero eyebrow="Beacon · Rapid Intake" title={titleOf(selected)} titleId="beacon-detail-title" headingRef={headingRef} headingTabIndex={-1} description={<><span>{selected.id}</span> · <span>{selected.status}</span> · <span>{selected.severity}</span></>} actions={<StrategyActionRow><button type="button" onClick={props.onExitFocus}>Back to investigations</button>{props.onOpenAdvancedTools ? <button type="button" onClick={() => props.onOpenAdvancedTools?.(selected.id, "analyze")}>Open technical tools</button> : null}</StrategyActionRow>} />
@@ -400,12 +442,23 @@ function Detail(props: InvestigationStrategyShellProps) {
             {contributions.availability === "available" && entries.length === 0 ? <StrategyStateNotice>No dated entries have been recorded yet.</StrategyStateNotice> : null}
             {entries.length > 0 ? <ol className="beacon__stream">{entries.map((entry) => <li key={entry.id}><div className="beacon__stream-marker" aria-hidden="true" /><article><header><StrategyBadge tone={entry.kind === "hypothesis" ? "warning" : entry.kind === "action" ? "accent" : "neutral"}>{contributionLabel(entry)}</StrategyBadge><time dateTime={entry.createdAt}>{dateLabel(entry.createdAt)}</time></header><p>{entry.tombstoned ? "This entry was removed from the active record." : recorded(entry.body)}</p><footer>Recorded by {entry.authorUsername || "unknown author"}{entry.hypothesisLinks?.length ? ` · ${entry.hypothesisLinks.length} cited source${entry.hypothesisLinks.length === 1 ? "" : "s"}` : ""}</footer></article></li>)}</ol> : null}
           </StrategyPanel>
-          <EvidenceCard />
+          <EvidenceCard
+            selectedEvidenceIds={selectedEvidenceIds}
+            onSelectionChange={setSelectedEvidenceIds}
+          />
           <RuntimeHandoffPanel investigation={selected} />
         </div>
         <aside className="beacon__side">
           <StrategyPanel title="Current Situation" titleId="beacon-situation-title"><dl className="beacon__facts"><div><dt>Observed problem</dt><dd>{recorded(selected.problemStatement)}</dd></div><div><dt>Affected</dt><dd>{recorded(selected.affectedParties)}</dd></div><div><dt>Impact</dt><dd>{recorded(selected.impact)}</dd></div><div><dt>Product / build</dt><dd>{[selected.investigationContext?.productName, selected.investigationContext?.build].filter(Boolean).join(" · ") || "Not recorded"}</dd></div></dl></StrategyPanel>
-          <PromoteCard investigation={selected} contributions={entries} />
+          <PromoteCard investigation={selected} />
+          <EvidenceHypothesisComposer
+            scopeKey={`${selected.id}\u0000${runtime.identity.id}\u0000${runtime.identity.username}`}
+            selectedEvidence={selectedEvidence}
+            contributionSources={contributionSources}
+            createContribution={hypothesisWritingAvailable ? runtime.commands.createContribution : null}
+            mutationState={runtime.mutations.createContribution}
+            idempotencyKeyPrefix="beacon-hypothesis-"
+          />
         </aside>
       </div>
     </>
@@ -425,7 +478,7 @@ function BeaconStrategyForIdentity(props: InvestigationStrategyShellProps) {
   }, [props.focusCaseId]);
   return (
     <StrategySurface className="beacon" labelledBy={props.focusCaseId ? "beacon-detail-title" : "beacon-page-title"}>
-      {props.focusCaseId ? <Detail {...props} /> : <>
+      {props.focusCaseId ? <Detail key={props.focusCaseId} {...props} /> : <>
         <StrategyHero eyebrow="Beacon · Rapid Intake" title="Capture the signal. Keep the trail." titleId="beacon-page-title" description="A calm, append-first workspace for fast triage intake and clear handoff. Every promotion is explicit; the shared record remains authoritative." />
         <div className="beacon__browse-grid"><CreateCard {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })} /><Browse collection={collection} onOpenCase={props.onOpenCase} focusRef={browseFocusRef} {...(props.collectionQuery === undefined ? {} : { collectionQuery: props.collectionQuery })} {...(props.onCollectionQueryChange === undefined ? {} : { onCollectionQueryChange: props.onCollectionQueryChange })} /></div>
       </>}
@@ -438,6 +491,6 @@ export function BeaconStrategy(props: InvestigationStrategyShellProps) {
   // Browser-local drafts belong to one authenticated person. Remounting the
   // presentation on a descriptive identity transition prevents a shared
   // browser from carrying another person's unfinished intake forward.
-  const draftOwner = identity.id;
+  const draftOwner = `${identity.id}\u0000${identity.username}`;
   return <BeaconStrategyForIdentity key={draftOwner} {...props} />;
 }

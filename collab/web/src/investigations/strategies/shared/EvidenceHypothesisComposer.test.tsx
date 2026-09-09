@@ -178,10 +178,23 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     expect(screen.getByRole("status").textContent).toContain("Recorded with 2 evidence citations");
   });
 
-  it("suppresses duplicate submits locally and disables submit for either local or public running state", async () => {
+  it("uses singular success copy for one artifact citation", async () => {
+    mount({ selectedEvidence: [EVIDENCE[0]!] });
+    fireEvent.change(hypothesisField(), { target: { value: "One artifact supports this claim." } });
+    fireEvent.click(screen.getByRole("button", { name: "Record hypothesis" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toContain("Recorded with 1 evidence citation.");
+    });
+  });
+
+  it("suppresses duplicate submits locally and distinguishes another contribution writer", async () => {
     const deferred: Deferred<Awaited<ReturnType<CreateContribution>>> = createDeferred();
     const command: CreateContribution = vi.fn(() => deferred.promise);
-    const mounted = mount({ createContribution: command });
+    const mounted = mount({
+      createContribution: command,
+      contributionSources: [{ id: "contribution-current", name: "Team update · current" }],
+    });
     const field = hypothesisField();
     fireEvent.change(field, { target: { value: "Only one write may start." } });
 
@@ -198,7 +211,46 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     fireEvent.submit(hypothesisForm());
 
     expect(command).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "Recording hypothesis…" }).getAttribute("disabled")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Wait for other contribution…" }).getAttribute("disabled")).not.toBeNull();
+    expect(screen.getByRole("status").textContent).toContain("Another contribution is being recorded");
+    expect(screen.queryByText("Recording the hypothesis once…")).toBeNull();
+    fireEvent.change(field, { target: { value: "This draft remains editable." } });
+    expect(field.value).toBe("This draft remains editable.");
+  });
+
+  it("adds one current contribution source after the artifact working set and drops a stale choice", async () => {
+    const command = succeededCommand();
+    const mounted = mount({
+      createContribution: command,
+      selectedEvidence: [{ id: "artifact-current", name: "current.log" }],
+      contributionSources: [
+        { id: "contribution-old", name: "Observation · earlier" },
+        { id: "contribution-current", name: "Team update · current" },
+      ],
+    });
+    const source = screen.getByRole("combobox", { name: "Source entry (optional)" });
+    fireEvent.change(source, { target: { value: "contribution-current" } });
+    expect(screen.getByText("contribution-current").closest("li")?.textContent).toContain(
+      "Team update · current",
+    );
+    fireEvent.change(hypothesisField(), { target: { value: "Cite the selected entry too." } });
+    fireEvent.submit(hypothesisForm());
+
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
+    expect(command).toHaveBeenCalledWith(expect.objectContaining({
+      hypothesisLinks: [
+        { kind: "artifact", id: "artifact-current" },
+        { kind: "contribution", id: "contribution-current" },
+      ],
+    }));
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toContain("one source entry");
+    });
+
+    mounted.rerenderComposer({
+      contributionSources: [{ id: "contribution-old", name: "Observation · earlier" }],
+    });
+    await waitFor(() => expect((source as HTMLSelectElement).value).toBe(""));
   });
 
   it.each([
@@ -294,6 +346,42 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     expect(nextKey).toMatch(/^evidence-hypothesis-/);
     expect(nextKey).not.toBe(ambiguousKey);
     expect(durableByKey.size).toBe(4);
+  });
+
+  it("freezes the body, artifact links, contribution source, and key for an exact unknown-outcome retry", async () => {
+    const command: CreateContribution = vi.fn()
+      .mockResolvedValueOnce({ status: "failed", error: { kind: "unavailable" } })
+      .mockResolvedValueOnce({ status: "succeeded", value: authoritativeContribution() });
+    mount({
+      createContribution: command,
+      selectedEvidence: [{ id: "artifact-current", name: "current.log" }],
+      contributionSources: [{ id: "contribution-current", name: "Observation · current" }],
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Source entry (optional)" }), {
+      target: { value: "contribution-current" },
+    });
+    fireEvent.change(hypothesisField(), {
+      target: { value: "Retry this exact evidence-linked hypothesis." },
+    });
+
+    fireEvent.submit(hypothesisForm());
+    expect(await screen.findByText("Hypothesis outcome unknown")).toBeTruthy();
+    expect(hypothesisField().value).toBe("Retry this exact evidence-linked hypothesis.");
+    fireEvent.submit(hypothesisForm());
+
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(command).mock.calls[1]?.[0]).toEqual(
+      vi.mocked(command).mock.calls[0]?.[0],
+    );
+    expect(vi.mocked(command).mock.calls[0]?.[0]).toEqual({
+      kind: "hypothesis",
+      body: "Retry this exact evidence-linked hypothesis.",
+      hypothesisLinks: [
+        { kind: "artifact", id: "artifact-current" },
+        { kind: "contribution", id: "contribution-current" },
+      ],
+      idempotencyKey: expect.stringMatching(/^evidence-hypothesis-/u),
+    });
   });
 
   it("rotates an ambiguous retry key after the user explicitly clears and restores the draft", async () => {
