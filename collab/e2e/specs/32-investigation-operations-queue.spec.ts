@@ -440,6 +440,9 @@ test.describe("Investigation Operations Queue", () => {
     await loginAs(page, FIXTURE_USERS.dave);
     await page.goto("/operations");
     await expect(page.getByRole("button", { name: "Apply saved view Dave only" })).toBeVisible();
+    await page.getByRole("button", { name: "Apply saved view Dave only" }).click();
+    await expect.poll(() => new URL(page.url()).searchParams.get("q")).toBe(title);
+    await expect(page.getByRole("link", { name: title })).toBeVisible();
 
     await page.addInitScript(() => {
       const originalSetItem = Storage.prototype.setItem;
@@ -454,6 +457,10 @@ test.describe("Investigation Operations Queue", () => {
     await page.getByLabel("View name").fill("Blocked view");
     await page.getByRole("button", { name: "Save current view" }).click();
     await expect(page.locator(".operations-queue__saved-notice")).toContainText("This browser could not save the view.");
+    await expect(page.getByRole("link", { name: title })).toBeVisible();
+    const preserved = new URL(page.url());
+    expect(preserved.searchParams.get("q")).toBe(title);
+    expect(preserved.searchParams.get("status")).toBe("open");
     await expect(page.getByRole("button", { name: "Apply saved view Dave only" })).toBeVisible();
   });
 });
