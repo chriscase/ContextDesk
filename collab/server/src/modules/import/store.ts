@@ -225,8 +225,17 @@ export class MemoryRunStore implements RunStore {
   }
 
   async appendJudgment(row: ExternalRunJudgmentRow): Promise<void> {
-    const list = this.judgments.get(row.runId);
-    if (!list) throw new Error("external run judgment target does not exist");
+    let list = this.judgments.get(row.runId);
+    if (!list) {
+      if (!this.runs.has(row.runId)) {
+        throw new Error("external run judgment target does not exist");
+      }
+      // SQLite documents written before judgments existed have a run and its
+      // corroboration bucket, but no judgments map entry. Lazily materialize
+      // the empty bucket so the first append remains backwards-compatible.
+      list = [];
+      this.judgments.set(row.runId, list);
+    }
     if (row.seq !== list.length + 1) throw new Error("external run judgment sequence is not contiguous");
     list.push(Object.freeze(cloneJudgment(row)));
   }

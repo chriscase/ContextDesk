@@ -286,7 +286,7 @@ describe("SQLite local runtime", () => {
     }
   });
 
-  it("reopens a pre-Phase-A encoded run store with no replay-intent map", async () => {
+  it("reopens a pre-judgment run store and durably accepts its first judgment", async () => {
     const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-legacy-run-"));
     const path = join(root, "collab.sqlite");
     const caseId = "11111111-1111-4111-8111-111111111111";
@@ -313,7 +313,27 @@ describe("SQLite local runtime", () => {
         "local:lead",
         "legacy-import-01",
       )).toBeNull();
+      await reopened.runs.appendJudgment({
+        caseId,
+        runId: run.id,
+        seq: 1,
+        judgment: "insufficient_evidence",
+        actorId: "local:lead",
+        actorUsername: "lead",
+        links: [],
+        rationale: null,
+        recordedAt: "2026-09-09T12:00:00.000Z",
+      });
       reopened.state.close();
+
+      const persisted = createSqliteRuntime(path);
+      expect(await persisted.runs.listJudgments(run.id)).toMatchObject([{
+        caseId,
+        runId: run.id,
+        seq: 1,
+        judgment: "insufficient_evidence",
+      }]);
+      persisted.state.close();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

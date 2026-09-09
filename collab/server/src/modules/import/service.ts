@@ -768,7 +768,6 @@ export class ImportService {
           targetId: routeRunId,
           clientTime: null,
           payload: {
-            judgment: request.judgment,
             sequence: judgment.seq,
             linkCount: request.links.length,
           },

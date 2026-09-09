@@ -319,6 +319,14 @@ describe("external run human judgment HTTP and memory core", () => {
         created.id,
       )).body));
       expect(list.judgments.map((row) => row.seq)).toEqual([1, 2]);
+      const judgmentTimeline = (await context.caseStore.listTimeline(created.id)).filter(
+        (row) => row.kind === "external_run_judgment_recorded",
+      );
+      expect(judgmentTimeline.map((row) => JSON.parse(row.payload))).toEqual([
+        { sequence: 1, linkCount: 0 },
+        { sequence: 2, linkCount: 0 },
+      ]);
+      expect(JSON.stringify(judgmentTimeline)).not.toMatch(/corroborates|contradicts/);
       expect((await context.runs.listCorroborations(RUN_ID))).toEqual([]);
       const run = parseExternalRun(JSON.parse((await context.app.inject({
         method: "GET",
@@ -385,6 +393,19 @@ describe("external run human judgment HTTP and memory core", () => {
       }));
       expect(links.statusCode).toBe(409);
       expect(parseExternalRunJudgmentRefused(JSON.parse(links.body)).reason).toBe("links_required");
+      const emptyContradicts = await postJudgment(
+        context.app,
+        context.alice,
+        created.id,
+        judgmentRequest(created.id, {
+          judgment: "contradicts",
+          idempotencyKey: "judgment-empty-contradicts-01",
+          rationale: null,
+        }),
+      );
+      expect(emptyContradicts.statusCode).toBe(409);
+      expect(parseExternalRunJudgmentRefused(JSON.parse(emptyContradicts.body)).reason)
+        .toBe("links_required");
 
       const missingLink = await postJudgment(context.app, context.alice, created.id, judgmentRequest(created.id, {
         links: [{ kind: "contribution", id: "55555555-5555-4555-8555-555555555555" }],
@@ -423,6 +444,47 @@ describe("external run human judgment HTTP and memory core", () => {
     });
   });
 
+  it("accepts visible share-safe artifact, contribution, and snapshot links", async () => {
+    await withApp(async (context) => {
+      const created = await seedCaseAndRun(context);
+      const evidence = await context.cases.addEvidence(created.id, ALICE, {
+        kind: "log",
+        filename: "synthetic-run.log",
+        mediaType: "text/plain",
+        bytes: new TextEncoder().encode("synthetic external run evidence\n"),
+        summary: "Synthetic external run evidence",
+        privacyClass: "share_safe",
+      }, "test");
+      const contribution = await context.cases.addContribution(created.id, ALICE, {
+        kind: "note",
+        body: "Synthetic human comparison note.",
+        privacyClass: "share_safe",
+      }, "test");
+      const snapshot = await context.cases.createSnapshot(created.id, ALICE, {
+        evidenceIds: [evidence.artifact.id],
+        visibility: "share_safe",
+      }, "test");
+      const links = [
+        { kind: "artifact" as const, id: evidence.artifact.id },
+        { kind: "contribution" as const, id: contribution.id },
+        { kind: "snapshot" as const, id: snapshot.id },
+      ];
+      const response = await postJudgment(
+        context.app,
+        context.alice,
+        created.id,
+        judgmentRequest(created.id, {
+          judgment: "corroborates",
+          links,
+          idempotencyKey: "judgment-all-links-01",
+        }),
+      );
+      expect(response.statusCode).toBe(201);
+      expect(parseExternalRunJudgmentSuccess(JSON.parse(response.body)).applied.links)
+        .toEqual(links);
+    });
+  });
+
   it("enforces route identity, concealment, authentication, capability-before-read, and the list cap", async () => {
     await withApp(async (context) => {
       const created = await seedCaseAndRun(context, { privacyClass: "owner_only" });
@@ -454,6 +516,34 @@ describe("external run human judgment HTTP and memory core", () => {
       expect((await getJudgments(context.app, context.alice, created.id, MISSING_RUN_ID)).statusCode)
         .toBe(404);
       expect((await getJudgments(context.app, context.bob, created.id)).statusCode).toBe(404);
+      await context.cases.addParticipant(
+        created.id,
+        ALICE,
+        { identityId: BOB.id, username: BOB.username },
+        "test",
+      );
+      expect((await getJudgments(context.app, context.bob, created.id)).statusCode).toBe(404);
+      expect((await postJudgment(
+        context.app,
+        context.bob,
+        created.id,
+        judgmentRequest(created.id),
+      )).statusCode).toBe(404);
+
+      const otherCase = parseCase(JSON.parse((await context.app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: context.alice },
+        payload: { title: "Cross-case concealment fixture" },
+      })).body));
+      expect((await getJudgments(context.app, context.alice, otherCase.id, RUN_ID)).statusCode)
+        .toBe(404);
+      expect((await postJudgment(
+        context.app,
+        context.alice,
+        otherCase.id,
+        { ...judgmentRequest(otherCase.id), caseId: otherCase.id },
+      )).statusCode).toBe(404);
 
       for (let index = 1; index <= EXTERNAL_RUN_JUDGMENT_SERVER_LIMIT; index += 1) {
         await context.runs.appendJudgment(judgmentRow(created.id, index));
@@ -464,6 +554,9 @@ describe("external run human judgment HTTP and memory core", () => {
       }));
       expect(capped.statusCode).toBe(413);
       expect(JSON.parse(capped.body)).toEqual({ error: "judgment_limit_reached" });
+      expect(await context.runs.listJudgments(RUN_ID)).toHaveLength(
+        EXTERNAL_RUN_JUDGMENT_SERVER_LIMIT,
+      );
     });
   });
 
@@ -478,6 +571,7 @@ describe("external run human judgment HTTP and memory core", () => {
         judgmentRequest(created.id),
       );
       expect(response.statusCode).toBe(500);
+      expect(JSON.parse(response.body)).toEqual({ error: "internal" });
       expect(await context.runs.listJudgments(RUN_ID)).toEqual([]);
       expect((await context.caseStore.listTimeline(created.id)).filter(
         (row) => row.kind === "external_run_judgment_recorded",
@@ -502,6 +596,12 @@ describe("external run human judgment HTTP and memory core", () => {
       expect(retry.statusCode).toBe(200);
       expect(parseExternalRunJudgmentSuccess(JSON.parse(retry.body)).replayed).toBe(true);
       expect(await context.runs.listJudgments(RUN_ID)).toHaveLength(1);
+      expect((await context.caseStore.listTimeline(created.id)).filter(
+        (row) => row.kind === "external_run_judgment_recorded",
+      )).toHaveLength(1);
+      expect((await context.audit.list({ action: "external_run_judgment_recorded" })).filter(
+        (row) => row.outcome === "success",
+      )).toHaveLength(1);
     }, { caseStore });
   });
 });
