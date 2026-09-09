@@ -68,7 +68,7 @@ function byteLengthLabel(value: number | null | undefined): string {
 }
 
 function artifactLabel(artifact: IntegrityArtifactRecord): string {
-  return artifact.filename?.trim() || artifact.uri?.trim() || artifact.kind || "Unnamed evidence";
+  return artifact.filename?.trim() || artifact.kind.trim() || "evidence";
 }
 
 /**

@@ -130,9 +130,40 @@ describe("ArtifactIntegrityPanel", () => {
       />,
     );
     openIntegrityDisclosure();
-    expect(screen.getByRole("region", { name: "file://records/checkout.log artifact identity and integrity" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "file_server_ref artifact identity and integrity" })).toBeTruthy();
+    expect(screen.queryByText("file://records/checkout.log")).toBeNull();
     expect(screen.getByText("No stored content hash is recorded.")).toBeTruthy();
     expect(screen.getByText(/does not perform a live recheck/)).toBeTruthy();
     expect(screen.getAllByText("Not recorded").length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("remounts closed and conceals the old digest when the same artifact records a new content hash", () => {
+    const originalHash = "a".repeat(64);
+    const replacementHash = "b".repeat(64);
+    const renderPanel = (contentHash: string) => (
+      <ArtifactIntegrityPanel
+        key={`case-1\u0000artifact-1\u0000${contentHash}`}
+        caseId="case-1"
+        artifact={artifact({ contentHash, expectedHash: contentHash })}
+        snapshots={[]}
+        uploaderLabel="alice"
+        snapshotCreatorLabel={() => "alice"}
+      />
+    );
+    const view = render(renderPanel(originalHash));
+
+    const originalDisclosure = openIntegrityDisclosure();
+    expect(originalDisclosure.open).toBe(true);
+    expect(screen.getAllByText(originalHash).length).toBeGreaterThan(0);
+
+    view.rerender(renderPanel(replacementHash));
+
+    const replacementDisclosure = screen.getByText("Artifact identity & integrity").closest("details");
+    expect(replacementDisclosure?.open).toBe(false);
+    expect(screen.queryByText(originalHash)).toBeNull();
+    expect(screen.queryByText(replacementHash)).toBeNull();
+
+    openIntegrityDisclosure();
+    expect(screen.getAllByText(replacementHash).length).toBeGreaterThan(0);
   });
 });
