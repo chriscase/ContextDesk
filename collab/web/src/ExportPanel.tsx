@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import type { ExportEnvelopeV1 } from "@cd-collab/contracts";
 import { protectedApiFetch } from "./protected-api.js";
 
 interface InventoryItem {
@@ -111,6 +112,9 @@ const NETWORK_ERROR_MESSAGE =
   "The export request did not complete — the server returned no result. Nothing was exported and " +
   "your variant and evidence selection are unchanged; retry with the same export button.";
 
+const INVALID_EXPORT_MESSAGE =
+  "The server returned an invalid export result. Nothing is available to download; retry the export or contact an administrator.";
+
 /**
  * How long a download's object URL is allowed to outlive the click.
  *
@@ -129,7 +133,20 @@ const OBJECT_URL_TTL_MS = 5_000;
  * after, and its URL revoked on a short timer that the caller can cancel when
  * the panel unmounts.
  */
-function startDownload(blob: Blob, filename: string, timers: Set<number>): void {
+interface ObjectUrlLease {
+  url: string;
+  timer: number;
+}
+
+function revokeDownloads(leases: Set<ObjectUrlLease>): void {
+  for (const lease of leases) {
+    window.clearTimeout(lease.timer);
+    URL.revokeObjectURL(lease.url);
+  }
+  leases.clear();
+}
+
+function startDownload(blob: Blob, filename: string, leases: Set<ObjectUrlLease>): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -139,11 +156,77 @@ function startDownload(blob: Blob, filename: string, timers: Set<number>): void 
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  const timer = window.setTimeout(() => {
+  const lease: ObjectUrlLease = { url, timer: 0 };
+  lease.timer = window.setTimeout(() => {
+    if (!leases.delete(lease)) return;
     URL.revokeObjectURL(url);
-    timers.delete(timer);
   }, OBJECT_URL_TTL_MS);
-  timers.add(timer);
+  leases.add(lease);
+}
+
+function safeFilenamePart(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "investigation";
+}
+
+function envelopeCaseId(envelope: ExportEnvelopeV1): string | null {
+  if (envelope.kind === "brief" && "header" in envelope.payload) {
+    return envelope.payload.header.caseId;
+  }
+  if (envelope.kind === "package" && "caseId" in envelope.payload) {
+    return envelope.payload.caseId;
+  }
+  return null;
+}
+
+function envelopeSnapshotIdentity(envelope: ExportEnvelopeV1): string | null {
+  return envelope.kind === "package" && "snapshotIdentity" in envelope.payload
+    ? envelope.payload.snapshotIdentity
+    : null;
+}
+
+/**
+ * Validate only the delivery identity this browser surface relies on.
+ *
+ * The server remains responsible for validating every nested brief/package
+ * field against the full contract. This guard prevents mismatched, malformed,
+ * or stale responses from becoming downloadable without pulling server-only
+ * hashing dependencies into the browser bundle.
+ */
+function parseDeliveryEnvelope(
+  value: unknown,
+  expectedKind: ExportKind,
+  expectedPrivacy: "owner_only" | "share_safe",
+  expectedCaseId: string,
+): ExportEnvelopeV1 | null {
+  const envelope = asRecord(value);
+  const payload = asRecord(envelope?.payload);
+  if (
+    !envelope ||
+    envelope.schemaId !== "cd-collab.export_envelope.v1" ||
+    envelope.kind !== expectedKind ||
+    envelope.privacyClass !== expectedPrivacy ||
+    typeof envelope.exportedAt !== "string" ||
+    envelope.exportedAt.trim() === "" ||
+    typeof envelope.markdown !== "string" ||
+    !payload ||
+    payload.privacyClass !== expectedPrivacy
+  ) {
+    return null;
+  }
+  if (expectedKind === "brief") {
+    const header = asRecord(payload.header);
+    if (payload.schemaId !== "cd-collab.brief.v1" || header?.caseId !== expectedCaseId) {
+      return null;
+    }
+  } else if (
+    payload.schemaId !== "cd-collab.prompt_package.v1" ||
+    payload.caseId !== expectedCaseId ||
+    typeof payload.snapshotIdentity !== "string" ||
+    !/^[a-f0-9]{64}$/.test(payload.snapshotIdentity)
+  ) {
+    return null;
+  }
+  return value as ExportEnvelopeV1;
 }
 
 const PORTABLE_NETWORK_ERROR =
@@ -233,12 +316,11 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   const [variant, setVariant] = useState<"owner_only" | "share_safe">("owner_only");
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [scaffold, setScaffold] = useState("");
-  const [markdown, setMarkdown] = useState("");
-  const [snapshot, setSnapshot] = useState<string | null>(null);
+  const [exportResult, setExportResult] = useState<ExportEnvelopeV1 | null>(null);
   const [findings, setFindings] = useState<ScanFinding[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<ExportKind | null>(null);
-  const [completed, setCompleted] = useState<ExportKind | null>(null);
+  const [exportScopeCaseId, setExportScopeCaseId] = useState(props.caseId);
   const [portableStatus, setPortableStatus] = useState<PortableStatus>("loading");
   const [portableCapabilities, setPortableCapabilities] = useState<PortableCapabilities | null>(
     null,
@@ -253,16 +335,30 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const [applyResult, setApplyResult] = useState<PortableApplyResult | null>(null);
   const inFlight = useRef(false);
+  const exportGeneration = useRef(0);
   // Object URLs still waiting to be revoked. Unmounting revokes them at once
   // rather than leaving them addressable for the rest of the session.
-  const objectUrls = useRef(new Set<number>());
+  const objectUrls = useRef(new Set<ObjectUrlLease>());
+  const exportObjectUrls = useRef(new Set<ObjectUrlLease>());
   useEffect(() => {
-    const timers = objectUrls.current;
+    const downloads = objectUrls.current;
+    const exportDownloads = exportObjectUrls.current;
     return () => {
-      for (const timer of timers) window.clearTimeout(timer);
-      timers.clear();
+      revokeDownloads(downloads);
+      revokeDownloads(exportDownloads);
     };
   }, []);
+
+  useEffect(() => {
+    exportGeneration.current += 1;
+    inFlight.current = false;
+    setExportScopeCaseId(props.caseId);
+    setExportResult(null);
+    setFindings([]);
+    setError(null);
+    setPending(null);
+    revokeDownloads(exportObjectUrls.current);
+  }, [props.caseId]);
 
   useEffect(() => {
     let stale = false;
@@ -336,13 +432,23 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
     : !props.canLead
       ? "share_safe is available to case leads only."
       : null;
+  const exportStateIsCurrent = exportScopeCaseId === props.caseId;
+  const currentExportResult = exportStateIsCurrent ? exportResult : null;
+  const currentPending = exportStateIsCurrent ? pending : null;
+  const currentError = exportStateIsCurrent ? error : null;
+  const currentFindings = exportStateIsCurrent ? findings : [];
   if (!props.canWrite && !props.canLead) return null;
 
   async function postExport(kind: ExportKind, path: string, body: unknown) {
     if (inFlight.current) return;
+    const requestGeneration = exportGeneration.current;
+    const requestedCaseId = props.caseId;
+    const requestedVariant = variant;
     inFlight.current = true;
+    setExportScopeCaseId(requestedCaseId);
     setPending(kind);
-    setCompleted(null);
+    setExportResult(null);
+    revokeDownloads(exportObjectUrls.current);
     setError(null);
     setFindings([]);
     try {
@@ -351,30 +457,75 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      const json = (await res.json()) as {
-        error?: string;
-        findings?: ScanFinding[];
-        markdown?: string;
-        payload?: { snapshotIdentity?: string };
-      };
-      if (!res.ok) {
-        setError(json.error ?? "export failed");
-        setFindings((json.findings ?? []).map(safeFinding));
-        setMarkdown("");
-        setSnapshot(null);
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch {
+        if (requestGeneration !== exportGeneration.current) return;
+        setError(INVALID_EXPORT_MESSAGE);
         return;
       }
-      setMarkdown(json.markdown ?? "");
-      setSnapshot(json.payload?.snapshotIdentity ?? null);
-      setCompleted(kind);
+      if (requestGeneration !== exportGeneration.current) return;
+      if (!res.ok) {
+        const record = asRecord(json);
+        setError(typeof record?.error === "string" ? record.error : "export failed");
+        setFindings(
+          Array.isArray(record?.findings)
+            ? record.findings
+                .map((value) => asRecord(value))
+                .filter(
+                  (value): value is Record<string, unknown> =>
+                    value !== null &&
+                    typeof value.rule === "string" &&
+                    typeof value.path === "string" &&
+                    typeof value.excerpt === "string",
+                )
+                .map((value) =>
+                  safeFinding({
+                    rule: value.rule as string,
+                    path: value.path as string,
+                    excerpt: value.excerpt as string,
+                  }),
+                )
+            : [],
+        );
+        return;
+      }
+      const envelope = parseDeliveryEnvelope(json, kind, requestedVariant, requestedCaseId);
+      if (!envelope || envelopeCaseId(envelope) !== requestedCaseId) {
+        setError(INVALID_EXPORT_MESSAGE);
+        return;
+      }
+      setExportResult(envelope);
     } catch {
+      if (requestGeneration !== exportGeneration.current) return;
       setError(NETWORK_ERROR_MESSAGE);
-      setMarkdown("");
-      setSnapshot(null);
     } finally {
-      inFlight.current = false;
-      setPending(null);
+      if (requestGeneration === exportGeneration.current) {
+        inFlight.current = false;
+        setPending(null);
+      }
     }
+  }
+
+  function downloadExport(format: "json" | "markdown") {
+    if (!currentExportResult) return;
+    const safeId = safeFilenamePart(props.caseId);
+    const stem = `contextdesk-${safeId}-${currentExportResult.kind}-${currentExportResult.privacyClass}`;
+    const contents =
+      format === "json"
+        ? `${JSON.stringify(currentExportResult, null, 2)}\n`
+        : currentExportResult.markdown;
+    startDownload(
+      new Blob([contents], {
+        type:
+          format === "json"
+            ? "application/json;charset=utf-8"
+            : "text/markdown;charset=utf-8",
+      }),
+      `${stem}.${format === "json" ? "json" : "md"}`,
+      exportObjectUrls.current,
+    );
   }
 
   async function exportBrief(event: FormEvent) {
@@ -561,7 +712,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   }
 
   return (
-    <section className="export" aria-busy={pending !== null ? true : undefined}>
+    <section className="export" aria-busy={currentPending !== null ? true : undefined}>
       <h3 className="export__title">Export</h3>
       <p className="export__copy">
         Projection only — export never edits the case. <code>share_safe</code> is
@@ -679,27 +830,27 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           Export selected-evidence prompt package
         </button>
       </form>
-      {pending ? (
+      {currentPending ? (
         <p className="case-memory__note" role="status">
-          {pending === "brief"
+          {currentPending === "brief"
             ? "Exporting triage brief…"
             : "Exporting selected-evidence prompt package…"} Export buttons stay disabled until
           it finishes; your selection is preserved.
         </p>
       ) : null}
-      {error ? (
+      {currentError ? (
         <p className="export__error" role="alert">
-          {error}
+          {currentError}
         </p>
       ) : null}
-      {findings.length > 0 ? (
+      {currentFindings.length > 0 ? (
         <>
           <p className="case-memory__note">
             The privacy scan blocked this export; nothing left the case. Excerpts below are
             redacted where they may contain sensitive values.
           </p>
           <ul className="export__findings" aria-label="Privacy scan findings">
-            {findings.map((f, i) => (
+            {currentFindings.map((f, i) => (
               <li key={`${f.rule}-${i}`}>
                 <span className="imported-run__text">
                   {f.rule} · {f.path} · {f.excerpt}
@@ -709,29 +860,76 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           </ul>
         </>
       ) : null}
-      {completed ? (
-        <p className="export__copy" role="status">
-          {completed === "brief"
-            ? "Triage brief exported."
-            : "Selected-evidence prompt package exported."} The result below is a read-only
-          projection of the case.
-        </p>
-      ) : null}
-      {snapshot ? (
-        <p className="export__copy">
-          Snapshot identity: <code className="imported-run__text">{snapshot}</code> — the content
-          hash of this export's manifest; identical inputs reproduce the same identity.
-        </p>
-      ) : null}
-      {markdown ? (
-        <pre
-          className="export__markdown"
-          tabIndex={0}
-          role="region"
-          aria-label="Exported markdown"
-        >
-          {markdown}
-        </pre>
+      {currentExportResult ? (
+        <section className="export__result" aria-labelledby="export-result-heading">
+          <div className="export__result-heading">
+            <div>
+              <p className="export__eyebrow">Ready to hand off</p>
+              <h4 id="export-result-heading">Export files</h4>
+            </div>
+            <span className="export__badge">
+              {readablePrivacy(currentExportResult.privacyClass)}
+            </span>
+          </div>
+          <p className="export__copy" role="status">
+            {currentExportResult.kind === "brief"
+              ? "Triage brief exported."
+              : "Selected-evidence prompt package exported."} The checked server result is a
+            read-only projection of this case.
+          </p>
+          <dl className="export__result-facts">
+            <div>
+              <dt>Export type</dt>
+              <dd>
+                {currentExportResult.kind === "brief" ? "Triage brief" : "Prompt package"}
+              </dd>
+            </div>
+            <div>
+              <dt>Privacy</dt>
+              <dd>{readablePrivacy(currentExportResult.privacyClass)}</dd>
+            </div>
+            {envelopeSnapshotIdentity(currentExportResult) ? (
+              <div>
+                <dt>Snapshot identity</dt>
+                <dd>
+                  <code className="imported-run__text">
+                    {envelopeSnapshotIdentity(currentExportResult)}
+                  </code>
+                </dd>
+              </div>
+            ) : null}
+          </dl>
+          {envelopeSnapshotIdentity(currentExportResult) ? (
+            <p className="export__copy">
+              The snapshot identity is the content hash of this package's manifest; identical
+              inputs reproduce the same identity.
+            </p>
+          ) : null}
+          <div className="export__result-actions" aria-label="Export file downloads">
+            <button
+              className="case-memory__secondary-button"
+              type="button"
+              onClick={() => downloadExport("json")}
+            >
+              Download canonical JSON
+            </button>
+            <button
+              className="case-memory__secondary-button"
+              type="button"
+              onClick={() => downloadExport("markdown")}
+            >
+              Download Markdown
+            </button>
+          </div>
+          <pre
+            className="export__markdown"
+            tabIndex={0}
+            role="region"
+            aria-label="Exported markdown"
+          >
+            {currentExportResult.markdown}
+          </pre>
+        </section>
       ) : null}
       <section className="export__portable" aria-labelledby="portable-archive-heading">
         <div className="export__portable-heading">
