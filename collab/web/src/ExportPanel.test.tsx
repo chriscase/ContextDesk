@@ -68,11 +68,98 @@ const SYNTHETIC_ARCHIVE = {
   },
 };
 
+function briefEnvelope(
+  privacyClass: "owner_only" | "share_safe" = "owner_only",
+  caseId = "c1",
+) {
+  return {
+    schemaId: "cd-collab.export_envelope.v1",
+    kind: "brief",
+    privacyClass,
+    exportedAt: "2026-09-09T12:00:00.000Z",
+    payload: {
+      schemaId: "cd-collab.brief.v1",
+      privacyClass,
+      header: {
+        caseId,
+        title: "Synthetic investigation",
+        severity: "medium",
+        status: "open",
+        legalHold: false,
+        retentionClass: "standard",
+      },
+      timeline: [],
+      hypotheses: [],
+      actions: [],
+      evidence: [],
+      attributions: [],
+      importedRuns: [],
+    },
+    markdown: "# Triage brief\n",
+  } as const;
+}
+
+function packageEnvelope(
+  privacyClass: "owner_only" | "share_safe" = "owner_only",
+  caseId = "c1",
+) {
+  return {
+    schemaId: "cd-collab.export_envelope.v1",
+    kind: "package",
+    privacyClass,
+    exportedAt: "2026-09-09T12:00:00.000Z",
+    payload: {
+      schemaId: "cd-collab.prompt_package.v1",
+      privacyClass,
+      caseId,
+      snapshotIdentity: "f".repeat(64),
+      manifest: {
+        schemaId: "cd-collab.package_manifest.v1",
+        caseId,
+        variant: privacyClass,
+        items: [
+          {
+            kind: "artifact",
+            id: "a1",
+            contentHash: "h",
+            privacyClass,
+          },
+        ],
+        promptScaffoldHash: null,
+        excludedByDefault: [],
+      },
+      excerpts: [
+        {
+          kind: "artifact",
+          id: "a1",
+          contentHash: "h",
+          sourceLabel: "Synthetic source",
+          privacyClass,
+          content: privacyClass === "owner_only" ? "Synthetic evidence" : null,
+          bodyIncluded: privacyClass === "owner_only",
+        },
+      ],
+      promptScaffold: null,
+    },
+    markdown: "# Prompt package\n",
+  } as const;
+}
+
 function jsonFile(value: unknown, name = "investigation.json"): File {
   const contents = JSON.stringify(value);
   const file = new File([contents], name, { type: "application/json" });
   Object.defineProperty(file, "text", { value: async () => contents });
   return file;
+}
+
+async function blobText(blob: Blob): Promise<string> {
+  if (typeof blob.text === "function") return blob.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result ?? "")));
+    reader.addEventListener("error", () => reject(reader.error));
+    reader.readAsText(blob);
+  });
 }
 
 describe("export panel", () => {
@@ -94,7 +181,7 @@ describe("export panel", () => {
             ],
           });
         }
-        return jsonResponse(true, { markdown: "# Triage brief\n", payload: {} });
+        return jsonResponse(true, briefEnvelope());
       }
       return jsonResponse(false, {});
     });
@@ -184,10 +271,7 @@ describe("export panel", () => {
       }
       if (url === "/api/cases/c1/export/package") {
         packageBodies.push(JSON.parse(String(init?.body ?? "{}")));
-        return jsonResponse(true, {
-          markdown: "# Prompt package\n",
-          payload: { snapshotIdentity: "f".repeat(64) },
-        });
+        return jsonResponse(true, packageEnvelope());
       }
       return jsonResponse(false, {});
     });
@@ -227,9 +311,174 @@ describe("export panel", () => {
       },
     ]);
     expect(screen.getByText("f".repeat(64))).toBeTruthy();
-    expect(screen.getByText(/content hash of this export's manifest/)).toBeTruthy();
+    expect(screen.getByText(/content hash of this package's manifest/)).toBeTruthy();
     const region = screen.getByRole("region", { name: "Exported markdown" });
     expect(region.textContent).toContain("# Prompt package");
+  });
+
+  it("downloads the validated package envelope and markdown with truthful names", async () => {
+    const envelope = packageEnvelope();
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/case:unsafe/export/inventory") {
+        return jsonResponse(true, { items: [APP_LOG_ITEM] });
+      }
+      if (url === "/api/cases/case:unsafe/export/package") {
+        return jsonResponse(true, packageEnvelope("owner_only", "case:unsafe"));
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const blobs: Blob[] = [];
+    const createObjectURL = vi.fn((blob: Blob) => {
+      blobs.push(blob);
+      return `blob:export-${blobs.length}`;
+    });
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const downloadNames: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      expect(this.isConnected).toBe(true);
+      downloadNames.push(this.download);
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    const view = render(<ExportPanel caseId="case:unsafe" canWrite canLead />);
+    expect(screen.queryByRole("button", { name: "Download canonical JSON" })).toBeNull();
+    await screen.findByText(/app.log/);
+    fireEvent.click(screen.getByRole("checkbox", { name: /app\.log/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Export selected-evidence prompt package" }),
+    );
+    expect(await screen.findByText("Prompt package")).toBeTruthy();
+    expect(screen.getAllByText("owner only").length).toBeGreaterThan(0);
+    expect(screen.getByText("f".repeat(64))).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Download canonical JSON" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download Markdown" }));
+    expect(downloadNames).toEqual([
+      "contextdesk-case-unsafe-package-owner_only.json",
+      "contextdesk-case-unsafe-package-owner_only.md",
+    ]);
+    expect(blobs.map((blob) => blob.type)).toEqual([
+      "application/json;charset=utf-8",
+      "text/markdown;charset=utf-8",
+    ]);
+    expect(await blobText(blobs[0]!)).toBe(
+      `${JSON.stringify(packageEnvelope("owner_only", "case:unsafe"), null, 2)}\n`,
+    );
+    expect(await blobText(blobs[1]!)).toBe(envelope.markdown);
+
+    view.unmount();
+    expect(revokeObjectURL.mock.calls.map(([url]) => url)).toEqual([
+      "blob:export-1",
+      "blob:export-2",
+    ]);
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(revokeObjectURL).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("fails closed on a mismatched or malformed export and clears the previous result", async () => {
+    let calls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/export/inventory") {
+        return jsonResponse(true, { items: [APP_LOG_ITEM] });
+      }
+      if (url === "/api/cases/c1/export/brief") {
+        calls += 1;
+        if (calls === 1) return jsonResponse(true, briefEnvelope());
+        if (calls === 2) return jsonResponse(true, briefEnvelope("owner_only", "another-case"));
+        return jsonResponse(true, { markdown: "unvalidated" });
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    await screen.findByText(/app.log/);
+
+    const button = screen.getByRole("button", { name: "Export triage brief" });
+    fireEvent.click(button);
+    expect(await screen.findByRole("button", { name: "Download canonical JSON" })).toBeTruthy();
+    fireEvent.click(button);
+    expect(await screen.findByText(/server returned an invalid export result/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Download canonical JSON" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Exported markdown" })).toBeNull();
+
+    fireEvent.click(button);
+    expect(await screen.findByText(/server returned an invalid export result/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Download Markdown" })).toBeNull();
+  });
+
+  it("conceals a prior case export immediately and ignores its late response after scope changes", async () => {
+    const secondExport = deferred<MockResponse>();
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/export/inventory")) {
+        return jsonResponse(true, { items: [APP_LOG_ITEM] });
+      }
+      if (url === "/api/cases/c1/export/brief") {
+        return jsonResponse(true, briefEnvelope("owner_only", "c1"));
+      }
+      if (url === "/api/cases/c2/export/brief") {
+        return secondExport.promise;
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<ExportPanel caseId="c1" canWrite canLead />);
+    await screen.findByText(/app.log/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    expect(await screen.findByText("Triage brief exported.", { exact: false })).toBeTruthy();
+
+    view.rerender(<ExportPanel caseId="c2" canWrite canLead />);
+    expect(screen.queryByRole("button", { name: "Download canonical JSON" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Exported markdown" })).toBeNull();
+    await screen.findByText(/app.log/);
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    expect(await screen.findByText(/Exporting triage brief…/)).toBeTruthy();
+
+    view.rerender(<ExportPanel caseId="c3" canWrite canLead />);
+    await act(async () => {
+      secondExport.resolve(jsonResponse(true, briefEnvelope("owner_only", "c2")));
+      await secondExport.promise;
+    });
+    expect(screen.queryByText(/Triage brief exported/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Download canonical JSON" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not offer a package download for an invalid snapshot identity", async () => {
+    const valid = packageEnvelope();
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/export/inventory") {
+        return jsonResponse(true, { items: [APP_LOG_ITEM] });
+      }
+      if (url === "/api/cases/c1/export/package") {
+        return jsonResponse(true, {
+          ...valid,
+          payload: { ...valid.payload, snapshotIdentity: "not-a-content-hash" },
+        });
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    await screen.findByText(/app.log/);
+    fireEvent.click(screen.getByRole("checkbox", { name: /app\.log/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Export selected-evidence prompt package" }),
+    );
+    expect(await screen.findByText(/server returned an invalid export result/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Download canonical JSON" })).toBeNull();
+    expect(screen.queryByText("not-a-content-hash")).toBeNull();
   });
 
   it("disables both submits and shows progress while an export is in flight", async () => {
@@ -263,7 +512,7 @@ describe("export panel", () => {
     ).toBe(true);
     expect((screen.getByDisplayValue("owner_only") as HTMLSelectElement).disabled).toBe(true);
     fireEvent.submit(screen.getByRole("form", { name: "Export triage brief" }));
-    briefGate.resolve(jsonResponse(true, { markdown: "# Triage brief\n", payload: {} }));
+    briefGate.resolve(jsonResponse(true, briefEnvelope()));
     expect(await screen.findByText(/Triage brief exported\./)).toBeTruthy();
     expect(briefCalls).toBe(1);
     expect(briefButton.disabled).toBe(false);
@@ -281,7 +530,7 @@ describe("export panel", () => {
       if (url === "/api/cases/c1/export/brief") {
         briefCalls += 1;
         if (briefCalls === 1) throw new TypeError("network down");
-        return jsonResponse(true, { markdown: "# Triage brief\n", payload: {} });
+        return jsonResponse(true, briefEnvelope());
       }
       return jsonResponse(false, {});
     });
@@ -328,7 +577,7 @@ describe("export panel", () => {
         return jsonResponse(true, { items: [APP_LOG_ITEM] });
       }
       if (url === "/api/cases/c1/export/brief") {
-        return jsonResponse(true, { markdown: "# Triage brief\n", payload: {} });
+        return jsonResponse(true, briefEnvelope());
       }
       return jsonResponse(false, {});
     });
@@ -362,7 +611,10 @@ describe("export panel", () => {
       return jsonResponse(false, {});
     });
     vi.stubGlobal("fetch", fetchMock);
-    const createObjectURL = vi.fn(() => "blob:portable-archive");
+    const createObjectURL = vi
+      .fn()
+      .mockReturnValueOnce("blob:portable-archive-1")
+      .mockReturnValueOnce("blob:portable-archive-2");
     const revokeObjectURL = vi.fn();
     vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
     let downloadName = "";
@@ -375,7 +627,7 @@ describe("export panel", () => {
     });
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
-    render(<ExportPanel caseId="case-safe" canWrite canLead />);
+    const view = render(<ExportPanel caseId="case-safe" canWrite canLead />);
     const button = await screen.findByRole("button", {
       name: "Download portable investigation archive",
     });
@@ -395,11 +647,19 @@ describe("export panel", () => {
     await act(async () => {
       vi.advanceTimersByTime(5_000);
     });
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive-1");
     expect(screen.getByText(/Unlike the selected-evidence package above/)).toBeTruthy();
     expect(screen.getByText(/supported only by this single server instance/)).toBeTruthy();
     expect(screen.getByText(/Restore requires an exact reconstruction/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
+    fireEvent.click(button);
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(2));
+    view.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive-2");
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(revokeObjectURL).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 
