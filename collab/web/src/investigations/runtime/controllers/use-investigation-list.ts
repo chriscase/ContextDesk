@@ -212,11 +212,22 @@ function accumulatedPage(
   previous: InvestigationCollectionPageV1,
   next: InvestigationCollectionPageV1,
 ): InvestigationCollectionPageV1 {
-  const items = [...previous.items, ...next.items];
+  const seen = new Set<string>();
+  const items: CaseV1[] = [];
+  for (const item of previous.items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    items.push(item);
+  }
+  for (const item of next.items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    items.push(item);
+  }
   Object.freeze(items);
   // Facets and the hidden-archive count are computed over the authorized
   // collection, not the individual cursor page. Keep the newest server
-  // projection while accumulating only the ordered page items.
+  // projection while accumulating unique identities in first-seen order.
   return Object.freeze({
     ...next,
     items,
