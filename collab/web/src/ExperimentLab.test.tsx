@@ -84,6 +84,7 @@ const goldView = {
       revision: 2,
       text: "Treat inventory timeout as the benchmark cause.",
       rationale: "Human benchmark, not a truth claim.",
+      evidenceRefs: ["ev-demo-checkout-log"],
     },
   ],
   gold: {
@@ -482,19 +483,23 @@ describe("experiment lab", () => {
       "Expected role for synthetic-checkout-timeout.log",
       "Expected role for synthetic-inventory-timeout.log",
     ]);
-    const selectedEvidence = within(benchmarkEvidence).getAllByRole("checkbox")[0]!;
-    fireEvent.click(selectedEvidence);
-    await waitFor(() =>
-      expect(
-        (within(benchmarkEvidence).getAllByRole("checkbox")[0] as HTMLInputElement).checked,
-      ).toBe(true),
-    );
-    fireEvent.change(within(benchmarkEvidence).getAllByRole("combobox")[0]!, {
+    const evidenceChoices = within(benchmarkEvidence).getAllByRole("checkbox") as HTMLInputElement[];
+    expect(evidenceChoices.map((choice) => choice.checked)).toEqual([true, false]);
+    expect(
+      fetchMock.mock.calls.some(([url, init]) => String(url).endsWith("/gold") && init?.method === "POST"),
+    ).toBe(false);
+
+    // The recorded choice is only a starting point: an operator can remove it
+    // and explicitly replace it before creating a new benchmark version.
+    fireEvent.click(evidenceChoices[0]!);
+    fireEvent.click(evidenceChoices[1]!);
+    expect(evidenceChoices.map((choice) => choice.checked)).toEqual([false, true]);
+    fireEvent.change(within(benchmarkEvidence).getAllByRole("combobox")[1]!, {
       target: { value: "symptom" },
     });
     await waitFor(() =>
       expect(
-        (within(benchmarkEvidence).getAllByRole("combobox")[0] as HTMLSelectElement).value,
+        (within(benchmarkEvidence).getAllByRole("combobox")[1] as HTMLSelectElement).value,
       ).toBe("symptom"),
     );
     fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
@@ -508,10 +513,333 @@ describe("experiment lab", () => {
       ([url, init]) => String(url).endsWith("/gold") && init?.method === "POST",
     )!;
     const body = JSON.parse(String(goldCall[1]?.body)) as Record<string, unknown>;
-    expect(body.evidenceAnchors).toEqual(["ev-demo-checkout-log"]);
+    expect(body.evidenceAnchors).toEqual(["ev-demo-inventory-timeout"]);
     expect(body.expectedRelationships).toEqual([
-      { evidenceRef: "ev-demo-checkout-log", role: "symptom" },
+      { evidenceRef: "ev-demo-inventory-timeout", role: "symptom" },
     ]);
+  });
+
+  it("does not invent choices from stale or malformed accepted-decision evidence", async () => {
+    const staleDecisionView = {
+      ...goldView,
+      decisions: [{
+        ...goldView.decisions[0],
+        evidenceRefs: [
+          "ev-demo-checkout-log",
+          "ev-stale-missing",
+          "../../private-evidence",
+          "",
+          "ev-demo-checkout-log",
+        ],
+      }],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/experiments") && !init?.method) {
+        return { ok: true, json: async () => ({ experiments: [staleDecisionView] }) };
+      }
+      if (url.endsWith("/evidence") || url.endsWith("/snapshots")) {
+        return {
+          ok: true,
+          json: async () => url.endsWith("/evidence") ? { artifacts: [] } : { snapshots: [] },
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+
+    const benchmarkEvidence = await screen.findByRole("group", {
+      name: "Evidence anchors for this human benchmark",
+    });
+    const choices = within(benchmarkEvidence).getAllByRole("checkbox") as HTMLInputElement[];
+    expect(choices).toHaveLength(1);
+    expect(choices[0]?.checked).toBe(true);
+    expect(benchmarkEvidence.textContent).not.toContain("ev-stale-missing");
+    expect(benchmarkEvidence.textContent).not.toContain("../../private-evidence");
+
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(
+      ([url, init]) => String(url).endsWith("/gold") && init?.method === "POST",
+    )).toBe(true));
+    const goldCall = fetchMock.mock.calls.find(
+      ([url, init]) => String(url).endsWith("/gold") && init?.method === "POST",
+    )!;
+    expect(JSON.parse(String(goldCall[1]?.body)).evidenceAnchors).toEqual([
+      "ev-demo-checkout-log",
+    ]);
+  });
+
+  it("seeds late snapshot evidence once without stealing focus or undoing removal and reset", async () => {
+    const snapshotAcceptedView = {
+      ...goldView,
+      agreement: {
+        sharedAnchors: [],
+        candidateSpecific: [],
+        roleConflicts: [],
+        notes: ["Provider-free simulation did not inspect evidence."],
+      },
+      decisions: [{
+        ...goldView.decisions[0],
+        evidenceRefs: ["ev-snapshot-only"],
+      }],
+    };
+    let releaseSnapshot: (() => void) | undefined;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [snapshotAcceptedView] }) };
+      }
+      if (url.endsWith("/evidence")) {
+        return {
+          ok: true,
+          json: async () => ({ artifacts: [{
+            id: "ev-snapshot-only",
+            kind: "log",
+            filename: "snapshot-only.log",
+            uri: null,
+            mediaType: "text/plain",
+            privacyClass: "owner_only",
+            verificationStatus: "verified",
+          }] }),
+        };
+      }
+      if (url.endsWith("/snapshots")) {
+        await snapshotGate;
+        return {
+          ok: true,
+          json: async () => ({ snapshots: [{
+            id: "snapshot-1",
+            fingerprint: view.snapshotFingerprint.slice("snap-".length),
+            evidence: [{ evidenceId: "ev-snapshot-only" }],
+            createdBy: "demo",
+          }] }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+
+    const benchmarkEvidence = await screen.findByRole("group", {
+      name: "Evidence anchors for this human benchmark",
+    });
+    const search = within(benchmarkEvidence).getByRole("searchbox");
+    search.focus();
+    expect(document.activeElement).toBe(search);
+
+    releaseSnapshot?.();
+    const choice = await within(benchmarkEvidence).findByRole("checkbox") as HTMLInputElement;
+    await waitFor(() => expect(choice.checked).toBe(true));
+    expect(document.activeElement).toBe(search);
+    expect(fetchMock.mock.calls.some(
+      ([url]) => String(url).endsWith("/gold"),
+    )).toBe(false);
+
+    fireEvent.click(choice);
+    expect(choice.checked).toBe(false);
+    fireEvent.change(search, { target: { value: "snapshot" } });
+    expect((within(benchmarkEvidence).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    const form = benchmarkEvidence.closest("form");
+    expect(form).not.toBeNull();
+    fireEvent.reset(form!);
+    expect((within(benchmarkEvidence).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("keeps an explicit form reset empty when accepted snapshot evidence arrives later", async () => {
+    const snapshotAcceptedView = {
+      ...goldView,
+      agreement: {
+        sharedAnchors: [],
+        candidateSpecific: [],
+        roleConflicts: [],
+        notes: ["Provider-free simulation did not inspect evidence."],
+      },
+      decisions: [{
+        ...goldView.decisions[0],
+        evidenceRefs: ["ev-snapshot-only"],
+      }],
+    };
+    let releaseSnapshot: (() => void) | undefined;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [snapshotAcceptedView] }) };
+      }
+      if (url.endsWith("/evidence")) {
+        return {
+          ok: true,
+          json: async () => ({ artifacts: [{
+            id: "ev-snapshot-only",
+            kind: "log",
+            filename: "snapshot-only.log",
+            uri: null,
+            mediaType: "text/plain",
+            privacyClass: "owner_only",
+            verificationStatus: "verified",
+          }] }),
+        };
+      }
+      if (url.endsWith("/snapshots")) {
+        await snapshotGate;
+        return {
+          ok: true,
+          json: async () => ({ snapshots: [{
+            id: "snapshot-1",
+            fingerprint: view.snapshotFingerprint.slice("snap-".length),
+            evidence: [{ evidenceId: "ev-snapshot-only" }],
+            createdBy: "demo",
+          }] }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+
+    const benchmarkEvidence = await screen.findByRole("group", {
+      name: "Evidence anchors for this human benchmark",
+    });
+    const form = benchmarkEvidence.closest("form");
+    expect(form).not.toBeNull();
+    fireEvent.reset(form!);
+    releaseSnapshot?.();
+
+    const choice = await within(benchmarkEvidence).findByRole("checkbox") as HTMLInputElement;
+    await waitFor(() => expect(choice.checked).toBe(false));
+    expect(fetchMock.mock.calls.some(
+      ([url]) => String(url).endsWith("/gold"),
+    )).toBe(false);
+  });
+
+  it("re-seeds only when the accepted decision revision changes after explicit promotion", async () => {
+    const refsView = {
+      ...goldView,
+      agreement: {
+        ...goldView.agreement,
+        candidateSpecific: [{
+          candidateId: "cand-qwen-3.6-27b",
+          evidenceRefs: ["ev-demo-inventory-timeout"],
+        }],
+      },
+    };
+    const revisedView = {
+      ...refsView,
+      decisions: [{
+        ...refsView.decisions[0],
+        revision: 3,
+        evidenceRefs: ["ev-demo-inventory-timeout"],
+      }],
+    };
+    let promotionCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/gold") && init?.method === "POST") {
+        promotionCount += 1;
+        return { ok: true, json: async () => ({}) };
+      }
+      if (url.endsWith("/experiments") && !init?.method) {
+        return {
+          ok: true,
+          json: async () => ({ experiments: [promotionCount > 1 ? revisedView : refsView] }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+
+    let benchmarkEvidence = await screen.findByRole("group", {
+      name: "Evidence anchors for this human benchmark",
+    });
+    expect(
+      (within(benchmarkEvidence).getAllByRole("checkbox") as HTMLInputElement[])
+        .map((choice) => choice.checked),
+    ).toEqual([true, false]);
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+
+    await waitFor(() => {
+      benchmarkEvidence = screen.getByRole("group", {
+        name: "Evidence anchors for this human benchmark",
+      });
+      expect(
+        (within(benchmarkEvidence).getAllByRole("checkbox") as HTMLInputElement[])
+          .map((choice) => choice.checked),
+      ).toEqual([false, false]);
+    });
+    fireEvent.click(
+      (within(benchmarkEvidence).getAllByRole("checkbox") as HTMLInputElement[])[1]!,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+
+    await waitFor(() => {
+      benchmarkEvidence = screen.getByRole("group", {
+        name: "Evidence anchors for this human benchmark",
+      });
+      expect(
+        (within(benchmarkEvidence).getAllByRole("checkbox") as HTMLInputElement[])
+          .map((choice) => choice.checked),
+      ).toEqual([false, true]);
+    });
+    expect(fetchMock.mock.calls.filter(
+      ([url, init]) => String(url).endsWith("/gold") && init?.method === "POST",
+    )).toHaveLength(2);
+  });
+
+  it("scopes accepted evidence to the selected experiment", async () => {
+    const withBothRefs = {
+      ...goldView,
+      agreement: {
+        ...goldView.agreement,
+        candidateSpecific: [{
+          candidateId: "cand-qwen-3.6-27b",
+          evidenceRefs: ["ev-demo-inventory-timeout"],
+        }],
+      },
+    };
+    const older = {
+      ...withBothRefs,
+      id: "exp-older-prefill",
+      createdAt: "2026-08-01T00:00:00.000Z",
+    };
+    const newer = {
+      ...withBothRefs,
+      id: "exp-newer-prefill",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      decisions: [{
+        ...withBothRefs.decisions[0],
+        id: "dec-newer-prefill",
+        evidenceRefs: ["ev-demo-inventory-timeout"],
+      }],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      if (String(input).endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [older, newer] }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+
+    let choices = within(await screen.findByRole("group", {
+      name: "Evidence anchors for this human benchmark",
+    })).getAllByRole("checkbox") as HTMLInputElement[];
+    expect(choices.map((choice) => choice.checked)).toEqual([false, true]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Comparison 1:/ }));
+    choices = within(screen.getByRole("group", {
+      name: "Evidence anchors for this human benchmark",
+    })).getAllByRole("checkbox") as HTMLInputElement[];
+    expect(choices.map((choice) => choice.checked)).toEqual([true, false]);
+    expect(fetchMock.mock.calls.some(
+      ([url]) => String(url).endsWith("/gold"),
+    )).toBe(false);
   });
 
   it("keeps raw benchmark and decision identities out of primary summaries", async () => {
