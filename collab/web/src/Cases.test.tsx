@@ -244,7 +244,7 @@ describe("war room overview", () => {
     });
     render(<Cases roles={["contributor"]} view="investigations" />);
     const product = await screen.findByRole("combobox", { name: "Investigation context: Software or product" });
-    const list = document.getElementById("investigation-context-options-productName");
+    const list = document.getElementById("new-investigation-context-options-productName");
     expect(list?.querySelector('option[value="Fixture Desk"]')).toBeTruthy();
 
     fireEvent.change(product, { target: { value: "A brand-new product label" } });
@@ -256,6 +256,57 @@ describe("war room overview", () => {
     fireEvent.change(search, { target: { value: "qa / US-CENTRAL" } });
     expect(screen.getByRole("button", { name: "Fixture incident" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Search indexing" })).toBeNull();
+  });
+
+  it("keeps recorded-context helper ids scoped to the active War Room editor", async () => {
+    stubCaseFetch({
+      cases: [{
+        ...fixtureCases[0],
+        investigationContext: {
+          productName: "Fixture Desk",
+          version: "4.2",
+          build: "build-007",
+          component: "queue-worker",
+          environment: "QA / us-central",
+          organization: "Synthetic Harbor",
+        },
+      }],
+    });
+    render(<Cases roles={["contributor"]} view="investigations" />);
+
+    const createProduct = await screen.findByRole("combobox", {
+      name: "Investigation context: Software or product",
+    });
+    const createListId = createProduct.getAttribute("list");
+    const createHintId = createProduct.getAttribute("aria-describedby");
+    expect(createListId).toBe("new-investigation-context-options-productName");
+    expect(createHintId).toBe(`${createListId}-hint`);
+    expect(document.getElementById(createListId ?? "")?.tagName).toBe("DATALIST");
+    expect(document.getElementById(createHintId ?? "")?.textContent)
+      .toBe("Choose a recorded value or enter a new one.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Fixture incident" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit situation" }));
+
+    const situationProduct = screen.getByRole("combobox", {
+      name: "Investigation context: Software or product",
+    });
+    const situationListId = situationProduct.getAttribute("list");
+    const situationHintId = situationProduct.getAttribute("aria-describedby");
+    expect(situationListId).toBe("situation-context-options-productName");
+    expect(situationHintId).toBe(`${situationListId}-hint`);
+    expect(situationListId).not.toBe(createListId);
+    expect(situationHintId).not.toBe(createHintId);
+    expect(document.getElementById(situationListId ?? "")?.tagName).toBe("DATALIST");
+    expect(document.getElementById(situationHintId ?? "")?.textContent)
+      .toBe("Existing recorded value selected.");
+    expect(document.getElementById(createListId ?? "")).toBeNull();
+    expect(document.getElementById(createHintId ?? "")).toBeNull();
+
+    const helperIds = [...document.querySelectorAll(
+      "datalist[id], .recorded-context-combo__hint[id]",
+    )].map((node) => node.id);
+    expect(new Set(helperIds).size).toBe(helperIds.length);
   });
 
   it("does not offer investigation creation to a viewer", async () => {
@@ -3158,7 +3209,7 @@ describe("War Room collection-query browse", () => {
       }}
     />);
     await screen.findByRole("button", { name: item.title });
-    const list = document.getElementById("investigation-context-options-productName");
+    const list = document.getElementById("new-investigation-context-options-productName");
     expect(list?.querySelector('option[value="Authorized off-page product"]')).toBeTruthy();
     expect(list?.querySelector(`option[value="${item.investigationContext?.productName ?? ""}"]`)).toBeNull();
   });
@@ -3183,7 +3234,7 @@ describe("War Room collection-query browse", () => {
     expect(hint?.textContent).toBe("Recorded values were not requested because your current access does not include reading investigations. You can still enter a value.");
     expect(hint?.getAttribute("aria-live")).toBeNull();
     expect((product as HTMLInputElement).disabled).toBe(false);
-    expect(document.getElementById("investigation-context-options-productName")?.children).toHaveLength(0);
+    expect(document.getElementById("new-investigation-context-options-productName")?.children).toHaveLength(0);
     expect(screen.queryByRole("button", { name: /retry recorded values/i })).toBeNull();
     await waitFor(() => {
       const caseReads = stub.mock.calls

@@ -1400,7 +1400,7 @@ export function Cases(props: {
               id={`new-investigation-context-${field}`}
               label={CONTEXT_FIELD_LABELS[field]}
               ariaLabel={`Investigation context: ${CONTEXT_FIELD_LABELS[field]}`}
-              listId={`investigation-context-options-${field}`}
+              listId={`new-investigation-context-options-${field}`}
               inputClassName="login__input"
               value={newSituation.investigationContext[field]}
               options={recordedContextOptions(recordedContextCatalog.records, field, newSituation.investigationContext)}
@@ -2257,7 +2257,7 @@ export function Cases(props: {
                         id={`situation-context-${field}`}
                         label={CONTEXT_FIELD_LABELS[field]}
                         ariaLabel={`Investigation context: ${CONTEXT_FIELD_LABELS[field]}`}
-                        listId={`investigation-context-options-${field}`}
+                        listId={`situation-context-options-${field}`}
                         inputClassName="login__input"
                         value={situationDraft.investigationContext[field]}
                         options={recordedContextOptions(recordedContextCatalog.records, field, situationDraft.investigationContext)}
