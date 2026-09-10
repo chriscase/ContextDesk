@@ -215,8 +215,11 @@ configured evidence location without starting ContextDesk:
 
 ```bash
 cd collab
-npm run evidence:identity -- inspect --env-file .env.local
+npm run evidence:identity -- inspect --env-file ../.env.local
 ```
+
+The workspace script runs from `collab/server`, so relative `--env-file` paths
+are resolved from that directory; `../.env.local` names `collab/.env.local`.
 
 Inspection is read-only. It does not create the private marker, test bucket or
 filesystem readiness, run pending-write recovery, or modify evidence. An
@@ -239,7 +242,7 @@ empty:
 
 ```bash
 cd collab
-npm run evidence:identity -- init --env-file .env.local --yes
+npm run evidence:identity -- init --env-file ../.env.local --yes
 ```
 
 `init` requires both a canonical configured pin and the exact `--yes`
