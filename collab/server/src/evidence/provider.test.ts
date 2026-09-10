@@ -331,6 +331,7 @@ describe("evidence runtime provider identity startup", () => {
       const runtime = createEvidenceRuntime({
         settings: filesystemSettings("sqlite", root),
       });
+      expect(await runtime.inspectProviderInstance()).toBeNull();
       expect(await runtime.initializeProviderInstance()).toBeNull();
       await expect(lstat(root)).rejects.toMatchObject({ code: "ENOENT" });
       expect(runtime.store).toBeInstanceOf(FilesystemEvidenceStore);
@@ -349,6 +350,8 @@ describe("evidence runtime provider identity startup", () => {
           expectedProviderInstanceId: PROVIDER_INSTANCE_ID,
         },
       });
+      expect(await runtime.inspectProviderInstance()).toBeNull();
+      await expect(lstat(root)).rejects.toMatchObject({ code: "ENOENT" });
       const initialized = await runtime.initializeProviderInstance();
       expect(initialized?.manifest).toEqual({
         schemaId: EVIDENCE_PROVIDER_INSTANCE_SCHEMA_ID,
@@ -357,6 +360,7 @@ describe("evidence runtime provider identity startup", () => {
       });
       const bytes = await readFile(join(root, ".contextdesk", "provider-instance.v1.json"));
       expect(parseEvidenceProviderInstance(bytes)).toEqual(initialized?.manifest);
+      expect(await runtime.inspectProviderInstance()).toEqual(initialized?.manifest);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
@@ -376,6 +380,8 @@ describe("evidence runtime provider identity startup", () => {
         return fake;
       },
     });
+    expect(await runtime.inspectProviderInstance()).toBeNull();
+    expect(fake.calls.map((call) => call.name)).toEqual(["HeadObjectCommand"]);
     const initialized = await runtime.initializeProviderInstance();
     expect(constructed).toBe(1);
     expect(initialized?.manifest.providerInstanceId).toBe(PROVIDER_INSTANCE_ID);
@@ -383,7 +389,7 @@ describe("evidence runtime provider identity startup", () => {
     expect(
       fake.calls.filter((call) =>
         call.input.Key === `assigned-prefix/${EVIDENCE_PROVIDER_INSTANCE_S3_KEY}`),
-    ).toHaveLength(5);
+    ).toHaveLength(6);
     expect(fake.calls.find((call) => call.name === "PutObjectCommand")?.input)
       .toMatchObject({ IfNoneMatch: "*" });
   });
@@ -395,11 +401,13 @@ describe("evidence runtime provider identity startup", () => {
       credentials: staticCredentials(),
       createS3Client: () => fake,
     });
+    expect(await runtime.inspectProviderInstance()).toBeNull();
     expect(await runtime.initializeProviderInstance()).toBeNull();
     expect(
       fake.calls.filter((call) =>
         String(call.input.Key ?? "").includes(EVIDENCE_PROVIDER_INSTANCE_S3_KEY)),
     ).toEqual([]);
+    expect(fake.calls).toEqual([]);
     expect(runtime.store).toBeInstanceOf(S3EvidenceStore);
   });
 

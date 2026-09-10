@@ -36,6 +36,7 @@ import { S3EvidenceProviderInstanceManager } from "./provider-instance-s3.js";
 import type {
   EvidenceProviderInstanceInitialization,
   EvidenceProviderInstanceManager,
+  EvidenceProviderInstanceV1,
 } from "./provider-instance.js";
 import {
   FilesystemEvidenceStore,
@@ -80,6 +81,7 @@ export interface CreateEvidenceStoreOptions {
 
 export interface EvidenceRuntime {
   readonly store: RuntimeEvidenceStore;
+  inspectProviderInstance(): Promise<EvidenceProviderInstanceV1 | null>;
   initializeProviderInstance(): Promise<EvidenceProviderInstanceInitialization | null>;
 }
 
@@ -190,6 +192,13 @@ function bindEvidenceRuntime(
 ): EvidenceRuntime {
   return Object.freeze({
     store,
+    inspectProviderInstance: expectedProviderInstanceId === undefined
+      ? async () => null
+      : manager === null
+        ? async () => {
+            throw new Error(EVIDENCE_PROVIDER_INSTANCE_RUNTIME_REQUIRED);
+          }
+        : () => manager.inspect(expectedProviderInstanceId),
     initializeProviderInstance: expectedProviderInstanceId === undefined
       ? async () => null
       : manager === null

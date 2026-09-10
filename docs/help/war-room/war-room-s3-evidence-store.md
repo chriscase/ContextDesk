@@ -208,6 +208,53 @@ delete, rotate, repair, or hand-edit the marker to make a mismatch disappear.
 This release provides no provider-identity rotation, migration, deletion, or
 repair workflow.
 
+#### Inspect or initialize the identity before startup
+
+After setting `COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID`, operators can inspect the
+configured evidence location without starting ContextDesk:
+
+```bash
+cd collab
+npm run evidence:identity -- inspect --env-file .env.local
+```
+
+Inspection is read-only. It does not create the private marker, test bucket or
+filesystem readiness, run pending-write recovery, or modify evidence. An
+unconfigured pin reports `legacy_unbound` without contacting the evidence
+provider. A configured location reports only a sanitized status and provider
+kind; output never includes the UUID, filesystem root, bucket, prefix,
+endpoint, credential material, or marker location.
+
+The environment file overlays the command's current process environment, with
+values in the file taking precedence. This matches the other operator tools
+and permits S3 default-chain credentials to remain process-managed. Run the
+command from a controlled operator shell and confirm that the combined
+environment names the intended provider location before using `init`.
+
+Initialize a provider location only after checking the environment file,
+recording the configured UUID in the deployment backup, and independently
+establishing that the root or bucket-plus-prefix contains no legacy evidence.
+The identity command does not enumerate evidence or verify that a location is
+empty:
+
+```bash
+cd collab
+npm run evidence:identity -- init --env-file .env.local --yes
+```
+
+`init` requires both a canonical configured pin and the exact `--yes`
+confirmation. It conditionally creates the identity marker or confirms an
+existing matching marker. A `reconciled` success means an uncertain create
+response was followed by a successful read-back of the configured identity;
+the command did not replay the create automatically. It does not ping the
+provider, run evidence write recovery, overwrite a mismatched marker, retry an
+unknown initialization
+outcome, or fall back to legacy-unbound mode. Treat `identity_mismatch`,
+`invalid`, `unavailable`, and `initialization_outcome_unknown` as stop
+conditions: verify the intended root or bucket-plus-prefix and restore the
+correct backed-up configuration. Do not rotate, copy, delete, repair, or
+hand-edit the marker.
+
 With PostgreSQL, the process uses a database advisory lease to coordinate
 evidence write batches across application replicas. SQLite has no external
 lease: SQLite plus S3 is a single-process evaluation shape, and doctor reports

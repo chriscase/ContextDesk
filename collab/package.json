@@ -24,6 +24,7 @@
     "qualify:live": "npm run build -w @cd-collab/contracts && npm run build -w @cd-collab/server && node server/dist/live-qualification-cli.js",
     "doctor": "npm run build && node server/dist/doctor-cli.js",
     "config:init": "npm run build && node server/dist/config-init-cli.js",
+    "evidence:identity": "npm run build -w @cd-collab/contracts && npm run build -w @cd-collab/server && npm run evidence:identity -w @cd-collab/server --",
     "demo:check": "npm run typecheck && npm run lint && npm test && npm run demo:static",
     "dev": "npm run dev -w @cd-collab/server",
     "start": "npm run start -w @cd-collab/server"
