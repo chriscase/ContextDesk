@@ -31,6 +31,12 @@ import {
   type S3EvidenceClient,
   type S3EvidenceStoreOptions,
 } from "./s3-store.js";
+import { FilesystemEvidenceProviderInstanceManager } from "./provider-instance-filesystem.js";
+import { S3EvidenceProviderInstanceManager } from "./provider-instance-s3.js";
+import type {
+  EvidenceProviderInstanceInitialization,
+  EvidenceProviderInstanceManager,
+} from "./provider-instance.js";
 import {
   FilesystemEvidenceStore,
   type EvidenceStore,
@@ -44,6 +50,8 @@ export const EVIDENCE_S3_CLIENT_MAX_ATTEMPTS = 3;
 
 export const EVIDENCE_S3_PROVIDER_CONFIG_ERROR =
   "s3 evidence configuration is invalid";
+export const EVIDENCE_PROVIDER_INSTANCE_RUNTIME_REQUIRED =
+  "configured evidence provider identity requires the evidence runtime startup path";
 
 export interface EvidenceS3RequestHandlerOptions {
   connectionTimeout: number;
@@ -70,24 +78,56 @@ export interface CreateEvidenceStoreOptions {
   createRequestHandler?: (options: EvidenceS3RequestHandlerOptions) => unknown;
 }
 
+export interface EvidenceRuntime {
+  readonly store: RuntimeEvidenceStore;
+  initializeProviderInstance(): Promise<EvidenceProviderInstanceInitialization | null>;
+}
+
 export function createEvidenceStore(
   options: CreateEvidenceStoreOptions,
 ): RuntimeEvidenceStore {
+  if (options.settings.expectedProviderInstanceId !== undefined) {
+    throw new Error(EVIDENCE_PROVIDER_INSTANCE_RUNTIME_REQUIRED);
+  }
+  return createEvidenceRuntime(options).store;
+}
+
+export function createEvidenceRuntime(
+  options: CreateEvidenceStoreOptions,
+): EvidenceRuntime {
   const acquireWriteLease = writeLeaseFromPool(options);
   if (options.settings.provider === "filesystem") {
-    return new FilesystemEvidenceStore({
+    const store = new FilesystemEvidenceStore({
       rootDir: options.settings.controlRoot,
       ...(acquireWriteLease ? { acquireWriteLease } : {}),
     });
+    return bindEvidenceRuntime(
+      store,
+      options.settings.expectedProviderInstanceId === undefined
+        ? null
+        : new FilesystemEvidenceProviderInstanceManager({
+            rootDir: options.settings.controlRoot,
+          }),
+      options.settings.expectedProviderInstanceId,
+    );
   }
   if (options.settings.provider !== "s3") {
     failClosed();
   }
   try {
-    return createS3EvidenceStore(options, acquireWriteLease);
+    return createS3EvidenceRuntime(options, acquireWriteLease);
   } catch (error) {
     rethrowSanitized(error);
   }
+}
+
+export async function prepareEvidenceRuntime(
+  runtime: EvidenceRuntime,
+): Promise<EvidenceProviderInstanceInitialization | null> {
+  const identity = await runtime.initializeProviderInstance();
+  await runtime.store.ping();
+  await runtime.store.recoverUnreferencedWrites();
+  return identity;
 }
 
 function writeLeaseFromPool(
@@ -99,10 +139,10 @@ function writeLeaseFromPool(
   return create(pool);
 }
 
-function createS3EvidenceStore(
+function createS3EvidenceRuntime(
   options: CreateEvidenceStoreOptions,
   acquireWriteLease: (() => Promise<EvidenceWriteLeaseRelease>) | undefined,
-): RuntimeEvidenceStore {
+): EvidenceRuntime {
   const settings = options.settings;
   if (settings.provider !== "s3") failClosed();
   assertConsistentS3Settings(settings.s3);
@@ -131,7 +171,33 @@ function createS3EvidenceStore(
     responseBodyIdleTimeoutMs: settings.s3.timeoutMs,
     ...(acquireWriteLease ? { acquireWriteLease } : {}),
   };
-  return new S3EvidenceStore(storeOptions);
+  const store = new S3EvidenceStore(storeOptions);
+  const manager = settings.expectedProviderInstanceId === undefined
+    ? null
+    : new S3EvidenceProviderInstanceManager({
+        client,
+        bucket: settings.s3.bucket,
+        prefix: settings.s3.prefix,
+        responseBodyIdleTimeoutMs: settings.s3.timeoutMs,
+      });
+  return bindEvidenceRuntime(store, manager, settings.expectedProviderInstanceId);
+}
+
+function bindEvidenceRuntime(
+  store: RuntimeEvidenceStore,
+  manager: EvidenceProviderInstanceManager | null,
+  expectedProviderInstanceId: string | undefined,
+): EvidenceRuntime {
+  return Object.freeze({
+    store,
+    initializeProviderInstance: expectedProviderInstanceId === undefined
+      ? async () => null
+      : manager === null
+        ? async () => {
+            throw new Error(EVIDENCE_PROVIDER_INSTANCE_RUNTIME_REQUIRED);
+          }
+        : () => manager.initialize(expectedProviderInstanceId),
+  });
 }
 
 function assembleS3StoreInput(
@@ -279,6 +345,13 @@ class OpaqueS3EvidenceClient implements S3EvidenceClient {
   }
 
   send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
+    if (
+      this.#streamClient
+      && command instanceof PutObjectCommand
+      && command.input.IfNoneMatch === "*"
+    ) {
+      return this.#streamClient.send(command, options);
+    }
     return this.#send(command, options);
   }
 

@@ -1,10 +1,11 @@
 import { Agent as HttpsAgent } from "node:https";
 import { inspect } from "node:util";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   HeadBucketCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
@@ -19,8 +20,12 @@ import {
 } from "./lease.js";
 import {
   createEvidenceStore,
+  createEvidenceRuntime,
   EVIDENCE_S3_CLIENT_MAX_ATTEMPTS,
   EVIDENCE_S3_PROVIDER_CONFIG_ERROR,
+  EVIDENCE_PROVIDER_INSTANCE_RUNTIME_REQUIRED,
+  prepareEvidenceRuntime,
+  type EvidenceRuntime,
   type EvidenceS3RequestHandlerOptions,
 } from "./provider.js";
 import { loadEvidenceS3Credentials } from "./s3-secrets.js";
@@ -34,6 +39,12 @@ import {
 } from "./s3-settings.js";
 import { FilesystemEvidenceStore } from "./store.js";
 import { S3EvidenceError, S3EvidenceStore } from "./s3-store.js";
+import {
+  EVIDENCE_PROVIDER_INSTANCE_SCHEMA_ID,
+  EvidenceProviderInstanceStorageError,
+  parseEvidenceProviderInstance,
+} from "./provider-instance.js";
+import { EVIDENCE_PROVIDER_INSTANCE_S3_KEY } from "./provider-instance-s3.js";
 
 const CONTROL = ".data/evidence";
 const CANARY_ENDPOINT = "https://s3-canary-host.invalid:8443";
@@ -44,6 +55,7 @@ const CANARY_TOKEN = "canarySessionTokenValue!!";
 const CANARY_CRED_FILE = "/run/secrets/canary-s3-secret";
 const CANARY_CA_BODY =
   "-----BEGIN CERTIFICATE-----\nCANARYCAPEMCONTENTAAAAAAAAAAAAAAAA\n-----END CERTIFICATE-----\n";
+const PROVIDER_INSTANCE_ID = "8d2f63fa-327e-4b90-9d43-aa4f10e1d3a2";
 
 class FakeS3Error extends Error {
   readonly Code: string;
@@ -66,6 +78,8 @@ class FakeS3Client {
   bucketExists = true;
   putKeys: string[] = [];
   putBytes: number[] = [];
+  providerInstance: Uint8Array | null = null;
+  providerEtag = "\"provider-instance\"";
 
   constructor(private readonly bucket: string) {}
 
@@ -84,11 +98,48 @@ class FakeS3Client {
       return {};
     }
     if (command instanceof HeadObjectCommand) {
+      if (
+        input.Key === `assigned-prefix/${EVIDENCE_PROVIDER_INSTANCE_S3_KEY}`
+        && this.providerInstance !== null
+      ) {
+        return {
+          ContentLength: this.providerInstance.byteLength,
+          ETag: this.providerEtag,
+        };
+      }
       throw new FakeS3Error("NotFound", 404, "NotFound");
+    }
+    if (command instanceof GetObjectCommand) {
+      if (
+        input.Key !== `assigned-prefix/${EVIDENCE_PROVIDER_INSTANCE_S3_KEY}`
+        || this.providerInstance === null
+      ) {
+        throw new FakeS3Error("NoSuchKey", 404, "NoSuchKey");
+      }
+      if (input.IfMatch !== this.providerEtag) {
+        throw new FakeS3Error("PreconditionFailed", 412, "PreconditionFailed");
+      }
+      return {
+        Body: new Uint8Array(this.providerInstance),
+        ContentLength: this.providerInstance.byteLength,
+        ETag: this.providerEtag,
+      };
     }
     if (command instanceof PutObjectCommand) {
       this.putKeys.push(String(input.Key ?? ""));
       const body = input.Body;
+      if (
+        input.Key === `assigned-prefix/${EVIDENCE_PROVIDER_INSTANCE_S3_KEY}`
+        && input.IfNoneMatch === "*"
+      ) {
+        if (this.providerInstance !== null) {
+          throw new FakeS3Error("PreconditionFailed", 412, "PreconditionFailed");
+        }
+        if (!(body instanceof Uint8Array)) {
+          throw new FakeS3Error("InvalidRequest", 400, "InvalidRequest");
+        }
+        this.providerInstance = new Uint8Array(body);
+      }
       if (body && typeof body === "object" && Symbol.asyncIterator in body) {
         for await (const chunk of body as AsyncIterable<Uint8Array>) {
           this.putBytes.push(chunk.byteLength);
@@ -260,6 +311,141 @@ describe("createEvidenceStore filesystem", () => {
     await expect(store.recoverUnreferencedWrites()).rejects.toThrow(
       /referenced content hashes are required/,
     );
+  });
+});
+
+describe("evidence runtime provider identity startup", () => {
+  it("rejects a configured pin from the legacy store-only factory", () => {
+    expect(() => createEvidenceStore({
+      settings: {
+        ...filesystemSettings(),
+        expectedProviderInstanceId: PROVIDER_INSTANCE_ID,
+      },
+    })).toThrow(EVIDENCE_PROVIDER_INSTANCE_RUNTIME_REQUIRED);
+  });
+
+  it("keeps an unpinned filesystem runtime legacy-unbound with no identity I/O", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "cd-provider-runtime-unbound-"));
+    const root = join(parent, "evidence");
+    try {
+      const runtime = createEvidenceRuntime({
+        settings: filesystemSettings("sqlite", root),
+      });
+      expect(await runtime.initializeProviderInstance()).toBeNull();
+      await expect(lstat(root)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(runtime.store).toBeInstanceOf(FilesystemEvidenceStore);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("binds a pinned filesystem runtime to the exact control root and identity", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "cd-provider-runtime-filesystem-"));
+    const root = join(parent, "evidence");
+    try {
+      const runtime = createEvidenceRuntime({
+        settings: {
+          ...filesystemSettings("sqlite", root),
+          expectedProviderInstanceId: PROVIDER_INSTANCE_ID,
+        },
+      });
+      const initialized = await runtime.initializeProviderInstance();
+      expect(initialized?.manifest).toEqual({
+        schemaId: EVIDENCE_PROVIDER_INSTANCE_SCHEMA_ID,
+        providerInstanceId: PROVIDER_INSTANCE_ID,
+        providerKind: "filesystem",
+      });
+      const bytes = await readFile(join(root, ".contextdesk", "provider-instance.v1.json"));
+      expect(parseEvidenceProviderInstance(bytes)).toEqual(initialized?.manifest);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("shares one opaque S3 client and exact settings with a pinned identity manager", async () => {
+    const fake = new FakeS3Client("war-room-evidence");
+    let constructed = 0;
+    const runtime = createEvidenceRuntime({
+      settings: {
+        ...loadS3Settings(),
+        expectedProviderInstanceId: PROVIDER_INSTANCE_ID,
+      },
+      credentials: staticCredentials(),
+      createS3Client: () => {
+        constructed += 1;
+        return fake;
+      },
+    });
+    const initialized = await runtime.initializeProviderInstance();
+    expect(constructed).toBe(1);
+    expect(initialized?.manifest.providerInstanceId).toBe(PROVIDER_INSTANCE_ID);
+    expect(fake.providerInstance).not.toBeNull();
+    expect(
+      fake.calls.filter((call) =>
+        call.input.Key === `assigned-prefix/${EVIDENCE_PROVIDER_INSTANCE_S3_KEY}`),
+    ).toHaveLength(5);
+    expect(fake.calls.find((call) => call.name === "PutObjectCommand")?.input)
+      .toMatchObject({ IfNoneMatch: "*" });
+  });
+
+  it("keeps an unpinned S3 store free of reserved identity requests", async () => {
+    const fake = new FakeS3Client("war-room-evidence");
+    const runtime = createEvidenceRuntime({
+      settings: loadS3Settings(),
+      credentials: staticCredentials(),
+      createS3Client: () => fake,
+    });
+    expect(await runtime.initializeProviderInstance()).toBeNull();
+    expect(
+      fake.calls.filter((call) =>
+        String(call.input.Key ?? "").includes(EVIDENCE_PROVIDER_INSTANCE_S3_KEY)),
+    ).toEqual([]);
+    expect(runtime.store).toBeInstanceOf(S3EvidenceStore);
+  });
+
+  it("prepares identity before ping and recovery", async () => {
+    const events: string[] = [];
+    const runtime = {
+      initializeProviderInstance: async () => {
+        events.push("identity");
+        return null;
+      },
+      store: {
+        ping: async () => {
+          events.push("ping");
+        },
+        recoverUnreferencedWrites: async () => {
+          events.push("recovery");
+          return {};
+        },
+      },
+    } as unknown as EvidenceRuntime;
+    expect(await prepareEvidenceRuntime(runtime)).toBeNull();
+    expect(events).toEqual(["identity", "ping", "recovery"]);
+  });
+
+  it.each([
+    "invalid",
+    "identity_mismatch",
+    "unavailable",
+    "initialization_outcome_unknown",
+  ] as const)("stops startup after a sanitized %s identity failure", async (code) => {
+    const events: string[] = [];
+    const runtime = {
+      initializeProviderInstance: async () => {
+        events.push("identity");
+        throw new EvidenceProviderInstanceStorageError(code);
+      },
+      store: {
+        ping: async () => events.push("ping"),
+        recoverUnreferencedWrites: async () => {
+          events.push("recovery");
+          return {};
+        },
+      },
+    } as unknown as EvidenceRuntime;
+    await expect(prepareEvidenceRuntime(runtime)).rejects.toMatchObject({ code });
+    expect(events).toEqual(["identity"]);
   });
 });
 

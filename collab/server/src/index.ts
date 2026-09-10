@@ -3,7 +3,10 @@ import { buildApp } from "./app.js";
 import { createSqliteRuntime } from "./db/sqlite.js";
 import { loadRuntimeConfig } from "./config.js";
 import { createPostgresEvidenceWriteLease } from "./evidence/lease.js";
-import { createEvidenceStore } from "./evidence/provider.js";
+import {
+  createEvidenceRuntime,
+  prepareEvidenceRuntime,
+} from "./evidence/provider.js";
 import { loadEvidenceS3Credentials } from "./evidence/s3-secrets.js";
 import {
   LogTimeService,
@@ -177,7 +180,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
   const storage = createStorage(config);
-  const store = createEvidenceStore({
+  const evidenceRuntime = createEvidenceRuntime({
     settings: config.evidence,
     ...(config.evidence.provider === "s3"
       ? { credentials: loadEvidenceS3Credentials(process.env) }
@@ -189,10 +192,10 @@ async function main(): Promise<void> {
         }
       : {}),
   });
+  const store = evidenceRuntime.store;
   store.addReferencedContentHashSource(() => storage.cases.listReferencedContentHashes());
   store.addReferencedContentHashSource(() => storage.runs.listReferencedContentHashes());
-  await store.ping();
-  await store.recoverUnreferencedWrites();
+  await prepareEvidenceRuntime(evidenceRuntime);
   const publicIdentities = await loadPublicIdentityCodec(
     config.evidenceRoot,
     process.env.COLLAB_PUBLIC_IDENTITY_KEY,
