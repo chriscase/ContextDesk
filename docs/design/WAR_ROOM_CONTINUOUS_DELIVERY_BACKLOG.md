@@ -69,18 +69,19 @@ Old design documents and open branches may predate these foundations. Their
 The following items are candidates, not features on `main`. Their exact heads,
 checks, and dependencies must be reverified immediately before owner action.
 
-1. **Operations Queue qualification — PR #1158.** Saved-view browser
-   qualification for already-shipped behavior. It is owner-ready at this
-   baseline, but remains unmerged until Chris explicitly authorizes it.
-2. **S3 ambiguous-upload safety — PR #1159 and dependent qualification/UI
-   candidates.** Distinguish an upload that definitely failed from one that may
-   have committed, then reconcile without blindly replaying bytes. Provider
-   identity, operator CLI, and administrator binding-status candidates remain
-   downstream and must not be described as shipped.
-3. **Activity Center scope fencing — PR #1165 and its browser qualification.**
-   Prevent stale rows or locators from crossing identity, capability, and
-   filter transitions. This hardens the shipped Activity Center; it does not
-   create a second Overview implementation.
+1. **Operations Queue qualification — PR #1158 at `6f23260b`.** Saved-view
+   browser qualification for already-shipped behavior. The pull request is
+   non-draft and protected checks were green at reconciliation time, but it
+   remains unmerged until Chris explicitly authorizes it.
+2. **S3 ambiguous-upload safety — PR #1159 at `db5f489b` and dependent
+   qualification/UI candidates.** Distinguish an upload that definitely failed
+   from one that may have committed, then reconcile without blindly replaying
+   bytes. Provider identity, operator CLI, and administrator binding-status
+   candidates remain downstream and must not be described as shipped.
+3. **Activity Center scope fencing — PR #1165 at `c5029e88` and its browser
+   qualification.** Prevent stale rows or locators from crossing identity,
+   capability, and filter transitions. This hardens the shipped Activity
+   Center; it does not create a second Overview implementation.
 4. **Reliability candidates.** Coordination, handoff, evidence-stream, catalog
    focus, and multimodel-save race fixes must retain exact reproduction and
    mutation evidence. They may be integrated independently only when their
@@ -92,6 +93,9 @@ checks, and dependencies must be reverified immediately before owner action.
 
 Legacy or conflicting pull requests are classified separately as keep, park,
 rederive, or close. They are never merged merely to reduce the queue.
+Pre-main collection/facet prototype branches are design and test inputs to the
+next slice, not automatically integrable candidates; they must be compared with
+the frozen post-queue `main` before reuse.
 
 ## Next product slice after the protected queue
 
