@@ -28,6 +28,7 @@ function inputForLocation(query: CollectionQueryLocation): InvestigationCollecti
     status: [...query.status],
     includeArchived: query.includeArchived,
     entityId: query.entityId,
+    impactIdentity: query.impactIdentity,
     contributorId: query.contributorId,
     recordedFrom: query.recordedFrom,
     recordedTo: query.recordedTo,
@@ -74,6 +75,7 @@ export function useInvestigationCollectionQuery(
   const input = useMemo(() => inputForLocation(query), [
     query.contributorId,
     query.entityId,
+    query.impactIdentity,
     query.includeArchived,
     query.q,
     query.recordedFrom,

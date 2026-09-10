@@ -631,6 +631,77 @@ describe("useInvestigationCollectionQuery", () => {
     expect(result.current.query?.cursor).toBe(OPAQUE_COLLECTION_CURSOR);
   });
 
+  it("drops later duplicate case identities and keeps the newest page metadata", async () => {
+    const firstItem = makeSparseImportedCase();
+    const overlappingItem = makePopulatedCase();
+    const laterItem = { ...makePopulatedCase(), id: "case-later-unique", title: "Later unique investigation" };
+    const firstPage = collectionPage({
+      items: [firstItem, overlappingItem],
+      nextCursor: OPAQUE_COLLECTION_CURSOR,
+      hiddenArchivedCount: 1,
+    });
+    const laterCursor = "eyJwYWdlIjozfQ";
+    const laterFacets = {
+      status: { top: [{ key: "monitoring", count: 7 }], otherCount: 2 },
+      entity: { top: [], otherCount: 0 },
+      impactIdentity: { top: [], otherCount: 0 },
+      contributor: { top: [], otherCount: 0 },
+    };
+    const secondPage = collectionPage({
+      items: [overlappingItem, laterItem],
+      nextCursor: laterCursor,
+      hiddenArchivedCount: 9,
+      facets: laterFacets,
+    });
+    const first = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+    const second = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+    const requests: InvestigationCollectionQueryInput[] = [];
+    const pages = [first, second];
+    let requestIndex = 0;
+    const gateway = queryGatewayWith((query) => {
+      requests.push(query);
+      return pages[requestIndex++]!.promise;
+    });
+    const { result, rerender } = renderHook(
+      ({ query }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled: true,
+        identityKey: "alice",
+        authorityKey: "interactive:viewer",
+        query,
+      }),
+      { initialProps: { query: { q: "checkout" } as InvestigationCollectionQueryInput } },
+    );
+    await waitFor(() => expect(requests).toHaveLength(1));
+    await act(async () => {
+      first.resolve({ ok: true, value: firstPage });
+    });
+    expect(result.current.page).toEqual({ status: "ready", value: firstPage });
+
+    rerender({ query: { q: "checkout", cursor: firstPage.nextCursor } });
+    await waitFor(() => expect(requests).toHaveLength(2));
+    await act(async () => {
+      second.resolve({ ok: true, value: secondPage });
+    });
+
+    expect(result.current.page.status).toBe("ready");
+    if (result.current.page.status !== "ready") throw new Error("expected accumulated page");
+    expect(result.current.page.value.items.map((item) => item.id)).toEqual([
+      firstItem.id,
+      overlappingItem.id,
+      laterItem.id,
+    ]);
+    expect(result.current.page.value.items[1]).toBe(firstPage.items[1]);
+    expect(result.current.page.value.items[1]).not.toBe(secondPage.items[0]);
+    expect(result.current.page.value.hiddenArchivedCount).toBe(secondPage.hiddenArchivedCount);
+    expect(result.current.page.value.facets).toBe(secondPage.facets);
+    expect(result.current.page.value.nextCursor).toBe(secondPage.nextCursor);
+    expect(firstPage.items).toHaveLength(2);
+    expect(secondPage.items).toHaveLength(2);
+    expect(firstPage.items.map((item) => item.id)).toEqual([firstItem.id, overlappingItem.id]);
+    expect(secondPage.items.map((item) => item.id)).toEqual([overlappingItem.id, laterItem.id]);
+  });
+
   it("retains the accumulated page when cursor continuation fails", async () => {
     const firstPage = collectionPage({ items: [makePopulatedCase()], nextCursor: OPAQUE_COLLECTION_CURSOR });
     const gateway = queryGatewayWith(async (query) => query.cursor === null || query.cursor === undefined

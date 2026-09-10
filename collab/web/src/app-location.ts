@@ -81,6 +81,7 @@ export type CollectionQueryLocation = Readonly<{
   status: readonly InvestigationCollectionQueryV1["status"][number][];
   includeArchived: InvestigationCollectionQueryV1["includeArchived"];
   entityId: InvestigationCollectionQueryV1["entityId"];
+  impactIdentity: InvestigationCollectionQueryV1["impactIdentity"];
   contributorId: InvestigationCollectionQueryV1["contributorId"];
   recordedFrom: InvestigationCollectionQueryV1["recordedFrom"];
   recordedTo: InvestigationCollectionQueryV1["recordedTo"];
@@ -91,6 +92,7 @@ export const DEFAULT_COLLECTION_QUERY: CollectionQueryLocation = Object.freeze({
   status: Object.freeze([]) as readonly InvestigationCollectionQueryV1["status"][number][],
   includeArchived: false,
   entityId: null,
+  impactIdentity: null,
   contributorId: null,
   recordedFrom: null,
   recordedTo: null,
@@ -370,6 +372,7 @@ export function isWorkLocation(value: unknown): value is WorkLocation {
         status: record.status,
         includeArchived: record.includeArchived,
         entityId: record.entityId,
+        impactIdentity: record.impactIdentity,
         contributorId: record.contributorId,
         recordedFrom: record.recordedFrom,
         recordedTo: record.recordedTo,
@@ -529,6 +532,7 @@ const COLLECTION_QUERY_PARAMS = new Set([
   "status",
   "includeArchived",
   "entityId",
+  "impactIdentity",
   "contributorId",
   "recordedFrom",
   "recordedTo",
@@ -541,12 +545,52 @@ function orderedStatuses(status: readonly InvestigationCollectionQueryV1["status
   );
 }
 
+function freezeImpactIdentity(
+  identity: InvestigationCollectionQueryV1["impactIdentity"],
+): CollectionQueryLocation["impactIdentity"] {
+  if (identity === null) return null;
+  return Object.freeze({
+    productName: identity.productName,
+    version: identity.version,
+    build: identity.build,
+    component: identity.component,
+    environment: identity.environment,
+  });
+}
+
+function impactIdentityEqual(
+  left: CollectionQueryLocation["impactIdentity"] | undefined,
+  right: CollectionQueryLocation["impactIdentity"] | undefined,
+): boolean {
+  const a = left ?? null;
+  const b = right ?? null;
+  if (a === null || b === null) return a === b;
+  return a.productName === b.productName
+    && a.version === b.version
+    && a.build === b.build
+    && a.component === b.component
+    && a.environment === b.environment;
+}
+
+function impactIdentityQueryParam(
+  identity: NonNullable<CollectionQueryLocation["impactIdentity"]>,
+): string {
+  return JSON.stringify({
+    productName: identity.productName,
+    version: identity.version,
+    build: identity.build,
+    component: identity.component,
+    environment: identity.environment,
+  });
+}
+
 function locationQueryFromContract(query: InvestigationCollectionQueryV1): CollectionQueryLocation {
   return Object.freeze({
     q: query.q,
     status: Object.freeze(orderedStatuses(query.status)),
     includeArchived: query.includeArchived,
     entityId: query.entityId,
+    impactIdentity: freezeImpactIdentity(query.impactIdentity),
     contributorId: query.contributorId,
     recordedFrom: query.recordedFrom,
     recordedTo: query.recordedTo,
@@ -567,6 +611,9 @@ function parseCollectionQuery(search: string): CollectionQueryLocation | undefin
     if (params.has(key)) raw[key] = params.get(key);
   }
   try {
+    if (params.has("impactIdentity")) {
+      raw.impactIdentity = JSON.parse(params.get("impactIdentity") ?? "");
+    }
     return locationQueryFromContract(parseInvestigationCollectionQuery(raw));
   } catch {
     // Invalid or over-broad query strings are deliberately not reflected in
@@ -587,6 +634,7 @@ function queryLocationEqual(
   return a.q === b.q
     && a.includeArchived === b.includeArchived
     && a.entityId === b.entityId
+    && impactIdentityEqual(a.impactIdentity, b.impactIdentity)
     && a.contributorId === b.contributorId
     && a.recordedFrom === b.recordedFrom
     && a.recordedTo === b.recordedTo
@@ -601,6 +649,9 @@ function collectionQueryPath(query: CollectionQueryLocation | undefined): string
   for (const status of orderedStatuses(value.status)) params.append("status", status);
   if (value.includeArchived) params.set("includeArchived", "true");
   if (value.entityId !== null) params.set("entityId", value.entityId);
+  if (value.impactIdentity !== null) {
+    params.set("impactIdentity", impactIdentityQueryParam(value.impactIdentity));
+  }
   if (value.contributorId !== null) params.set("contributorId", value.contributorId);
   if (value.recordedFrom !== null) params.set("recordedFrom", value.recordedFrom);
   if (value.recordedTo !== null) params.set("recordedTo", value.recordedTo);

@@ -6,7 +6,10 @@ import {
   type InvestigationCollectionQueryInput,
   type ResourceView,
 } from "../runtime/public.js";
-import type { CollectionQueryLocation } from "../../app-location.js";
+import {
+  DEFAULT_COLLECTION_QUERY,
+  type CollectionQueryLocation,
+} from "../../app-location.js";
 
 export interface WarRoomCollectionQueryPresentation {
   readonly input: InvestigationCollectionQueryInput;
@@ -24,6 +27,7 @@ function inputForLocation(query: CollectionQueryLocation): InvestigationCollecti
     status: [...query.status],
     includeArchived: query.includeArchived,
     entityId: query.entityId,
+    impactIdentity: query.impactIdentity,
     contributorId: query.contributorId,
     recordedFrom: query.recordedFrom,
     recordedTo: query.recordedTo,
@@ -67,17 +71,10 @@ export function useWarRoomCollectionQuery(
   locationQuery: CollectionQueryLocation | undefined,
 ): WarRoomCollectionQueryPresentation {
   const runtime = useInvestigationRuntime();
-  const input = useMemo(() => inputForLocation(locationQuery ?? {
-    q: "",
-    status: [],
-    includeArchived: false,
-    entityId: null,
-    contributorId: null,
-    recordedFrom: null,
-    recordedTo: null,
-  }), [
+  const input = useMemo(() => inputForLocation(locationQuery ?? DEFAULT_COLLECTION_QUERY), [
     locationQuery?.contributorId,
     locationQuery?.entityId,
+    locationQuery?.impactIdentity,
     locationQuery?.includeArchived,
     locationQuery?.q,
     locationQuery?.recordedFrom,

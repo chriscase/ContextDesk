@@ -86,6 +86,66 @@ describe("War Room collection query adapter", () => {
     });
   });
 
+  it("sends impactIdentity and does not refetch semantically identical values", async () => {
+    const identity = {
+      productName: "ContextDesk",
+      version: "4.2",
+      build: "2026.02",
+      component: "web",
+      environment: "test",
+    };
+    const queryInvestigations = vi.fn<NonNullable<InvestigationGateway["queryInvestigations"]>>(
+      async () => gatewayOk(page()),
+    );
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    const provider = (query: CollectionQueryLocation) => (
+      <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <Probe query={query} />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>
+    );
+    const rendered = render(provider({
+      ...DEFAULT_COLLECTION_QUERY,
+      impactIdentity: {
+        productName: "  ContextDesk  ",
+        version: " 4.2 ",
+        build: " 2026.02 ",
+        component: " web ",
+        environment: " test ",
+      },
+    }));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({ impactIdentity: identity });
+
+    await act(async () => {
+      rendered.rerender(provider({
+        ...DEFAULT_COLLECTION_QUERY,
+        impactIdentity: { ...identity },
+      }));
+    });
+    expect(queryInvestigations).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(provider({
+      ...DEFAULT_COLLECTION_QUERY,
+      impactIdentity: { ...identity, environment: "staging" },
+    }));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[1]?.[0]).toMatchObject({
+      impactIdentity: { ...identity, environment: "staging" },
+    });
+  });
+
   it("does not query when the shell has no collection location", () => {
     const queryInvestigations = vi.fn();
     renderProbe(createInvestigationGatewayDouble({ queryInvestigations }));
