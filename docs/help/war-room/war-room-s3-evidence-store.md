@@ -153,6 +153,7 @@ control-state root in both modes.
 | Region | `COLLAB_EVIDENCE_S3_REGION` | Must match the signer. Garage's default region is `garage`. |
 | Bucket | `COLLAB_EVIDENCE_S3_BUCKET` | Private bucket dedicated to War Room when possible. |
 | Key prefix | `COLLAB_EVIDENCE_S3_PREFIX` | Optional application key prefix. A configured value is normalized with one trailing `/`; an empty configured value is rejected. Prefer a dedicated bucket because `HeadBucket` needs bucket-level permission. |
+| Provider identity pin | `COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID` | Optional canonical lowercase UUID that binds startup to one filesystem root or one S3 bucket-plus-prefix location. Absence preserves legacy unbound behavior. This is an identity canary, not a credential. |
 | Path-style | `COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE` | Exact `0` or `1`. When unset, custom endpoints (including Garage) default to path-style and AWS-managed endpoints default to virtual-host style. |
 | HTTP opt-in | `COLLAB_EVIDENCE_S3_ALLOW_HTTP` | Exact `0` or `1`; defaults to `0`. Set to `1` only for a trusted local evaluation network. |
 | Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Smithy connection timeout and absolute `requestTimeout` in milliseconds; defaults to `30000`, valid range `1000..120000`. The absolute request timer covers each PutObject, CopyObject, and multipart request through response headers. |
@@ -179,6 +180,33 @@ that are present with empty values. `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` is
 accepted in filesystem mode and keeps its 512 MiB default there. Remove
 leftover S3 names rather than blanking them when returning to the filesystem
 provider.
+
+### Bind startup to one evidence-provider location
+
+`COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID` is an optional deployment safety pin
+for both filesystem and S3 evidence storage. Leave it unset to preserve the
+legacy unbound behavior. When enabling it, generate one canonical lowercase
+UUID for exactly one filesystem root or exactly one S3 bucket and normalized
+prefix, store that UUID in the deployment's protected configuration, and use
+the same value on every restart and replica that shares that location.
+
+On the first pinned startup, ContextDesk conditionally creates a private
+provider-owned identity marker. Later startups read the marker and require the
+configured UUID to match before bucket readiness or recovery work begins. A
+mismatch or an initialization result that cannot be determined fails startup
+before the service listens; it does not fall back to an unbound provider.
+`npm run doctor` validates only the setting's canonical UUID shape and does not
+read the filesystem marker or contact S3.
+
+The UUID is not a secret and grants no access, but it is part of the evidence
+location's recovery identity. Back it up with the object bytes, local evidence
+control state, and collaboration database. Credential rotation does not change
+it. Endpoint aliases may change only when they still address the same bucket
+and prefix. Changing the filesystem root, bucket, or prefix means a different
+provider location and requires a separately planned migration; do not copy,
+delete, rotate, repair, or hand-edit the marker to make a mismatch disappear.
+This release provides no provider-identity rotation, migration, deletion, or
+repair workflow.
 
 With PostgreSQL, the process uses a database advisory lease to coordinate
 evidence write batches across application replicas. SQLite has no external

@@ -617,6 +617,45 @@ describe("operator doctor s3 evidence preflight", () => {
     expectNoS3Canaries(report);
   });
 
+  it("validates only provider identity pin shape without contacting the provider", () => {
+    const root = fixtureRoot;
+    const providerInstanceId = "8d2f63fa-327e-4b90-9d43-aa4f10e1d3a2";
+    const valid = runDoctor({
+      env: {
+        ...parseEnvFile(renderConfigFile("postgres")),
+        ...s3Canaries(),
+        COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID: providerInstanceId,
+      },
+      collabRoot: root,
+      cwd: root,
+      nodeVersion: "22.5.0",
+      fs: memoryFs(built(root)),
+    });
+    expect(statusOf(valid, "evidence_root")).toBe("ok");
+    expect(valid.checks.find((check) => check.id === "evidence_root")?.summary).toMatch(
+      /bucket not contacted/,
+    );
+    expect(JSON.stringify(valid)).not.toContain(providerInstanceId);
+
+    const invalidProviderInstanceId = providerInstanceId.toUpperCase();
+    const invalid = runDoctor({
+      env: {
+        ...parseEnvFile(renderConfigFile("postgres")),
+        ...s3Canaries(),
+        COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID: invalidProviderInstanceId,
+      },
+      collabRoot: root,
+      cwd: root,
+      nodeVersion: "22.5.0",
+      fs: memoryFs(built(root)),
+    });
+    expect(statusOf(invalid, "evidence_root")).toBe("error");
+    expect(invalid.checks.find((check) => check.id === "evidence_root")?.summary).toMatch(
+      /bucket not contacted/,
+    );
+    expect(JSON.stringify(invalid)).not.toContain(invalidProviderInstanceId);
+  });
+
   it("warns for sqlite plus s3 as a single-process evaluation without blocking", () => {
     const root = fixtureRoot;
     const env = {
@@ -772,10 +811,26 @@ function expectS3OperatorGuidance(body: string) {
   expect(parseEnvFile(body).COLLAB_EVIDENCE_PROVIDER).toBeUndefined();
 }
 
+function expectProviderIdentityOperatorGuidance(body: string): void {
+  expect(body).toMatch(
+    /^# COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID=replace-with-one-canonical-lowercase-uuid$/m,
+  );
+  expect(body).not.toMatch(
+    /^# COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID=[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/m,
+  );
+  expect(body).toMatch(/Leave(?:\r?\n#)? this commented to preserve legacy unbound behavior/);
+  expect(body).toMatch(/one(?:\r?\n#)? canonical lowercase UUID per filesystem root or S3 bucket plus prefix/);
+  expect(body).toMatch(/Back up the configured UUID/);
+  expect(body).toMatch(/no automatic rotation, deletion, repair/);
+  expect(parseEnvFile(body).COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID).toBeUndefined();
+}
+
 describe("operator config:init s3 examples", () => {
   it("documents filesystem default, bounds, credentials, and custom CA replacement", () => {
     for (const profile of CONFIG_INIT_PROFILES) {
-      expectS3OperatorGuidance(renderConfigFile(profile));
+      const body = renderConfigFile(profile);
+      expectS3OperatorGuidance(body);
+      expectProviderIdentityOperatorGuidance(body);
     }
   });
 
@@ -791,6 +846,7 @@ describe("operator config:init s3 examples", () => {
       });
       const body = await readFile(first.outputPath, "utf8");
       expectS3OperatorGuidance(body);
+      expectProviderIdentityOperatorGuidance(body);
       expect(body).toMatch(/\/run\/secrets\/evidence-s3-/);
       const again = await initConfig({
         collabRoot,
@@ -807,7 +863,9 @@ describe("operator config:init s3 examples", () => {
       const s3BlockEnd = deployExample.indexOf("# Admin-owned share_safe redaction map");
       expect(s3BlockStart).toBeGreaterThanOrEqual(0);
       expect(s3BlockEnd).toBeGreaterThan(s3BlockStart);
-      expectS3OperatorGuidance(deployExample.slice(s3BlockStart, s3BlockEnd));
+      const deployS3Block = deployExample.slice(s3BlockStart, s3BlockEnd);
+      expectS3OperatorGuidance(deployS3Block);
+      expectProviderIdentityOperatorGuidance(deployS3Block);
       const compose = await readFile(join(collabRoot, "deploy/docker-compose.example.yml"), "utf8");
       expect(compose).toMatch(/# COLLAB_EVIDENCE_PROVIDER: s3/);
       expect(compose).not.toMatch(/^\s+COLLAB_EVIDENCE_PROVIDER:/m);

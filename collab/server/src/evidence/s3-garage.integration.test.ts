@@ -8,7 +8,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createEvidenceStore } from "./provider.js";
+import {
+  createEvidenceRuntime,
+  createEvidenceStore,
+  prepareEvidenceRuntime,
+  type EvidenceRuntime,
+} from "./provider.js";
+import { EvidenceProviderInstanceStorageError } from "./provider-instance.js";
 import { loadEvidenceS3Credentials } from "./s3-secrets.js";
 import {
   evidenceS3SupportedMaxUploadBytes,
@@ -31,6 +37,8 @@ const LIVE_OPT_IN_ENV = "CONTEXTDESK_RUN_S3_LIVE";
 const RPC_SECRET_PLACEHOLDER = "REPLACE_THIS_VALUE";
 const CONTROL_PREFIX = "cd-s3-garage-eval-";
 const FILE_REF_URI = "https://files.example.test/eval/app.log";
+const LIVE_PROVIDER_INSTANCE_ID = "8d2f63fa-327e-4b90-9d43-aa4f10e1d3a2";
+const WRONG_PROVIDER_INSTANCE_ID = "267ad846-b2e0-4af0-8d87-4d788e48c155";
 const AWS_DEFAULT_CHAIN_ENV_NAMES = [
   "AWS_ACCESS_KEY_ID",
   "AWS_SECRET_ACCESS_KEY",
@@ -605,6 +613,77 @@ describe.skipIf(!live)("S3EvidenceStore live Garage qualification", () => {
     expect(liveStore().writeCoordination).toBe("single_process");
   });
 
+  it("creates one pinned provider identity and preserves it across restart and recovery", async () => {
+    const identityPrefix = `identity${randomBytes(8).toString("hex")}`;
+    let cleanup: S3EvidenceStore | undefined;
+    try {
+      const first = createQualifiedRuntime(identityPrefix, LIVE_PROVIDER_INSTANCE_ID);
+      cleanup = first.store as S3EvidenceStore;
+      addEmptyReferencedHashLoaders(first);
+      const created = await prepareEvidenceRuntime(first);
+      expect(created?.outcome).toBe("created");
+      expect(created?.manifest).toMatchObject({
+        providerInstanceId: LIVE_PROVIDER_INSTANCE_ID,
+        providerKind: "s3",
+      });
+
+      const bytes = payload("provider-identity-restart");
+      const evidence = await first.store.put(bytes, { contentType: "text/plain" });
+      if (present(process.env, "CONTEXTDESK_S3_LIVE_COMPOSE_FILE")) {
+        await restartEvaluationGarage([accessKeyId, secretAccessKey, endpoint, bucket]);
+      }
+      const restarted = createQualifiedRuntime(identityPrefix, LIVE_PROVIDER_INSTANCE_ID);
+      addEmptyReferencedHashLoaders(restarted);
+      const existing = await prepareEvidenceRuntime(restarted);
+      expect(existing?.outcome).toBe("existing");
+      expect(existing?.manifest.providerInstanceId).toBe(LIVE_PROVIDER_INSTANCE_ID);
+      expect(await restarted.store.verify(evidence.hash)).toBe(true);
+      expect(Buffer.from(await restarted.store.get(evidence.hash) ?? []).equals(Buffer.from(bytes)))
+        .toBe(true);
+
+      const wrong = createQualifiedRuntime(identityPrefix, WRONG_PROVIDER_INSTANCE_ID);
+      addEmptyReferencedHashLoaders(wrong);
+      let pingCalls = 0;
+      let recoveryCalls = 0;
+      const ping = wrong.store.ping.bind(wrong.store);
+      const recover = wrong.store.recoverUnreferencedWrites.bind(wrong.store);
+      wrong.store.ping = async () => {
+        pingCalls += 1;
+        return await ping();
+      };
+      wrong.store.recoverUnreferencedWrites = async (referenced) => {
+        recoveryCalls += 1;
+        return await recover(referenced);
+      };
+      let failure: unknown;
+      try {
+        await prepareEvidenceRuntime(wrong);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(EvidenceProviderInstanceStorageError);
+      expect((failure as EvidenceProviderInstanceStorageError).code).toBe("identity_mismatch");
+      expectSanitized(failure, [
+        LIVE_PROVIDER_INSTANCE_ID,
+        WRONG_PROVIDER_INSTANCE_ID,
+        identityPrefix,
+        endpoint,
+        bucket,
+        accessKeyId,
+        secretAccessKey,
+      ]);
+      expect(pingCalls).toBe(0);
+      expect(recoveryCalls).toBe(0);
+
+      const afterRecovery = await restarted.initializeProviderInstance();
+      expect(afterRecovery?.outcome).toBe("existing");
+      expect(afterRecovery?.manifest.providerInstanceId).toBe(LIVE_PROVIDER_INSTANCE_ID);
+      expect(await restarted.store.verify(evidence.hash)).toBe(true);
+    } finally {
+      if (cleanup) await cleanup.deletePrefix("teardown", `${identityPrefix}/`);
+    }
+  }, 120_000);
+
   it("puts, heads, gets, and verifies exact bytes", async () => {
     const bytes = payload("put-head-get-verify");
     const meta = await liveStore().put(bytes, { contentType: "text/plain" });
@@ -898,6 +977,24 @@ function qualificationEnv(
     );
   }
   return qualified;
+}
+
+function createQualifiedRuntime(prefix: string, providerInstanceId: string): EvidenceRuntime {
+  const env = qualificationEnv(prefix, {
+    COLLAB_EVIDENCE_PROVIDER_INSTANCE_ID: providerInstanceId,
+  });
+  return createEvidenceRuntime({
+    settings: loadEvidenceStorageSettings(env, {
+      controlRoot: requiredControlRoot(),
+      storage: "sqlite",
+    }),
+    credentials: loadEvidenceS3Credentials(env),
+  });
+}
+
+function addEmptyReferencedHashLoaders(runtime: EvidenceRuntime): void {
+  runtime.store.addReferencedContentHashSource(async () => []);
+  runtime.store.addReferencedContentHashSource(async () => []);
 }
 
 function requiredLive(name: string): string {
