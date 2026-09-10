@@ -4,6 +4,7 @@ import {
   INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
   INVESTIGATION_RESOURCE_LOCATOR_SCHEMA_ID,
   INVESTIGATION_RESOURCE_RESOLVE_SCHEMA_ID,
+  type InvestigationActivityFilterV1,
   type InvestigationActivityItemV1,
   type InvestigationActivityPageV1,
   type InvestigationResourceResolveV1,
@@ -12,7 +13,10 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CaseV1 } from "@cd-collab/contracts/investigation-runtime";
 import type { OverviewGateway, OverviewGatewayResult } from "./gateway.js";
-import { useActivityCenter } from "./use-activity-center.js";
+import {
+  useActivityCenter,
+  type ActivityCenterController,
+} from "./use-activity-center.js";
 
 afterEach(cleanup);
 const CASE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -85,6 +89,170 @@ describe("useActivityCenter", () => {
     expect(result.current.activity).toEqual({ status: "loading" });
     await act(async () => second.resolve({ ok: true, value: page([item("b")], null) }));
     expect(result.current.activity).toEqual({ status: "ready", items: [item("b")] });
+  });
+
+  it.each([
+    ["identity", { identityKey: "bob" }],
+    ["authority", { authorityKey: "case-lead" }],
+    ["filter", { filter: { actorId: "actor-b" } }],
+  ] as const)("masks every published %s scope field on the first transition frame", async (
+    _label,
+    changed,
+  ) => {
+    type Props = {
+      enabled: boolean;
+      identityKey: string;
+      authorityKey: string;
+      filter: InvestigationActivityFilterV1;
+    };
+    const continuation = deferred<OverviewGatewayResult<InvestigationActivityPageV1>>();
+    const replacement = deferred<OverviewGatewayResult<InvestigationActivityPageV1>>();
+    let continuationSignal: AbortSignal | undefined;
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockResolvedValueOnce({ ok: true, value: page([item("a")], "opaque_cursor") })
+      .mockImplementationOnce((_request, signal) => {
+        continuationSignal = signal;
+        return continuation.promise;
+      })
+      .mockImplementationOnce(() => replacement.promise);
+    const sharedGateway = gateway(listActivity);
+    sharedGateway.listInvestigations = vi.fn(async () => ({
+      ok: true as const,
+      value: [{ id: CASE_ID } as CaseV1],
+    }));
+    const frames: ActivityCenterController[] = [];
+    const initial: Props = {
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "viewer",
+      filter: {},
+    };
+    const { result, rerender } = renderHook((props: Props) => {
+      const value = useActivityCenter({ ...props, gateway: sharedGateway });
+      frames.push(value);
+      return value;
+    }, { initialProps: initial });
+    await waitFor(() => expect(result.current.activity.status).toBe("ready"));
+    await act(async () => {
+      await result.current.open(item("a").locator);
+    });
+    await waitFor(() => expect(result.current.openFailure).toEqual({ kind: "not_found" }));
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.loadingMore).toBe(true));
+
+    const frameCount = frames.length;
+    rerender({ ...initial, ...changed });
+
+    expect(frames[frameCount]).toMatchObject({
+      activity: { status: "idle" },
+      investigations: [],
+      investigationsLoading: true,
+      investigationsFailed: false,
+      nextCursor: null,
+      loadingMore: false,
+      openFailure: null,
+    });
+    frames[frameCount]!.loadMore();
+    await expect(frames[frameCount]!.open(item("a").locator)).resolves.toBeNull();
+    expect(listActivity).toHaveBeenCalledTimes(3);
+    expect(sharedGateway.resolve).toHaveBeenCalledTimes(1);
+    expect(continuationSignal?.aborted).toBe(true);
+    await act(async () => {
+      continuation.resolve({ ok: true, value: page([item("c")], null) });
+      replacement.resolve({ ok: true, value: page([item("b")], null) });
+    });
+    await waitFor(() => expect(result.current.activity).toEqual({
+      status: "ready",
+      items: [item("b")],
+    }));
+  });
+
+  it("conceals a ready scope immediately when disabled without making another request", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>((_request, signal) => {
+      requestSignal = signal;
+      return Promise.resolve({ ok: true, value: page([item("a")], "opaque_cursor") });
+    });
+    const sharedGateway = gateway(listActivity);
+    const frames: ActivityCenterController[] = [];
+    const { result, rerender } = renderHook(({ enabled }) => {
+      const value = useActivityCenter({
+        enabled,
+        identityKey: "alice",
+        authorityKey: "viewer",
+        filter: {},
+        gateway: sharedGateway,
+      });
+      frames.push(value);
+      return value;
+    }, { initialProps: { enabled: true } });
+    await waitFor(() => expect(result.current.activity.status).toBe("ready"));
+    const frameCount = frames.length;
+
+    rerender({ enabled: false });
+
+    expect(frames[frameCount]).toMatchObject({
+      activity: { status: "idle" },
+      investigations: [],
+      investigationsLoading: false,
+      investigationsFailed: false,
+      nextCursor: null,
+      loadingMore: false,
+      openFailure: null,
+    });
+    expect(requestSignal?.aborted).toBe(true);
+    expect(listActivity).toHaveBeenCalledTimes(1);
+    expect(sharedGateway.listInvestigations).toHaveBeenCalledTimes(1);
+  });
+
+  it("makes zero requests when initially disabled", () => {
+    const sharedGateway = gateway(vi.fn());
+    const { result } = renderHook(() => useActivityCenter({
+      enabled: false,
+      identityKey: "alice",
+      authorityKey: "no-read",
+      filter: {},
+      gateway: sharedGateway,
+    }));
+    expect(result.current.activity).toEqual({ status: "idle" });
+    expect(result.current.investigations).toEqual([]);
+    expect(result.current.investigationsLoading).toBe(false);
+    expect(sharedGateway.listActivity).not.toHaveBeenCalled();
+    expect(sharedGateway.listInvestigations).not.toHaveBeenCalled();
+    expect(sharedGateway.resolve).not.toHaveBeenCalled();
+  });
+
+  it("retains only same-scope items through refresh loading and failure", async () => {
+    const refreshResult = deferred<OverviewGatewayResult<InvestigationActivityPageV1>>();
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockResolvedValueOnce({ ok: true, value: page([item("a")], "opaque_cursor") })
+      .mockImplementationOnce(() => refreshResult.promise);
+    const sharedGateway = gateway(listActivity);
+    const { result } = renderHook(() => useActivityCenter({
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "viewer",
+      filter: {},
+      gateway: sharedGateway,
+    }));
+    await waitFor(() => expect(result.current.activity).toEqual({
+      status: "ready",
+      items: [item("a")],
+    }));
+
+    act(() => result.current.refresh());
+
+    await waitFor(() => expect(result.current.activity).toEqual({
+      status: "loading",
+      previous: [item("a")],
+    }));
+    expect(result.current.nextCursor).toBeNull();
+    await act(async () => refreshResult.resolve({ ok: false, error: { kind: "network" } }));
+    await waitFor(() => expect(result.current.activity).toEqual({
+      status: "failed",
+      error: { kind: "network" },
+      previous: [item("a")],
+    }));
   });
 
   it("aborts continuation reads when its request scope changes", async () => {
