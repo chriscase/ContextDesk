@@ -56,3 +56,17 @@ export type { EvidenceAnnotationWorkspaceProps } from "./EvidenceAnnotationWorks
 
 export { CollectionPagination } from "./CollectionPagination.js";
 export type { CollectionPageView, CollectionPaginationProps } from "./CollectionPagination.js";
+
+export { RecordedContextCombo } from "./RecordedContextCombo.js";
+export type { RecordedContextComboProps } from "./RecordedContextCombo.js";
+export {
+  RECORDED_CONTEXT_FIELDS,
+  recordedContextCatalogFromView,
+  recordedContextOptions,
+} from "./recorded-context-options.js";
+export type {
+  RecordedContextCatalog,
+  RecordedContextCatalogStatus,
+  RecordedContextField,
+  RecordedContextRecord,
+} from "./recorded-context-options.js";

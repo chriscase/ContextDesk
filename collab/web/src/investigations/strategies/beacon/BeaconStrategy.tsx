@@ -19,10 +19,13 @@ import {
   StrategyActionRow,
   StrategyBadge,
   CollectionPagination,
+  RecordedContextCombo,
   StrategyHero,
   StrategyPanel,
   StrategyStateNotice,
   StrategySurface,
+  recordedContextCatalogFromView,
+  recordedContextOptions,
 } from "../shared/index.js";
 
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
@@ -63,29 +66,6 @@ function contributionLabel(contribution: ContributionV1): string {
   return "Observation";
 }
 
-function PriorValueField(props: {
-  readonly id: string;
-  readonly label: string;
-  readonly value: string;
-  readonly options: readonly string[];
-  readonly onChange: (value: string) => void;
-}) {
-  const normalized = props.value.trim().toLocaleLowerCase();
-  const existing = normalized !== "" && props.options.some((option) => option.toLocaleLowerCase() === normalized);
-  const hintId = `${props.id}-hint`;
-  return <div className="beacon__field"><label htmlFor={props.id}>{props.label}</label>
-    <input
-      id={props.id}
-      value={props.value}
-      list={`${props.id}-options`}
-      aria-describedby={hintId}
-      onChange={(event) => props.onChange(event.target.value)}
-    />
-    <datalist id={`${props.id}-options`}>{props.options.map((option) => <option key={option} value={option} />)}</datalist>
-    <small id={hintId} aria-live="polite">{props.value.trim() ? existing ? "Existing recorded value selected." : "New value; it will be recorded exactly as entered." : "Choose a prior value or enter a new one."}</small>
-  </div>;
-}
-
 function CreateCard({ startSignal }: { readonly startSignal?: number }) {
   const runtime = useInvestigationRuntime();
   const titleRef = useRef<HTMLInputElement>(null);
@@ -94,16 +74,11 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
   const [affected, setAffected] = useState("");
   const [impact, setImpact] = useState("");
   const [product, setProduct] = useState("");
+  const [version, setVersion] = useState("");
   const [build, setBuild] = useState("");
   const investigations = selectResourceView(runtime.resources.investigations);
-  const priorValues = useMemo(() => {
-    const cases = investigations.availability === "available" ? investigations.value : [];
-    const unique = (values: readonly (string | null | undefined)[]) => [...new Set(values.flatMap((value) => value?.trim() ? [value.trim()] : []))].sort((left, right) => left.localeCompare(right));
-    return {
-      products: unique(cases.map((item) => item.investigationContext?.productName)),
-      builds: unique(cases.map((item) => item.investigationContext?.build)),
-    };
-  }, [investigations]);
+  const catalog = recordedContextCatalogFromView(investigations, runtime.capabilities.canRead);
+  const contextDraft = { productName: product, version, build };
 
   useEffect(() => { if (startSignal) titleRef.current?.focus(); }, [startSignal]);
 
@@ -116,9 +91,9 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
       problemStatement: observation,
       affectedParties: affected,
       impact,
-      investigationContext: product.trim() || build.trim() ? {
+      investigationContext: product.trim() || version.trim() || build.trim() ? {
         productName: product,
-        version: "",
+        version,
         build,
         component: "",
         environment: "",
@@ -126,7 +101,7 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
       } : null,
     });
     if (result.status === "succeeded") {
-      setTitle(""); setObservation(""); setAffected(""); setImpact(""); setProduct(""); setBuild("");
+      setTitle(""); setObservation(""); setAffected(""); setImpact(""); setProduct(""); setVersion(""); setBuild("");
     }
   }
 
@@ -150,7 +125,11 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
         <label className="beacon__field beacon__field--wide"><span>What did you observe?</span><textarea value={observation} onChange={(event) => setObservation(event.target.value)} rows={3} placeholder="Record the signal without guessing at the cause" /></label>
         <label className="beacon__field"><span>Who or what is affected?</span><input value={affected} onChange={(event) => setAffected(event.target.value)} /></label>
         <label className="beacon__field"><span>Recorded impact</span><input value={impact} onChange={(event) => setImpact(event.target.value)} /></label>
-        <details className="beacon__advanced beacon__field--wide"><summary>Optional technical context</summary><div className="beacon__advanced-grid"><PriorValueField id="beacon-product" label="Product" value={product} options={priorValues.products} onChange={setProduct} /><PriorValueField id="beacon-build" label="Build" value={build} options={priorValues.builds} onChange={setBuild} /></div></details>
+        <details className="beacon__advanced beacon__field--wide"><summary>Optional technical context</summary><div className="beacon__advanced-grid">
+          <RecordedContextCombo id="beacon-product" className="beacon__field" label="Product" value={product} options={recordedContextOptions(catalog.records, "productName", contextDraft)} catalogStatus={catalog.status} onChange={setProduct} />
+          <RecordedContextCombo id="beacon-version" className="beacon__field" label="Version" value={version} options={recordedContextOptions(catalog.records, "version", contextDraft)} catalogStatus={catalog.status} onChange={setVersion} />
+          <RecordedContextCombo id="beacon-build" className="beacon__field" label="Build" value={build} options={recordedContextOptions(catalog.records, "build", contextDraft)} catalogStatus={catalog.status} onChange={setBuild} />
+        </div></details>
         <div className="beacon__submit beacon__field--wide"><button type="submit" disabled={running || !runtime.commands.createInvestigation}>{running ? "Creating…" : runtime.commands.createInvestigation ? "Create and open" : "Preparing create…"}</button><span>Blank values remain explicitly not recorded.</span></div>
       </form>
     </StrategyPanel>

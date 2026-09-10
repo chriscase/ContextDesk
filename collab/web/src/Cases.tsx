@@ -40,6 +40,11 @@ import { ResolutionForm } from "./ResolutionForm.js";
 import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
 import { loadEntities, type EntityRow } from "./Entities.js";
 import type { InvestigationCollectionPageV1, ResourceView } from "./investigations/runtime/public.js";
+import {
+  RecordedContextCombo,
+  recordedContextOptions,
+  type RecordedContextCatalog,
+} from "./investigations/strategies/shared/index.js";
 import { WarRoomCollectionList } from "./investigations/war-room/WarRoomCollectionList.js";
 import { fetchLegacyCaseList } from "./legacy-cases-fetch.js";
 
@@ -147,37 +152,6 @@ function contextPayload(draft: InvestigationContextDraft): InvestigationContextV
   return Object.values(draft).some((value) => value.trim().length > 0)
     ? { ...draft }
     : null;
-}
-
-function normalizedSearchValue(value: string): string {
-  return value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim();
-}
-
-function ContextComboBox(props: {
-  field: InvestigationContextField;
-  value: string;
-  options: readonly string[];
-  onChange: (value: string) => void;
-}) {
-  const listId = `investigation-context-options-${props.field}`;
-  const label = CONTEXT_FIELD_LABELS[props.field];
-  return (
-    <label>
-      <span>{label}</span>
-      <input
-        className="login__input"
-        role="combobox"
-        aria-autocomplete="list"
-        aria-label={`Investigation context: ${label}`}
-        list={listId}
-        value={props.value}
-        onChange={(event) => props.onChange(event.target.value)}
-      />
-      <datalist id={listId}>
-        {props.options.map((option) => <option key={option} value={option} />)}
-      </datalist>
-    </label>
-  );
 }
 
 function draftFor(row: CaseRow): SituationDraft {
@@ -773,6 +747,8 @@ export function Cases(props: {
   onCollectionQueryChange?: (query: CollectionQueryLocation) => void;
   onCollectionRefresh?: () => void;
   onCollectionNextPage?: () => void;
+  /** Already-authorized, unpaged records used only as optional create/edit suggestions. */
+  recordedContextCatalog?: RecordedContextCatalog;
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
@@ -1324,13 +1300,12 @@ export function Cases(props: {
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
-  const contextOptions = (field: InvestigationContextField): string[] => [
-    ...new Set(
-      cases
-        .map((row) => row.investigationContext?.[field] ?? "")
-        .filter((value) => value.trim().length > 0),
-    ),
-  ].sort((left, right) => normalizedSearchValue(left).localeCompare(normalizedSearchValue(right)));
+  const recordedContextCatalog = (!canRead
+    ? { status: "not-requested", records: [] }
+    : props.recordedContextCatalog ?? {
+        status: casesLoaded ? (cases.length > 0 ? "available" : "empty") : "loading",
+        records: cases,
+      }) satisfies RecordedContextCatalog;
   const casesByEntity = new Map<string, Set<string>>();
   for (const entry of involvementIndex) {
     const bucket = casesByEntity.get(entry.entityId) ?? new Set<string>();
@@ -1420,11 +1395,16 @@ export function Cases(props: {
         </p>
         <div className="case-form__context-grid">
           {INVESTIGATION_CONTEXT_FIELDS.map((field) => (
-            <ContextComboBox
+            <RecordedContextCombo
               key={field}
-              field={field}
+              id={`new-investigation-context-${field}`}
+              label={CONTEXT_FIELD_LABELS[field]}
+              ariaLabel={`Investigation context: ${CONTEXT_FIELD_LABELS[field]}`}
+              listId={`new-investigation-context-options-${field}`}
+              inputClassName="login__input"
               value={newSituation.investigationContext[field]}
-              options={contextOptions(field)}
+              options={recordedContextOptions(recordedContextCatalog.records, field, newSituation.investigationContext)}
+              catalogStatus={recordedContextCatalog.status}
               onChange={(value) => setNewSituation((draft) => ({
                 ...draft,
                 investigationContext: { ...draft.investigationContext, [field]: value },
@@ -2272,11 +2252,16 @@ export function Cases(props: {
                   </p>
                   <div className="situation__context-grid">
                     {INVESTIGATION_CONTEXT_FIELDS.map((field) => (
-                      <ContextComboBox
+                      <RecordedContextCombo
                         key={field}
-                        field={field}
+                        id={`situation-context-${field}`}
+                        label={CONTEXT_FIELD_LABELS[field]}
+                        ariaLabel={`Investigation context: ${CONTEXT_FIELD_LABELS[field]}`}
+                        listId={`situation-context-options-${field}`}
+                        inputClassName="login__input"
                         value={situationDraft.investigationContext[field]}
-                        options={contextOptions(field)}
+                        options={recordedContextOptions(recordedContextCatalog.records, field, situationDraft.investigationContext)}
+                        catalogStatus={recordedContextCatalog.status}
                         onChange={(value) => setSituationDraft((draft) => ({
                           ...draft,
                           investigationContext: { ...draft.investigationContext, [field]: value },

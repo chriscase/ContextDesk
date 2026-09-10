@@ -244,7 +244,7 @@ describe("war room overview", () => {
     });
     render(<Cases roles={["contributor"]} view="investigations" />);
     const product = await screen.findByRole("combobox", { name: "Investigation context: Software or product" });
-    const list = document.getElementById("investigation-context-options-productName");
+    const list = document.getElementById("new-investigation-context-options-productName");
     expect(list?.querySelector('option[value="Fixture Desk"]')).toBeTruthy();
 
     fireEvent.change(product, { target: { value: "A brand-new product label" } });
@@ -256,6 +256,57 @@ describe("war room overview", () => {
     fireEvent.change(search, { target: { value: "qa / US-CENTRAL" } });
     expect(screen.getByRole("button", { name: "Fixture incident" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Search indexing" })).toBeNull();
+  });
+
+  it("keeps recorded-context helper ids scoped to the active War Room editor", async () => {
+    stubCaseFetch({
+      cases: [{
+        ...fixtureCases[0],
+        investigationContext: {
+          productName: "Fixture Desk",
+          version: "4.2",
+          build: "build-007",
+          component: "queue-worker",
+          environment: "QA / us-central",
+          organization: "Synthetic Harbor",
+        },
+      }],
+    });
+    render(<Cases roles={["contributor"]} view="investigations" />);
+
+    const createProduct = await screen.findByRole("combobox", {
+      name: "Investigation context: Software or product",
+    });
+    const createListId = createProduct.getAttribute("list");
+    const createHintId = createProduct.getAttribute("aria-describedby");
+    expect(createListId).toBe("new-investigation-context-options-productName");
+    expect(createHintId).toBe(`${createListId}-hint`);
+    expect(document.getElementById(createListId ?? "")?.tagName).toBe("DATALIST");
+    expect(document.getElementById(createHintId ?? "")?.textContent)
+      .toBe("Choose a recorded value or enter a new one.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Fixture incident" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit situation" }));
+
+    const situationProduct = screen.getByRole("combobox", {
+      name: "Investigation context: Software or product",
+    });
+    const situationListId = situationProduct.getAttribute("list");
+    const situationHintId = situationProduct.getAttribute("aria-describedby");
+    expect(situationListId).toBe("situation-context-options-productName");
+    expect(situationHintId).toBe(`${situationListId}-hint`);
+    expect(situationListId).not.toBe(createListId);
+    expect(situationHintId).not.toBe(createHintId);
+    expect(document.getElementById(situationListId ?? "")?.tagName).toBe("DATALIST");
+    expect(document.getElementById(situationHintId ?? "")?.textContent)
+      .toBe("Existing recorded value selected.");
+    expect(document.getElementById(createListId ?? "")).toBeNull();
+    expect(document.getElementById(createHintId ?? "")).toBeNull();
+
+    const helperIds = [...document.querySelectorAll(
+      "datalist[id], .recorded-context-combo__hint[id]",
+    )].map((node) => node.id);
+    expect(new Set(helperIds).size).toBe(helperIds.length);
   });
 
   it("does not offer investigation creation to a viewer", async () => {
@@ -3129,6 +3180,68 @@ describe("War Room collection-query browse", () => {
     await waitFor(() => {
       const requested = stub.mock.calls.map((call) => String(call[0]));
       expect(requested).not.toContain("/api/cases");
+    });
+  });
+
+  it("uses the separately authorized Runtime list for create suggestions in collection mode", async () => {
+    stubCaseFetch();
+    const item = makePopulatedCase();
+    const page: InvestigationCollectionPageV1 = {
+      schemaId: "cd-collab.investigation_collection_page.v1",
+      items: [item],
+      nextCursor: null,
+      hiddenArchivedCount: 0,
+      facets: {
+        status: { top: [], otherCount: 0 }, entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 }, contributor: { top: [], otherCount: 0 },
+      },
+    };
+    render(<Cases
+      roles={["case-lead"]}
+      capabilities={["investigation:read", "investigation:write"]}
+      view="investigations"
+      collectionPage={{ availability: "available", value: page, refresh: "settled" }}
+      collectionQuery={DEFAULT_COLLECTION_QUERY}
+      onCollectionQueryChange={vi.fn()}
+      recordedContextCatalog={{
+        status: "available",
+        records: [{ investigationContext: { productName: "Authorized off-page product" } }],
+      }}
+    />);
+    await screen.findByRole("button", { name: item.title });
+    const list = document.getElementById("new-investigation-context-options-productName");
+    expect(list?.querySelector('option[value="Authorized off-page product"]')).toBeTruthy();
+    expect(list?.querySelector(`option[value="${item.investigationContext?.productName ?? ""}"]`)).toBeNull();
+  });
+
+  it("keeps wired War Room context entry truthful and request-free with write but no read", async () => {
+    const stub = stubCaseFetch();
+    render(<Cases
+      roles={[]}
+      capabilities={["investigation:write"]}
+      view="investigations"
+      collectionPage={{ availability: "idle" }}
+      collectionQuery={DEFAULT_COLLECTION_QUERY}
+      onCollectionQueryChange={vi.fn()}
+      recordedContextCatalog={{
+        status: "available",
+        records: [{ investigationContext: { productName: "Previously visible product" } }],
+      }}
+    />);
+
+    const product = screen.getByRole("combobox", { name: "Investigation context: Software or product" });
+    const hint = document.getElementById(product.getAttribute("aria-describedby") ?? "");
+    expect(hint?.textContent).toBe("Recorded values were not requested because your current access does not include reading investigations. You can still enter a value.");
+    expect(hint?.getAttribute("aria-live")).toBeNull();
+    expect((product as HTMLInputElement).disabled).toBe(false);
+    expect(document.getElementById("new-investigation-context-options-productName")?.children).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: /retry recorded values/i })).toBeNull();
+    await waitFor(() => {
+      const caseReads = stub.mock.calls
+        .filter(([, init]) => (init?.method ?? "GET") === "GET")
+        .map(([input]) => String(input))
+        .filter((url) => url === "/api/cases" || url.startsWith("/api/cases?") || url.startsWith("/api/cases/"));
+      expect(caseReads).toEqual([]);
     });
   });
 
