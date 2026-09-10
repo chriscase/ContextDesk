@@ -9,9 +9,11 @@ import {
   type HealthResponseV1,
   type ReadyResponseV1,
 } from "@cd-collab/contracts";
+import type { EvidenceStorageProviderIdentityBinding } from "@cd-collab/contracts/evidence-storage";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import type { Config } from "./config.js";
+import type { EvidenceProviderInstanceInitialization } from "./evidence/provider-instance.js";
 import { latestMigrationVersion } from "./db/migrate.js";
 import type { EvidenceStore } from "./evidence/store.js";
 import {
@@ -143,6 +145,43 @@ export interface AppDeps {
   serveStatic?: boolean;
   installationId?: string;
   publicIdentities?: PublicIdentityCodec;
+  /**
+   * Sanitized one-time startup proof of evidence provider identity binding.
+   * Injected apps omit this; the status route then reports `not_reported`.
+   */
+  evidenceProviderIdentityBinding?: Exclude<
+    EvidenceStorageProviderIdentityBinding,
+    "not_reported"
+  >;
+}
+
+const STARTUP_PREPARE_OUTCOMES = ["created", "existing", "reconciled"] as const;
+
+/**
+ * Project the one-time `prepareEvidenceRuntime()` result into the admin-visible
+ * binding. Unknown preparation fails closed and must not become a UI status.
+ */
+export function projectStartupEvidenceProviderIdentityBinding(
+  prepared: EvidenceProviderInstanceInitialization | null,
+): Exclude<EvidenceStorageProviderIdentityBinding, "not_reported"> {
+  if (prepared === null) return "legacy_unbound";
+  if (
+    typeof prepared === "object"
+    && (STARTUP_PREPARE_OUTCOMES as readonly string[]).includes(prepared.outcome)
+  ) {
+    return "validated";
+  }
+  throw new Error("evidence provider identity startup preparation is unknown");
+}
+
+function evidenceProviderIdentityBindingFrom(
+  value: AppDeps["evidenceProviderIdentityBinding"],
+): EvidenceStorageProviderIdentityBinding {
+  if (value === undefined) return "not_reported";
+  if (value === "validated" || value === "legacy_unbound") {
+    return value;
+  }
+  throw new Error("evidence provider identity binding is unknown");
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -304,6 +343,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       sessionAuth,
       config: deps.config,
       store: deps.store,
+      evidenceProviderIdentityBinding: evidenceProviderIdentityBindingFrom(
+        deps.evidenceProviderIdentityBinding,
+      ),
     });
     await registerAdminAuditRoutes(app, {
       sessionAuth,

@@ -1,9 +1,16 @@
 import {
   parseEvidenceStorageStatus,
+  type EvidenceStorageProviderIdentityBinding,
   type EvidenceStorageStatusV1,
 } from "@cd-collab/contracts/evidence-storage";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { protectedApiFetch } from "./protected-api.js";
+
+const PROVIDER_IDENTITY_BINDING_COPY = {
+  validated: "Pinned provider identity was validated when this service started.",
+  legacy_unbound: "Startup used the supported unpinned legacy mode.",
+  not_reported: "This process has no startup provider-identity proof.",
+} as const satisfies Record<EvidenceStorageProviderIdentityBinding, string>;
 
 function formatBytes(value: number): string {
   if (value < 1024 * 1024) return `${Math.round(value / 1024)} KiB`;
@@ -74,6 +81,10 @@ export function AdminEvidenceStoragePanel() {
           <dl className="admin-storage__facts">
             <div><dt>Evidence provider</dt><dd>{status.provider === "s3" ? "S3-compatible object storage" : "Local filesystem"}</dd></div>
             <div><dt>Database</dt><dd>{status.database === "postgres" ? "PostgreSQL" : "SQLite"}</dd></div>
+            <div>
+              <dt>Provider identity</dt>
+              <dd>{PROVIDER_IDENTITY_BINDING_COPY[status.providerIdentityBinding]}</dd>
+            </div>
             <div><dt>Connection</dt><dd><code>{endpointLabel(status)}</code></dd></div>
             {status.provider === "s3" ? <>
               <div><dt>Region</dt><dd><code>{status.region}</code></dd></div>

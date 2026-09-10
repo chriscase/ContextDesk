@@ -3,6 +3,7 @@ import {
   parseEvidenceStorageStatus,
   type EvidenceStorageStatusV1,
 } from "@cd-collab/contracts";
+import type { EvidenceStorageProviderIdentityBinding } from "@cd-collab/contracts/evidence-storage";
 import type { FastifyInstance } from "fastify";
 import type { Config } from "../../config.js";
 import { requireSessionCapability, type SessionAuthorizationDeps } from "../authz/index.js";
@@ -12,6 +13,7 @@ export interface EvidenceStorageStatusRouteDeps {
   config: Pick<Config, "storage" | "evidence">;
   store: { ping(): void | Promise<void> };
   now?: () => string;
+  evidenceProviderIdentityBinding: EvidenceStorageProviderIdentityBinding;
 }
 
 /**
@@ -54,6 +56,7 @@ export async function registerEvidenceStorageStatusRoutes(
       maxUploadBytes: settings.maxUploadBytes,
       requestTimeoutMs: settings.provider === "s3" ? settings.s3.timeoutMs : null,
       credentialsMode: settings.provider === "s3" ? settings.s3.credentialsMode : null,
+      providerIdentityBinding: deps.evidenceProviderIdentityBinding,
     };
     parseEvidenceStorageStatus(response);
     return response;

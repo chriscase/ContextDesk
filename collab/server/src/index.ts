@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { buildApp } from "./app.js";
+import { buildApp, projectStartupEvidenceProviderIdentityBinding } from "./app.js";
 import { createSqliteRuntime } from "./db/sqlite.js";
 import { loadRuntimeConfig } from "./config.js";
 import { createPostgresEvidenceWriteLease } from "./evidence/lease.js";
@@ -195,7 +195,9 @@ async function main(): Promise<void> {
   const store = evidenceRuntime.store;
   store.addReferencedContentHashSource(() => storage.cases.listReferencedContentHashes());
   store.addReferencedContentHashSource(() => storage.runs.listReferencedContentHashes());
-  await prepareEvidenceRuntime(evidenceRuntime);
+  const evidenceProviderIdentityBinding = projectStartupEvidenceProviderIdentityBinding(
+    await prepareEvidenceRuntime(evidenceRuntime),
+  );
   const publicIdentities = await loadPublicIdentityCodec(
     config.evidenceRoot,
     process.env.COLLAB_PUBLIC_IDENTITY_KEY,
@@ -435,6 +437,7 @@ async function main(): Promise<void> {
   const app = await buildApp({
     config,
     pool: storage.pool,
+    evidenceProviderIdentityBinding,
     ...(storage.databaseProbe ? { databaseProbe: storage.databaseProbe } : {}),
     store,
     ...(logTime ? { logTime } : {}),

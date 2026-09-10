@@ -4,8 +4,9 @@ import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js"
  * Secret-free administrator view of the evidence byte provider.
  *
  * This contract intentionally contains configuration useful for diagnosis,
- * but never credentials, control-root paths, CA paths, or provider metadata.
- * The database and evidence provider remain independent authorities.
+ * but never credentials, control-root paths, CA paths, provider metadata,
+ * or provider-identity identifiers. Binding state is a sanitized startup
+ * proof only; it is not an inspect, init, recovery, or repair action.
  */
 export const EVIDENCE_STORAGE_STATUS_SCHEMA_ID =
   "cd-collab.evidence_storage_status.v1" as const;
@@ -15,6 +16,14 @@ export type EvidenceStorageProvider = (typeof EVIDENCE_STORAGE_PROVIDERS)[number
 
 export const EVIDENCE_STORAGE_STATES = ["ready", "unavailable"] as const;
 export type EvidenceStorageState = (typeof EVIDENCE_STORAGE_STATES)[number];
+
+export const EVIDENCE_STORAGE_PROVIDER_IDENTITY_BINDINGS = [
+  "validated",
+  "legacy_unbound",
+  "not_reported",
+] as const;
+export type EvidenceStorageProviderIdentityBinding =
+  (typeof EVIDENCE_STORAGE_PROVIDER_IDENTITY_BINDINGS)[number];
 
 export interface EvidenceStorageStatusV1 {
   schemaId: typeof EVIDENCE_STORAGE_STATUS_SCHEMA_ID;
@@ -29,6 +38,7 @@ export interface EvidenceStorageStatusV1 {
   maxUploadBytes: number;
   requestTimeoutMs: number | null;
   credentialsMode: "default_chain" | "static" | null;
+  providerIdentityBinding: EvidenceStorageProviderIdentityBinding;
 }
 
 const statusShape: ObjectShape = {
@@ -44,6 +54,7 @@ const statusShape: ObjectShape = {
   maxUploadBytes: f.req(f.u64),
   requestTimeoutMs: f.nul(f.u64),
   credentialsMode: f.nul(f.en("default_chain", "static")),
+  providerIdentityBinding: f.req(f.en(...EVIDENCE_STORAGE_PROVIDER_IDENTITY_BINDINGS)),
 };
 
 function assertProviderShape(status: EvidenceStorageStatusV1): void {

@@ -70,9 +70,11 @@ export {
   EVIDENCE_STORAGE_PROVIDERS,
   EVIDENCE_STORAGE_STATES,
   EVIDENCE_STORAGE_STATUS_SCHEMA_ID,
+  EVIDENCE_STORAGE_PROVIDER_IDENTITY_BINDINGS,
   parseEvidenceStorageStatus,
 } from "./evidence-storage-status.js";
 export type {
+  EvidenceStorageProviderIdentityBinding,
   EvidenceStorageProvider,
   EvidenceStorageState,
   EvidenceStorageStatusV1,
