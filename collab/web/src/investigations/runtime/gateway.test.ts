@@ -2768,6 +2768,26 @@ describe("collection query seam", () => {
     },
   );
 
+  it("classifies a rejected collection cursor without treating every 400 as one", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "stale_cursor" }, 400));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "malformed_cursor" }, 400));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "invalid" }, 400));
+
+    expect(await investigationGateway.queryInvestigations(
+      { cursor: OPAQUE_COLLECTION_CURSOR },
+      options(),
+    )).toEqual({ ok: false, error: { kind: "stale_cursor" } });
+    expect(await investigationGateway.queryInvestigations(
+      { cursor: OPAQUE_COLLECTION_CURSOR },
+      options(),
+    )).toEqual({ ok: false, error: { kind: "malformed_cursor" } });
+    expect(await investigationGateway.queryInvestigations(
+      { cursor: OPAQUE_COLLECTION_CURSOR },
+      options(),
+    )).toEqual({ ok: false, error: { kind: "validation", status: 400 } });
+  });
+
   it("keeps an empty parsed page distinct from an unavailable query", async () => {
     const empty = collectionPageJson({ items: [], hiddenArchivedCount: 0 });
     const fetchMock = vi.spyOn(globalThis, "fetch");

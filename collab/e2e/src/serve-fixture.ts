@@ -30,6 +30,7 @@ import {
 } from "../../server/src/modules/cases/index.js";
 import { ExportService, testExportPrivacyConfig } from "../../server/src/modules/export/index.js";
 import { EntityService } from "../../server/src/modules/entities/index.js";
+import { SoftwareImpactService } from "../../server/src/modules/software-impact/index.js";
 import { ReferenceService } from "../../server/src/modules/references/index.js";
 import { ResolutionService } from "../../server/src/modules/resolutions/index.js";
 import { ImportService, MemoryRunStore } from "../../server/src/modules/import/index.js";
@@ -147,8 +148,10 @@ async function main(): Promise<void> {
   };
   resolutions.bindInvestigations(investigations);
   const entities = new EntityService({ audit, investigations });
+  const softwareImpact = new SoftwareImpactService({ audit, investigations });
   domain.bindCollectionGraph(createInvestigationCollectionGraph({
     loadEntities: (caseIds) => entities.collectionLinks(caseIds),
+    loadImpacts: (caseIds) => softwareImpact.collectionIdentities(caseIds),
   }));
   const references = new ReferenceService({ audit, investigations });
   const imports = new ImportService({
@@ -349,6 +352,7 @@ async function main(): Promise<void> {
     exporter,
     portable,
     entities,
+    softwareImpact,
     references,
     resolutions,
     publicIdentities,

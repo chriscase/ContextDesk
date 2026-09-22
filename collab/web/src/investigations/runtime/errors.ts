@@ -35,6 +35,8 @@ export type RuntimeFailure =
   | { kind: "auth_lost"; status: 401 | 403 }
   | { kind: "not_found"; status: 404 }
   | { kind: "validation"; status: 400 }
+  | { kind: "stale_cursor" }
+  | { kind: "malformed_cursor" }
   | {
       kind: "coordination_refused";
       status: 409;

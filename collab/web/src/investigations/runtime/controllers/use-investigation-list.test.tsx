@@ -790,4 +790,173 @@ describe("useInvestigationCollectionQuery", () => {
     });
     expect(secondMount.result.current.page).toEqual({ status: "ready", value: nextPage });
   });
+
+  it("restarts a rejected cursor from the beginning instead of appending the old page", async () => {
+    const firstItem = makePopulatedCase();
+    const restartedItem = { ...makeSparseImportedCase(), id: "case-restarted", title: "Restarted investigation" };
+    const firstPage = collectionPage({
+      items: [firstItem],
+      nextCursor: OPAQUE_COLLECTION_CURSOR,
+      hiddenArchivedCount: 1,
+    });
+    const restartedPage = collectionPage({
+      items: [restartedItem],
+      nextCursor: "eyJyZXN0YXJ0Ijp0cnVlfQ",
+      hiddenArchivedCount: 4,
+      facets: {
+        status: { top: [{ key: "open", count: 6 }], otherCount: 1 },
+        entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 3 },
+        contributor: { top: [{ key: "identity-alice", count: 6 }], otherCount: 2 },
+      },
+    });
+    const requests: InvestigationCollectionQueryInput[] = [];
+    const gateway = queryGatewayWith(async (query) => {
+      requests.push(query);
+      if (query.cursor) return { ok: false, error: { kind: "stale_cursor" } };
+      if (requests.length === 1) return { ok: true, value: firstPage };
+      return { ok: true, value: restartedPage };
+    });
+    const { result, rerender } = renderHook(
+      ({ query }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled: true,
+        identityKey: "alice",
+        authorityKey: "interactive:viewer",
+        query,
+      }),
+      { initialProps: { query: { q: "checkout" } as InvestigationCollectionQueryInput } },
+    );
+    await waitFor(() => expect(result.current.page).toEqual({ status: "ready", value: firstPage }));
+
+    rerender({ query: { q: "checkout", cursor: OPAQUE_COLLECTION_CURSOR } });
+    await waitFor(() => expect(requests).toHaveLength(3));
+    expect(requests[1]?.cursor).toBe(OPAQUE_COLLECTION_CURSOR);
+    expect(requests[2]?.cursor).toBeNull();
+    expect(result.current.page.status).toBe("ready");
+    if (result.current.page.status !== "ready") throw new Error("expected restarted page");
+    expect(result.current.page.value.items.map((item) => item.id)).toEqual([restartedItem.id]);
+    expect(result.current.page.value.items).not.toContain(firstItem);
+    expect(result.current.page.value.hiddenArchivedCount).toBe(4);
+    expect(result.current.page.value.facets).toBe(restartedPage.facets);
+    expect(result.current.page.value.nextCursor).toBe(restartedPage.nextCursor);
+  });
+
+  it("does not publish a rejected-cursor restart after the identity changes", async () => {
+    const firstPage = collectionPage({
+      items: [makePopulatedCase()],
+      nextCursor: OPAQUE_COLLECTION_CURSOR,
+    });
+    const staleRestart = collectionPage({
+      items: [{ ...makeSparseImportedCase(), id: "case-stale-restart", title: "Stale restart" }],
+    });
+    const restarts: Array<ReturnType<typeof createDeferred<GatewayResult<InvestigationCollectionPageV1>>>> = [];
+    const requests: InvestigationCollectionQueryInput[] = [];
+    const gateway = queryGatewayWith((query) => {
+      requests.push({ ...query });
+      if (requests.length === 1) return Promise.resolve({ ok: true, value: firstPage });
+      if (query.cursor) return Promise.resolve({ ok: false, error: { kind: "malformed_cursor" } });
+      const deferred = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+      restarts.push(deferred);
+      return deferred.promise;
+    });
+    const { result, rerender } = renderHook(
+      ({ identityKey, query }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled: true,
+        identityKey,
+        authorityKey: "interactive:viewer",
+        query,
+      }),
+      {
+        initialProps: {
+          identityKey: "alice",
+          query: { q: "checkout" } as InvestigationCollectionQueryInput,
+        },
+      },
+    );
+    await waitFor(() => expect(result.current.page).toEqual({ status: "ready", value: firstPage }));
+    rerender({
+      identityKey: "alice",
+      query: { q: "checkout", cursor: OPAQUE_COLLECTION_CURSOR },
+    });
+    await waitFor(() => expect(restarts).toHaveLength(1));
+    rerender({
+      identityKey: "mallory",
+      query: { q: "checkout" },
+    });
+    await waitFor(() => expect(requests.some((query) => query.cursor == null && requests.indexOf(query) > 1)).toBe(true));
+    await act(async () => {
+      restarts[0]!.resolve({ ok: true, value: staleRestart });
+    });
+    expect(result.current.page.status === "ready"
+      && result.current.page.value.items.some((item) => item.id === "case-stale-restart")).toBe(false);
+  });
+
+  it("repeats the current cursor scope on an explicit retry", async () => {
+    const firstPage = collectionPage({
+      items: [makePopulatedCase()],
+      nextCursor: OPAQUE_COLLECTION_CURSOR,
+    });
+    const requests: InvestigationCollectionQueryInput[] = [];
+    let continuations = 0;
+    const gateway = queryGatewayWith(async (query) => {
+      requests.push(query);
+      if (!query.cursor) return { ok: true, value: firstPage };
+      continuations += 1;
+      return continuations === 1
+        ? { ok: false, error: { kind: "unavailable", status: 503 } }
+        : { ok: true, value: collectionPage({ items: [makeSparseImportedCase()], nextCursor: null }) };
+    });
+    const { result, rerender } = renderHook(
+      ({ query }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled: true,
+        identityKey: "alice",
+        authorityKey: "interactive:viewer",
+        query,
+      }),
+      { initialProps: { query: { q: "checkout" } as InvestigationCollectionQueryInput } },
+    );
+    await waitFor(() => expect(result.current.page).toEqual({ status: "ready", value: firstPage }));
+    rerender({ query: { q: "checkout", cursor: OPAQUE_COLLECTION_CURSOR } });
+    await waitFor(() => expect(result.current.page.status).toBe("failed"));
+    act(() => result.current.refresh());
+    await waitFor(() => expect(requests.filter((query) => query.cursor === OPAQUE_COLLECTION_CURSOR)).toHaveLength(2));
+    await waitFor(() => expect(result.current.page.status).toBe("ready"));
+    if (result.current.page.status !== "ready") throw new Error("expected retried page");
+    expect(result.current.page.value.items.map((item) => item.id)).toEqual([
+      makePopulatedCase().id,
+      makeSparseImportedCase().id,
+    ]);
+    expect(requests.at(-1)?.cursor).toBe(OPAQUE_COLLECTION_CURSOR);
+  });
+
+  it("issues no collection request for a denied reader", async () => {
+    const requests: InvestigationCollectionQueryInput[] = [];
+    const gateway = queryGatewayWith(async (query) => {
+      requests.push(query);
+      return { ok: true, value: collectionPage() };
+    });
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled,
+        identityKey: "alice",
+        authorityKey: "denied",
+        query: { q: "checkout", contributorId: "identity-alice" },
+      }),
+      { initialProps: { enabled: false } },
+    );
+    await act(async () => undefined);
+    expect(result.current.page).toEqual({ status: "idle" });
+    expect(requests).toHaveLength(0);
+    rerender({ enabled: true });
+    await waitFor(() => expect(requests).toHaveLength(1));
+    rerender({ enabled: false });
+    expect(result.current.page).toEqual({ status: "idle" });
+    const seen = requests.length;
+    await act(async () => undefined);
+    expect(requests).toHaveLength(seen);
+  });
 });

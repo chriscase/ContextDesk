@@ -11,6 +11,7 @@ import {
   type InvestigationCollectionQueryInput,
   type InvestigationGateway,
 } from "../gateway.js";
+import type { RuntimeFailure } from "../errors.js";
 import type { ResourceState } from "../types.js";
 import { RequestSlot } from "./request-slot.js";
 import {
@@ -208,6 +209,27 @@ function collectionBaseQueryKey(query: InvestigationCollectionQueryV1): string {
   }) ?? "invalid";
 }
 
+function isRejectedCursor(error: RuntimeFailure): boolean {
+  return error.kind === "stale_cursor" || error.kind === "malformed_cursor";
+}
+
+function restartCollectionQuery(
+  query: InvestigationCollectionQueryV1,
+): InvestigationCollectionQueryInput {
+  return {
+    q: query.q,
+    status: query.status,
+    includeArchived: query.includeArchived,
+    entityId: query.entityId,
+    impactIdentity: query.impactIdentity,
+    contributorId: query.contributorId,
+    recordedFrom: query.recordedFrom,
+    recordedTo: query.recordedTo,
+    limit: query.limit,
+    cursor: null,
+  };
+}
+
 function accumulatedPage(
   previous: InvestigationCollectionPageV1,
   next: InvestigationCollectionPageV1,
@@ -335,8 +357,50 @@ export function useInvestigationCollectionQuery({
     }
 
     void gateway.queryInvestigations(parsed.value, { signal: token.signal })
-      .then((result) => {
+      .then(async (result) => {
         if (!requestSlot.current.isCurrent(token)) return;
+        if (
+          !result.ok
+          && isRejectedCursor(result.error)
+          && parsed.value.cursor !== null
+        ) {
+          // A rejected cursor must not keep or append the pages it followed.
+          accumulatedPageRef.current = null;
+          setResource((current) => current.key === scope
+            ? { key: scope, state: { status: "loading" } }
+            : current);
+          let restarted: Awaited<ReturnType<InvestigationCollectionQueryGateway["queryInvestigations"]>>;
+          try {
+            restarted = await gateway.queryInvestigations(
+              restartCollectionQuery(parsed.value),
+              { signal: token.signal },
+            );
+          } catch {
+            if (!requestSlot.current.isCurrent(token)) return;
+            setResource((current) => failResourceLoad(current, scope, { kind: "unexpected" }));
+            return;
+          }
+          if (!requestSlot.current.isCurrent(token)) return;
+          if (restarted.ok) {
+            accumulatedPageRef.current = {
+              identityKey,
+              authorityKey,
+              queryKey: baseQueryKey,
+              page: restarted.value,
+            };
+            setResource((current) => succeedResourceLoad(current, scope, restarted.value));
+            setSuccessfulSnapshot({
+              key: scope,
+              generation: requestGeneration,
+            });
+            return;
+          }
+          if (restarted.error.kind === "not_found" || restarted.error.kind === "auth_lost") {
+            accumulatedPageRef.current = null;
+          }
+          setResource((current) => failResourceLoad(current, scope, restarted.error));
+          return;
+        }
         if (result.ok) {
           const page = parsed.value.cursor !== null && previousPage !== undefined
             ? accumulatedPage(previousPage, result.value)

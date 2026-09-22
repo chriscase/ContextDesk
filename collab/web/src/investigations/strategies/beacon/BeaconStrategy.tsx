@@ -18,7 +18,10 @@ import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
+  CollectionDiscoveryFilters,
   CollectionPagination,
+  collectionEmptyMessage,
+  shareableQueryNarrows,
   StrategyHero,
   StrategyPanel,
   StrategyStateNotice,
@@ -222,13 +225,14 @@ function Browse({
       <div className="beacon__browse-filters">
         <label className="beacon__search"><span>Find an investigation</span><input ref={focusRef} type="search" value={query} onChange={(event) => updateQuery({ q: event.target.value })} placeholder="Title, problem, product, or build" /></label>
         <label className="beacon__field"><span>Status</span><select value={status} onChange={(event) => updateQuery({ status: event.target.value as BrowseStatus })}><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label>
+        {collection.enabled && collectionQuery !== undefined ? <CollectionDiscoveryFilters query={collectionQuery} onQueryChange={onCollectionQueryChange} facets={collectionView.availability === "available" ? collectionView.value.facets : null} showEntity /> : null}
         {collection.enabled ? <label className="beacon__checkbox"><input type="checkbox" checked={includeArchived} onChange={(event) => updateQuery({ includeArchived: event.target.checked })} /><span>Include archived</span></label> : null}
       </div>
       {statusFacets.length > 0 ? <div className="beacon__facets" aria-label="Recorded status counts">{statusFacets.map((facet) => <button key={facet.key} type="button" aria-pressed={status === facet.key} onClick={() => updateQuery({ status: status === facet.key ? "all" : facet.key as BrowseStatus })}><span>{facet.key}</span><strong>{facet.count}</strong></button>)}</div> : null}
       {view.availability === "idle" || view.availability === "loading" ? <StrategyStateNotice busy>Loading investigations…</StrategyStateNotice> : null}
       {view.availability === "unavailable" ? <StrategyStateNotice tone="danger" role="alert" title="Investigation list unavailable" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>{failureCopy(view.error, "The investigation list")}</StrategyStateNotice> : null}
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Refresh failed" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>The previously loaded list is still shown.</StrategyStateNotice> : null}
-      {view.availability === "available" && filtered.length === 0 ? <StrategyStateNotice>{normalized ? "No investigations match this search." : "No investigations have been recorded yet."}</StrategyStateNotice> : null}
+      {view.availability === "available" && filtered.length === 0 ? <StrategyStateNotice>{collectionEmptyMessage(collection.enabled && collectionQuery !== undefined ? shareableQueryNarrows(collectionQuery) : normalized.length > 0 || status !== "all")}</StrategyStateNotice> : null}
       {view.availability === "available" && filtered.length > 0 ? <ul className="beacon__case-list">{filtered.map((item) => <li key={item.id}><button type="button" onClick={() => onOpenCase(item.id)}><span><strong>{titleOf(item)}</strong><small>{recorded(item.problemStatement)}</small></span><span className="beacon__case-state"><StrategyBadge tone={item.status === "resolved" ? "success" : item.status === "open" ? "accent" : "neutral"}>{item.status}</StrategyBadge><small>{dateLabel(item.createdAt)}</small></span></button></li>)}</ul> : null}
       {collection.enabled ? <CollectionPagination key={JSON.stringify(collection.input)} view={collectionView} onNextPage={collection.nextPage} /> : null}
     </StrategyPanel>
