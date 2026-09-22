@@ -13,13 +13,13 @@ import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import { RuntimeCoordinationControl } from "../runtime-coordination.js";
 import { EvidenceAnnotationWorkspace } from "../shared/index.js";
 import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
-import { useInvestigationCollectionQuery } from "../collection-query.js";
 import {
   CollectionDiscoveryFilters,
-  CollectionPagination,
   collectionEmptyMessage,
   shareableQueryNarrows,
-} from "../shared/index.js";
+  useInvestigationCollectionQuery,
+} from "../collection-query.js";
+import { CollectionPagination } from "../shared/index.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];

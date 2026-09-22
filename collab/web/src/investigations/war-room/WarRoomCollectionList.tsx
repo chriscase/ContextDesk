@@ -6,10 +6,10 @@ import type {
 import type { CollectionQueryLocation } from "../../app-location.js";
 import {
   CollectionDiscoveryFilters,
-  CollectionPagination,
   collectionEmptyMessage,
   shareableQueryNarrows,
-} from "../strategies/shared/index.js";
+} from "../strategies/collection-query.js";
+import { CollectionPagination } from "../strategies/shared/index.js";
 
 export interface WarRoomCollectionListProps {
   readonly page: ResourceView<InvestigationCollectionPageV1>;

@@ -1,5 +1,5 @@
-import type { CollectionQueryLocation } from "../../../app-location.js";
-import type { InvestigationCollectionPageV1 } from "../../runtime/public.js";
+import type { CollectionQueryLocation } from "../../app-location.js";
+import type { InvestigationCollectionPageV1 } from "../runtime/public.js";
 import {
   impactIdentitiesEqual,
   impactIdentityValue,

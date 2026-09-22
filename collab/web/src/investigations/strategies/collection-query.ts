@@ -11,6 +11,13 @@ import {
   type CollectionQueryLocation,
 } from "../../app-location.js";
 
+export { CollectionDiscoveryFilters } from "./CollectionDiscoveryFilters.js";
+export type { CollectionDiscoveryFiltersProps } from "./CollectionDiscoveryFilters.js";
+export {
+  collectionEmptyMessage,
+  shareableQueryNarrows,
+} from "./collection-discovery.js";
+
 export interface InvestigationCollectionQueryPresentation {
   readonly enabled: boolean;
   readonly input: InvestigationCollectionQueryInput;

@@ -7,15 +7,17 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
-import { useInvestigationCollectionQuery } from "../collection-query.js";
+import {
+  CollectionDiscoveryFilters,
+  collectionEmptyMessage,
+  shareableQueryNarrows,
+  useInvestigationCollectionQuery,
+} from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
-  CollectionDiscoveryFilters,
   CollectionPagination,
-  collectionEmptyMessage,
-  shareableQueryNarrows,
   StrategyHero,
   StrategyPanel,
   StrategyStateNotice,

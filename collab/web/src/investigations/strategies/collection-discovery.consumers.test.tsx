@@ -1,24 +1,24 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentType } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { pathFor, DEFAULT_COLLECTION_QUERY, type CollectionQueryLocation } from "../../../app-location.js";
+import { pathFor, DEFAULT_COLLECTION_QUERY, type CollectionQueryLocation } from "../../app-location.js";
 import {
   InvestigationRuntimeProvider,
   type InvestigationCollectionPageV1,
   type ResourceView,
-} from "../../runtime/public.js";
+} from "../runtime/public.js";
 import {
   createInvestigationGatewayDouble,
   gatewayOk,
   InvestigationRuntimeGatewayHarness,
   makePopulatedCase,
   type InvestigationGateway,
-} from "../../runtime/testkit/index.js";
-import type { InvestigationStrategyShellProps } from "../contract.js";
-import { BeaconStrategy } from "../beacon/BeaconStrategy.js";
-import { InvestigationFirstStrategy } from "../investigation-first/InvestigationFirstStrategy.js";
-import { KeystoneStrategy } from "../keystone/KeystoneStrategy.js";
-import { WarRoomCollectionList } from "../../war-room/WarRoomCollectionList.js";
+} from "../runtime/testkit/index.js";
+import type { InvestigationStrategyShellProps } from "./contract.js";
+import { BeaconStrategy } from "./beacon/BeaconStrategy.js";
+import { InvestigationFirstStrategy } from "./investigation-first/InvestigationFirstStrategy.js";
+import { KeystoneStrategy } from "./keystone/KeystoneStrategy.js";
+import { WarRoomCollectionList } from "../war-room/WarRoomCollectionList.js";
 import { collectionEmptyMessage, shareableQueryNarrows } from "./collection-discovery.js";
 
 afterEach(cleanup);

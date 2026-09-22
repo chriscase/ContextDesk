@@ -56,15 +56,3 @@ export type { EvidenceAnnotationWorkspaceProps } from "./EvidenceAnnotationWorks
 
 export { CollectionPagination } from "./CollectionPagination.js";
 export type { CollectionPageView, CollectionPaginationProps } from "./CollectionPagination.js";
-
-export { CollectionDiscoveryFilters } from "./CollectionDiscoveryFilters.js";
-export type { CollectionDiscoveryFiltersProps } from "./CollectionDiscoveryFilters.js";
-export {
-  collectionEmptyMessage,
-  impactIdentitiesEqual,
-  impactIdentityValue,
-  recordedDateInputValue,
-  recordedFromInstant,
-  recordedToInstant,
-  shareableQueryNarrows,
-} from "./collection-discovery.js";

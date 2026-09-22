@@ -11,6 +11,9 @@ import {
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
 import {
+  CollectionDiscoveryFilters,
+  collectionEmptyMessage,
+  shareableQueryNarrows,
   useInvestigationCollectionQuery,
   type InvestigationCollectionQueryPresentation,
 } from "../collection-query.js";
@@ -18,10 +21,7 @@ import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
-  CollectionDiscoveryFilters,
   CollectionPagination,
-  collectionEmptyMessage,
-  shareableQueryNarrows,
   StrategyHero,
   StrategyPanel,
   StrategyStateNotice,
