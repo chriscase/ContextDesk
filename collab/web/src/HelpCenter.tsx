@@ -187,6 +187,36 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         actions: [{ label: "Go to Operations", go: { area: "operations" } }],
       },
       {
+        id: "find-investigations",
+        title: "Find investigations across the collection",
+        summary:
+          "Filter the investigation list by recorded software impact, recorded contributor, and the time the case was recorded.",
+        keywords: [
+          "search",
+          "filter",
+          "software impact",
+          "contributor",
+          "recorded",
+          "observed",
+          "collection",
+        ],
+        what:
+          "Investigations can be narrowed by words, recorded status, involved entity, software-impact identity, contributor, and the recorded range. The same query is kept when you switch among War Room, Investigation First, Keystone, and Beacon. A copied Investigations URL restores those filters. It does not carry the server's page marker.",
+        when:
+          "Use it when you need a collection-wide result rather than a search of only the rows already on screen.",
+        steps: [
+          "Open Investigations and set the filters you need. Recorded from and recorded to are the case creation time in UTC, not the observed occurrence.",
+          "War Room's Observed from control is different: it filters only the investigations already loaded on that page.",
+          "Clear one active filter, or clear all collection filters, without leaving Investigations.",
+          "Load the next page only when the server offers one. If a page marker is rejected, the list says it started again from the beginning of the current search.",
+        ],
+        recorded:
+          "These controls only read the collection the server already authorized. They do not edit investigations, participants, or software impact.",
+        limits:
+          "Facet menus show a bounded set of top values plus a count of the others. A selected value can remain active when it is outside that window; that does not mean it is unauthorized or missing. A failed request is not an empty collection. An account that cannot read investigations does not receive collection results.",
+        actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
+      },
+      {
         id: "read-situation",
         title: "Pick an investigation back up",
         summary:

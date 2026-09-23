@@ -189,6 +189,90 @@ describe("War Room collection discovery", () => {
     );
     expect(screen.getByText("No investigations have been recorded yet.")).toBeTruthy();
   });
+
+  it("keeps an impact outside the top facets understandable and clearable", () => {
+    const outside = {
+      productName: "Absent Desk",
+      version: "9",
+      build: "z",
+      component: "worker",
+      environment: "lab",
+    };
+    const onQueryChange = vi.fn();
+    render(
+      <WarRoomCollectionList
+        page={available(discoveryPage([]))}
+        query={{ ...DEFAULT_COLLECTION_QUERY, q: "keep-me", impactIdentity: outside }}
+        canRead
+        readOnly
+        onOccurredFromChange={vi.fn()}
+        onQueryChange={onQueryChange}
+        onRefresh={vi.fn()}
+        onOpenCase={vi.fn()}
+        cursorRestartNotice="The previous page marker was rejected. These results were loaded again from the start of this search and do not include the discarded page."
+      />,
+    );
+    expect(screen.getByRole("option", {
+      name: "Absent Desk · 9 · z · worker · lab (not in the current top matches)",
+    })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Absent Desk · 9 · z · worker · lab \(\d+\)/u })).toBeNull();
+    expect(screen.getByText(/UTC calendar day/u)).toBeTruthy();
+    expect(screen.getByText(/previous page marker was rejected/u)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", {
+      name: "Clear Software impact: Absent Desk · 9 · z · worker · lab",
+    }));
+    expect(onQueryChange).toHaveBeenCalledWith(expect.objectContaining({
+      impactIdentity: null,
+      q: "keep-me",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear all collection filters" }));
+    const cleared = onQueryChange.mock.calls.at(-1)?.[0] as CollectionQueryLocation;
+    expect(cleared).toEqual(DEFAULT_COLLECTION_QUERY);
+    const preserved = {
+      area: "investigations" as const,
+      caseId: null,
+      stage: "capture" as const,
+      focus: { section: "notes", item: null, lane: null, experiment: null },
+      collectionQuery: cleared,
+    };
+    expect(preserved.stage).toBe("capture");
+    expect(preserved.focus.section).toBe("notes");
+  });
+
+  it("does not show collection actions or prior filters to a denied reader", () => {
+    render(
+      <WarRoomCollectionList
+        page={available(discoveryPage([makePopulatedCase()]))}
+        query={QUERY}
+        canRead={false}
+        readOnly
+        onOccurredFromChange={vi.fn()}
+        onRefresh={vi.fn()}
+        onOpenCase={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/no investigation data was requested/u)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load next page" })).toBeNull();
+    expect(screen.queryByLabelText("Filter investigations by contributor")).toBeNull();
+    expect(screen.queryByText("Synthetic checkout investigation")).toBeNull();
+  });
+
+  it("does not describe an unavailable collection as zero recorded investigations", () => {
+    render(
+      <WarRoomCollectionList
+        page={{ availability: "unavailable", error: { kind: "unavailable", status: 503 } }}
+        query={DEFAULT_COLLECTION_QUERY}
+        canRead
+        readOnly
+        onOccurredFromChange={vi.fn()}
+        onRefresh={vi.fn()}
+        onOpenCase={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/unavailable right now/u)).toBeTruthy();
+    expect(screen.queryByText(/have been recorded/u)).toBeNull();
+    expect(screen.queryByText(/match the current search/u)).toBeNull();
+  });
 });
 
 const PRESENTATIONS: Array<{

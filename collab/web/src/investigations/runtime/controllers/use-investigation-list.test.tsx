@@ -20,6 +20,7 @@ import {
 } from "../testkit/fixtures.js";
 import { createDeferred } from "../testkit/promises.js";
 import {
+  COLLECTION_CURSOR_RESTART_NOTICE,
   useInvestigationCollectionQuery,
   useInvestigationList,
 } from "./use-investigation-list.js";
@@ -840,6 +841,7 @@ describe("useInvestigationCollectionQuery", () => {
     expect(result.current.page.value.hiddenArchivedCount).toBe(4);
     expect(result.current.page.value.facets).toBe(restartedPage.facets);
     expect(result.current.page.value.nextCursor).toBe(restartedPage.nextCursor);
+    expect(result.current.cursorRestartNotice).toBe(COLLECTION_CURSOR_RESTART_NOTICE);
   });
 
   it("does not publish a rejected-cursor restart after the identity changes", async () => {
@@ -891,6 +893,7 @@ describe("useInvestigationCollectionQuery", () => {
     });
     expect(result.current.page.status === "ready"
       && result.current.page.value.items.some((item) => item.id === "case-stale-restart")).toBe(false);
+    expect(result.current.cursorRestartNotice).toBeNull();
   });
 
   it("repeats the current cursor scope on an explicit retry", async () => {

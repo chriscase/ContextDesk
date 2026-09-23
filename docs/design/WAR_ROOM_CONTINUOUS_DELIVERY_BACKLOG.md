@@ -87,6 +87,9 @@ This order is re-evaluated after the Activity Center lands.
 2. **Investigation search and facets.** Move useful list filtering to a typed,
    paged server query: recorded status, entity, software impact, contributor,
    and dates. Add tags only with a canonical contract and audited writes.
+   Draft PR #1181 (branch `integrate/trusted-investigation-discovery-v1`,
+   built on open draft PR #1180) is a candidate for the collection-wide
+   controls. It is not merged, so this item is not shipped.
 3. **Product/version/build catalog quality.** Reuse recorded values across
    investigations, expose administrator-assisted deduplication later, and
    avoid creating a second software-impact truth model.

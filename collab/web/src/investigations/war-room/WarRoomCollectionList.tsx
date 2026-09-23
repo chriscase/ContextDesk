@@ -23,6 +23,7 @@ export interface WarRoomCollectionListProps {
   readonly onRefresh: () => void;
   readonly onNextPage?: () => void;
   readonly onOpenCase: (id: string) => void;
+  readonly cursorRestartNotice?: string | null;
 }
 
 const STATUS_OPTIONS = ["open", "monitoring", "resolved", "archived"] as const;
@@ -131,6 +132,7 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
           facets={page.availability === "available" ? page.value.facets : null}
           showEntity
           entityLabels={entityLabels}
+          cursorRestartNotice={props.cursorRestartNotice ?? null}
         />
       </div>
       {statusFacets.length > 0 ? (

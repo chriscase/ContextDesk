@@ -213,6 +213,9 @@ function isRejectedCursor(error: RuntimeFailure): boolean {
   return error.kind === "stale_cursor" || error.kind === "malformed_cursor";
 }
 
+export const COLLECTION_CURSOR_RESTART_NOTICE =
+  "The previous page marker was rejected. These results were loaded again from the start of this search and do not include the discarded page.";
+
 function restartCollectionQuery(
   query: InvestigationCollectionQueryV1,
 ): InvestigationCollectionQueryInput {
@@ -273,6 +276,12 @@ export interface InvestigationCollectionQueryController {
   readonly latestRequestGeneration: number;
   readonly successfulSnapshotGeneration: number;
   readonly refresh: () => void;
+  /**
+   * Operator-visible explanation when a rejected cursor replaced the page.
+   * Null for an ordinary load, and null whenever the visible scope does not
+   * match the resource that produced the notice.
+   */
+  readonly cursorRestartNotice: string | null;
 }
 
 /**
@@ -319,11 +328,13 @@ export function useInvestigationCollectionQuery({
     readonly generation: number;
   }>({ key: null, generation: 0 });
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [cursorRestartNotice, setCursorRestartNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!enabled || queryKey === null) {
       requestSlot.current.invalidate();
       accumulatedPageRef.current = null;
+      setCursorRestartNotice(null);
       setResource(createResourceState<
         InvestigationCollectionQueryScope,
         InvestigationCollectionPageV1
@@ -344,6 +355,7 @@ export function useInvestigationCollectionQuery({
       ? prior.page
       : undefined;
     setLatestRequest({ key: scope, generation: requestGeneration });
+    if (previousPage === undefined) setCursorRestartNotice(null);
     setResource((current) => previousPage === undefined
       ? beginResourceLoad(current, scope)
       : { key: scope, state: { status: "loading", previous: previousPage } });
@@ -366,6 +378,7 @@ export function useInvestigationCollectionQuery({
         ) {
           // A rejected cursor must not keep or append the pages it followed.
           accumulatedPageRef.current = null;
+          setCursorRestartNotice(null);
           setResource((current) => current.key === scope
             ? { key: scope, state: { status: "loading" } }
             : current);
@@ -388,6 +401,7 @@ export function useInvestigationCollectionQuery({
               queryKey: baseQueryKey,
               page: restarted.value,
             };
+            setCursorRestartNotice(COLLECTION_CURSOR_RESTART_NOTICE);
             setResource((current) => succeedResourceLoad(current, scope, restarted.value));
             setSuccessfulSnapshot({
               key: scope,
@@ -411,6 +425,7 @@ export function useInvestigationCollectionQuery({
             queryKey: baseQueryKey,
             page,
           };
+          setCursorRestartNotice(null);
           setResource((current) => succeedResourceLoad(current, scope, page));
           setSuccessfulSnapshot({
             key: scope,
@@ -457,5 +472,6 @@ export function useInvestigationCollectionQuery({
         ? successfulSnapshot.generation
         : 0,
     refresh,
+    cursorRestartNotice: visible ? cursorRestartNotice : null,
   };
 }

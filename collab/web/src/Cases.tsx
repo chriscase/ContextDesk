@@ -773,6 +773,7 @@ export function Cases(props: {
   onCollectionQueryChange?: (query: CollectionQueryLocation) => void;
   onCollectionRefresh?: () => void;
   onCollectionNextPage?: () => void;
+  collectionCursorRestartNotice?: string | null;
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
@@ -1690,6 +1691,7 @@ export function Cases(props: {
             ? { onQueryChange: props.onCollectionQueryChange }
             : {})}
           onRefresh={props.onCollectionRefresh ?? (() => undefined)}
+          cursorRestartNotice={props.collectionCursorRestartNotice ?? null}
           {...(props.onCollectionNextPage
             ? { onNextPage: props.onCollectionNextPage }
             : {})}

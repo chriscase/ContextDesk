@@ -347,6 +347,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                 onQueryChange={props.onCollectionQueryChange}
                 facets={collectionView.availability === "available" ? collectionView.value.facets : null}
                 showEntity
+                cursorRestartNotice={runtime.resources.investigationCollectionNotice}
               />
             ) : null}
             {collectionEnabled ? (

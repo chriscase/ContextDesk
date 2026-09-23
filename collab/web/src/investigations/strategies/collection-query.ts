@@ -14,7 +14,11 @@ import {
 export { CollectionDiscoveryFilters } from "./CollectionDiscoveryFilters.js";
 export type { CollectionDiscoveryFiltersProps } from "./CollectionDiscoveryFilters.js";
 export {
+  activeCollectionFilters,
   collectionEmptyMessage,
+  collectionQueryWithoutFilter,
+  impactIdentityLabel,
+  RECORDED_RANGE_UTC_NOTE,
   shareableQueryNarrows,
 } from "./collection-discovery.js";
 

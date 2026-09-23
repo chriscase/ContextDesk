@@ -1,12 +1,72 @@
 .collection-discovery {
-  display: contents;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  align-items: start;
+  gap: 0.6rem;
+  flex: 1 1 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.collection-discovery__legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.collection-discovery__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.collection-discovery__status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.collection-discovery__clear {
+  min-height: 2rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-input);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.72rem;
+}
+
+@media (forced-colors: active) {
+  .collection-discovery__clear {
+    border: 1px solid ButtonText;
+    background: ButtonFace;
+    color: ButtonText;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collection-discovery__clear {
+    transition: none;
+  }
 }
 
 .collection-discovery__field {
   display: grid;
+  align-content: start;
   gap: 0.3rem;
   min-width: 0;
-  flex: 1 1 12rem;
   color: var(--muted);
   font-size: 0.8rem;
 }

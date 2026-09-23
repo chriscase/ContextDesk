@@ -171,6 +171,7 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
               collectionQuery: props.collectionQuery,
               onCollectionQueryChange: props.onCollectionQueryChange,
               onCollectionNextPage: collection.nextPage,
+              collectionCursorRestartNotice: runtime.resources.investigationCollectionNotice,
             })}
         lifecycleBinding={{
           lifecycle: runtime.resources.lifecycle,
@@ -1256,7 +1257,8 @@ export function App() {
                               navigate({
                                 area: "investigations",
                                 caseId: null,
-                                stage: "situation",
+                                stage: work.stage,
+                                ...(work.focus ? { focus: work.focus } : {}),
                                 collectionQuery,
                               }, "replace"),
                           }

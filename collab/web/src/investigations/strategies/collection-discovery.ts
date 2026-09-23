@@ -76,3 +76,104 @@ export function impactOptionLabel(
   const name = bucket.key.trim() || "Recorded software impact";
   return `${name} (${bucket.count})`;
 }
+
+/**
+ * Neutral label from the structured identity the shell already holds.
+ * It is not a facet count and it is not decoded from a display key.
+ */
+export function impactIdentityLabel(identity: ImpactIdentity): string {
+  const parts = [
+    identity.productName,
+    identity.version,
+    identity.build,
+    identity.component,
+    identity.environment,
+  ].map((part) => part.trim()).filter((part) => part.length > 0);
+  return parts.length > 0 ? parts.join(" · ") : "Selected software impact";
+}
+
+export const RECORDED_RANGE_UTC_NOTE =
+  "Recorded from and recorded to are the case creation time, not the observed occurrence. A date-only choice uses the UTC calendar day: from is 00:00:00.000Z and to is 23:59:59.999Z, including both endpoints. Daylight-saving transitions do not move these UTC bounds.";
+
+export const OUTSIDE_TOP_FACET_NOTE = "not in the current top matches";
+
+export type CollectionFilterId =
+  | "q"
+  | "status"
+  | "includeArchived"
+  | "entity"
+  | "impact"
+  | "contributor"
+  | "recordedFrom"
+  | "recordedTo";
+
+export interface ActiveCollectionFilter {
+  readonly id: CollectionFilterId;
+  readonly label: string;
+}
+
+export function activeCollectionFilters(
+  query: CollectionQueryLocation,
+  entityLabels?: ReadonlyMap<string, string>,
+): readonly ActiveCollectionFilter[] {
+  const filters: ActiveCollectionFilter[] = [];
+  if (query.q.trim().length > 0) filters.push({ id: "q", label: `Search: ${query.q.trim()}` });
+  if (query.status.length > 0) {
+    filters.push({ id: "status", label: `Status: ${query.status.join(", ")}` });
+  }
+  if (query.includeArchived) filters.push({ id: "includeArchived", label: "Include archived" });
+  if (query.entityId !== null) {
+    const label = entityLabels?.get(query.entityId) ?? query.entityId;
+    filters.push({ id: "entity", label: `Entity: ${label}` });
+  }
+  if (query.impactIdentity !== null) {
+    filters.push({
+      id: "impact",
+      label: `Software impact: ${impactIdentityLabel(query.impactIdentity)}`,
+    });
+  }
+  if (query.contributorId !== null) {
+    filters.push({ id: "contributor", label: `Contributor: ${query.contributorId}` });
+  }
+  if (query.recordedFrom !== null) {
+    filters.push({
+      id: "recordedFrom",
+      label: `Recorded from ${recordedDateInputValue(query.recordedFrom) || query.recordedFrom} UTC`,
+    });
+  }
+  if (query.recordedTo !== null) {
+    filters.push({
+      id: "recordedTo",
+      label: `Recorded to ${recordedDateInputValue(query.recordedTo) || query.recordedTo} UTC`,
+    });
+  }
+  return filters;
+}
+
+export function collectionQueryWithoutFilter(
+  query: CollectionQueryLocation,
+  id: CollectionFilterId,
+): CollectionQueryLocation {
+  switch (id) {
+    case "q":
+      return { ...query, q: "" };
+    case "status":
+      return { ...query, status: [] };
+    case "includeArchived":
+      return { ...query, includeArchived: false };
+    case "entity":
+      return { ...query, entityId: null };
+    case "impact":
+      return { ...query, impactIdentity: null };
+    case "contributor":
+      return { ...query, contributorId: null };
+    case "recordedFrom":
+      return { ...query, recordedFrom: null };
+    case "recordedTo":
+      return { ...query, recordedTo: null };
+    default: {
+      const unreachable: never = id;
+      return unreachable;
+    }
+  }
+}

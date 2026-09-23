@@ -1,13 +1,21 @@
 import type { CollectionQueryLocation } from "../../app-location.js";
 import type { InvestigationCollectionPageV1 } from "../runtime/public.js";
+import { useRef } from "react";
 import {
+  activeCollectionFilters,
+  collectionQueryWithoutFilter,
   impactIdentitiesEqual,
+  impactIdentityLabel,
   impactIdentityValue,
   impactOptionLabel,
+  OUTSIDE_TOP_FACET_NOTE,
+  RECORDED_RANGE_UTC_NOTE,
   recordedDateInputValue,
   recordedFromInstant,
   recordedToInstant,
+  type CollectionFilterId,
 } from "./collection-discovery.js";
+import { DEFAULT_COLLECTION_QUERY } from "../../app-location.js";
 
 type ImpactIdentity = NonNullable<CollectionQueryLocation["impactIdentity"]>;
 type Facets = InvestigationCollectionPageV1["facets"];
@@ -20,6 +28,8 @@ export interface CollectionDiscoveryFiltersProps {
   /** War Room already renders the entity control from these same facets. */
   readonly showEntity?: boolean;
   readonly entityLabels?: ReadonlyMap<string, string>;
+  /** Operator-visible rejected-cursor restart. Empty when the page is ordinary. */
+  readonly cursorRestartNotice?: string | null;
 }
 
 function changeQuery(
@@ -49,9 +59,55 @@ export function CollectionDiscoveryFilters(props: CollectionDiscoveryFiltersProp
   const entityMissing = selectedEntity !== null
     && !entityFacets.some((bucket) => bucket.key === selectedEntity);
   const labels = props.entityLabels ?? new Map<string, string>();
+  const active = activeCollectionFilters(props.query, labels);
+  const groupRef = useRef<HTMLFieldSetElement>(null);
+
+  function publish(next: CollectionQueryLocation) {
+    props.onQueryChange?.(next);
+    groupRef.current?.focus();
+  }
+
+  function clearOne(id: CollectionFilterId) {
+    publish(collectionQueryWithoutFilter(props.query, id));
+  }
 
   return (
-    <div className="collection-discovery">
+    <fieldset
+      ref={groupRef}
+      className="collection-discovery"
+      tabIndex={-1}
+      aria-label="Collection filters"
+    >
+      <legend className="collection-discovery__legend">Collection filters</legend>
+      <div className="collection-discovery__summary">
+        <p className="collection-discovery__status" role="status">
+          {active.length === 0
+            ? "No collection filters are active."
+            : `${active.length} collection ${active.length === 1 ? "filter is" : "filters are"} active.`}
+        </p>
+        {active.map((filter) => (
+          <button
+            key={filter.id}
+            type="button"
+            className="collection-discovery__clear"
+            onClick={() => clearOne(filter.id)}
+          >
+            {`Clear ${filter.label}`}
+          </button>
+        ))}
+        {active.length > 0 ? (
+          <button
+            type="button"
+            className="collection-discovery__clear"
+            onClick={() => publish(DEFAULT_COLLECTION_QUERY)}
+          >
+            Clear all collection filters
+          </button>
+        ) : null}
+      </div>
+      {props.cursorRestartNotice ? (
+        <p className="collection-discovery__status" role="status">{props.cursorRestartNotice}</p>
+      ) : null}
       {props.showEntity ? (
         <label className="collection-discovery__field">
           <span>Entity</span>
@@ -115,7 +171,7 @@ export function CollectionDiscoveryFilters(props: CollectionDiscoveryFiltersProp
           ))}
           {impactMissing && selectedImpact !== null ? (
             <option value={impactIdentityValue(selectedImpact)}>
-              {impactIdentityValue(selectedImpact)}
+              {`${impactIdentityLabel(selectedImpact)} (${OUTSIDE_TOP_FACET_NOTE})`}
             </option>
           ) : null}
         </select>
@@ -141,7 +197,9 @@ export function CollectionDiscoveryFilters(props: CollectionDiscoveryFiltersProp
             </option>
           ))}
           {contributorMissing && selectedContributor !== null ? (
-            <option value={selectedContributor}>{selectedContributor}</option>
+            <option value={selectedContributor}>
+              {`${selectedContributor} (${OUTSIDE_TOP_FACET_NOTE})`}
+            </option>
           ) : null}
         </select>
         {facets && facets.contributor.otherCount > 0 ? (
@@ -160,7 +218,7 @@ export function CollectionDiscoveryFilters(props: CollectionDiscoveryFiltersProp
             recordedFrom: recordedFromInstant(event.target.value),
           })}
         />
-        <span className="collection-discovery__note">When the case was recorded, not when it was observed.</span>
+        <span className="collection-discovery__note">{RECORDED_RANGE_UTC_NOTE}</span>
       </label>
       <label className="collection-discovery__field">
         <span>Recorded to</span>
@@ -173,6 +231,6 @@ export function CollectionDiscoveryFilters(props: CollectionDiscoveryFiltersProp
           })}
         />
       </label>
-    </div>
+    </fieldset>
   );
 }

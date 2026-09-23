@@ -111,15 +111,43 @@ async function restoreStrategyPolicy(page: Page, previous: Awaited<ReturnType<ty
   expect(update.ok(), await update.text()).toBeTruthy();
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
 async function selectExperience(page: Page, name: string): Promise<void> {
+  const topbar = page.locator(".topbar__title-app");
+  await expect(topbar).not.toHaveText("");
   await page.getByRole("button", { name: `Signed in as ${FIXTURE_USERS.dave.username}` }).click();
-  const strategy = page.getByRole("radio", { name: new RegExp(`^${name}\\b`, "u") });
-  if (!(await strategy.isChecked())) {
-    await strategy.check();
-    await page.getByRole("button", { name: "Use selected experience" }).click();
+  const fieldset = page.getByRole("group", { name: "Investigation experience" });
+  await expect(fieldset).toBeVisible();
+  await expect.poll(async () => {
+    if (await page.getByText("Loading the workspace investigation-experience policy…").count() > 0) {
+      return "";
+    }
+    const current = (await topbar.innerText()).trim();
+    if (current.length === 0) return "";
+    const radio = fieldset.getByRole("radio", { name: new RegExp(`^${escapeRegExp(current)}\\b`, "u") });
+    return (await radio.count()) === 1 && await radio.isChecked() ? current : "";
+  }).not.toBe("");
+  const applied = (await topbar.innerText()).trim();
+  if (applied === name) {
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("button", { name: "Use selected experience" })).toHaveCount(0);
+    return;
   }
-  await expect(page.locator(".topbar__title-app")).toHaveText(name);
+  const save = page.getByRole("button", { name: "Use selected experience" });
+  await fieldset.getByRole("radio", { name: new RegExp(`^${escapeRegExp(name)}\\b`, "u") }).check();
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(topbar).toHaveText(name);
+  await expect(topbar).not.toHaveText(applied);
   await page.keyboard.press("Escape");
+}
+
+async function restoreUserPreference(page: Page, originalName: string): Promise<void> {
+  if (page.isClosed()) return;
+  await selectExperience(page, originalName);
 }
 
 test.describe("trusted investigation discovery journey", () => {
@@ -127,8 +155,12 @@ test.describe("trusted investigation discovery journey", () => {
     test(`filters, reloads, switches, and opens from ${presentation.name}`, async ({ page }) => {
       test.setTimeout(90_000);
       await loginAs(page, FIXTURE_USERS.dave);
+      await page.goto("/investigations");
+      const originalPresentation = (await page.locator(".topbar__title-app").innerText()).trim();
       const previous = await enableEveryPresentation(page);
       const token = `disc${Date.now().toString(36)}`;
+      const recordedDays: string[] = [];
+      let primary: unknown;
       const impact = {
         productName: `Desk${token}`,
         version: "1.0",
@@ -150,9 +182,17 @@ test.describe("trusted investigation discovery journey", () => {
             },
           });
           expect(created.ok(), await created.text()).toBeTruthy();
-          const body = await created.json() as { id?: string };
+          const body = await created.json() as { id?: string; createdAt?: string };
           expect(body.id).toBeTruthy();
           ids.push(body.id!);
+          let createdAt = body.createdAt;
+          if (!createdAt) {
+            const detail = await page.request.get(`/api/cases/${body.id}`);
+            expect(detail.ok(), await detail.text()).toBeTruthy();
+            createdAt = (await detail.json() as { createdAt?: string }).createdAt;
+          }
+          expect(createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
+          recordedDays.push(createdAt!.slice(0, 10));
           const impactResponse = await page.request.post(`/api/cases/${body.id}/software-impact`, {
             headers: BROWSER_MUTATION_HEADERS,
             data: { ...impact, status: "observed", note: "Synthetic impact" },
@@ -210,9 +250,10 @@ test.describe("trusted investigation discovery journey", () => {
         const contributorSelect = page.getByLabel("Filter investigations by contributor");
         await expect.poll(async () => contributorSelect.locator("option", { hasText: CONTRIBUTOR_ID }).count()).toBeGreaterThan(0);
         await contributorSelect.selectOption(CONTRIBUTOR_ID);
-        const recordedDay = new Date().toISOString().slice(0, 10);
-        await page.getByLabel("Filter investigations by recorded date from").fill(recordedDay);
-        await page.getByLabel("Filter investigations by recorded date to").fill(recordedDay);
+        const recordedFromDay = [...recordedDays].sort()[0]!;
+        const recordedToDay = [...recordedDays].sort().at(-1)!;
+        await page.getByLabel("Filter investigations by recorded date from").fill(recordedFromDay);
+        await page.getByLabel("Filter investigations by recorded date to").fill(recordedToDay);
         await expect(page.getByLabel("Filter investigations by involved entity")).toBeVisible();
         await expect(page.getByText("Observed from")).toHaveCount(presentation.id === "war-room" ? 1 : 0);
 
@@ -232,8 +273,8 @@ test.describe("trusted investigation discovery journey", () => {
         const shared = new URL(page.url());
         expect(shared.searchParams.get("q")).toBe(token);
         expect(shared.searchParams.get("contributorId")).toBe(CONTRIBUTOR_ID);
-        expect(shared.searchParams.get("recordedFrom")).toBe(`${recordedDay}T00:00:00.000Z`);
-        expect(shared.searchParams.get("recordedTo")).toBe(`${recordedDay}T23:59:59.999Z`);
+        expect(shared.searchParams.get("recordedFrom")).toBe(`${recordedFromDay}T00:00:00.000Z`);
+        expect(shared.searchParams.get("recordedTo")).toBe(`${recordedToDay}T23:59:59.999Z`);
         expect(shared.searchParams.get("impactIdentity")).toContain(impact.productName);
         for (const forbidden of ["cursor", "limit", "schemaId"]) {
           expect(shared.searchParams.has(forbidden)).toBe(false);
@@ -243,6 +284,11 @@ test.describe("trusted investigation discovery journey", () => {
         await expect(page.locator(presentation.row).filter({ hasText: first.title })).toBeVisible();
         expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
         expect(page.url()).toContain("contributorId=");
+        await page.goBack();
+        await expect.poll(() => new URL(page.url()).searchParams.has("contributorId")).toBe(false);
+        await page.goForward();
+        await expect.poll(() => new URL(page.url()).searchParams.get("contributorId")).toBe(CONTRIBUTOR_ID);
+        await expect(page.locator(presentation.row).filter({ hasText: first.title })).toBeVisible();
 
         await selectExperience(page, presentation.nextName);
         await expect(page.locator(presentation.nextRow).filter({ hasText: first.title })).toBeVisible();
@@ -253,10 +299,53 @@ test.describe("trusted investigation discovery journey", () => {
         await page.locator(presentation.nextRow).filter({ hasText: second.title }).click();
         await expect(page).toHaveURL(new RegExp(`/investigations/${second.id}/`, "u"));
         await expect(page.getByText(second.title).first()).toBeVisible();
+      } catch (error) {
+        primary = error;
       } finally {
-        await page.unroute("**/api/cases?**");
-        await restoreStrategyPolicy(page, previous);
+        try {
+          if (!page.isClosed()) {
+            await page.unroute("**/api/cases?**");
+            await restoreUserPreference(page, originalPresentation);
+            await restoreStrategyPolicy(page, previous);
+          }
+        } catch (cleanupError) {
+          if (primary === undefined && !page.isClosed()) primary = cleanupError;
+        }
       }
+      if (primary) throw primary;
     });
   }
+
+  test("does not click save when the requested presentation is already applied", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    await page.goto("/investigations");
+    const applied = (await page.locator(".topbar__title-app").innerText()).trim();
+    let preferenceWrites = 0;
+    page.on("request", (request) => {
+      if (request.method() === "PUT" && request.url().includes("/api/ui-strategies/preference")) {
+        preferenceWrites += 1;
+      }
+    });
+    await selectExperience(page, applied);
+    expect(preferenceWrites).toBe(0);
+    await expect(page.locator(".topbar__title-app")).toHaveText(applied);
+  });
+
+  test("keeps active filters visible at 320px, in forced colors, and with reduced motion", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    await page.goto("/investigations?q=viewport");
+    await page.setViewportSize({ width: 320, height: 700 });
+    await page.emulateMedia({ colorScheme: "dark", forcedColors: "active", reducedMotion: "reduce" });
+    const clear = page.getByRole("button", { name: "Clear Search: viewport" });
+    await expect(clear).toBeVisible();
+    const box = await clear.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+    await clear.focus();
+    await expect(clear).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("status").filter({ hasText: "No collection filters are active." })).toBeVisible();
+    await expect(page.getByRole("group", { name: "Collection filters" })).toBeFocused();
+  });
 });

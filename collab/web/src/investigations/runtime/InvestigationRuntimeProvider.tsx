@@ -101,6 +101,8 @@ export interface InvestigationRuntimeResources {
   readonly investigations: ResourceState<readonly CaseV1[]>;
   readonly investigationCollection: ResourceState<InvestigationCollectionPageV1>;
   readonly investigationCollectionQuery: InvestigationCollectionQueryV1 | null;
+  /** Null unless a rejected cursor was replaced by a fresh first page. */
+  readonly investigationCollectionNotice: string | null;
   readonly operationsQueue: ResourceState<InvestigationOperationsQueuePageV1>;
   readonly operationsQueueQuery: InvestigationOperationsQueueQueryV1 | null;
   /** Monotonic request start signal for the currently visible queue scope. */
@@ -727,6 +729,7 @@ export function InvestigationRuntimeProvider({
       investigations: investigationList.investigations,
       investigationCollection: investigationCollection.page,
       investigationCollectionQuery: investigationCollection.query,
+      investigationCollectionNotice: investigationCollection.cursorRestartNotice,
       operationsQueue: operationsQueue.page,
       operationsQueueQuery: operationsQueue.query,
       operationsQueueRequestGeneration: operationsQueue.latestRequestGeneration,
@@ -876,6 +879,7 @@ export function InvestigationRuntimeProvider({
     identity,
     investigationCollection.page,
     investigationCollection.query,
+    investigationCollection.cursorRestartNotice,
     investigationCollection.refresh,
     operationsQueue.page,
     operationsQueue.query,

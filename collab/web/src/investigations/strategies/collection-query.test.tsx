@@ -24,6 +24,7 @@ import {
   sameLocation,
   type CollectionQueryLocation,
 } from "../../app-location.js";
+import { recordedFromInstant, recordedToInstant } from "./collection-discovery.js";
 import { useInvestigationCollectionQuery } from "./collection-query.js";
 
 afterEach(() => cleanup());
@@ -215,6 +216,43 @@ describe("investigation collection query shell adapter", () => {
       "/investigations",
       `?q=checkout&impactIdentity=${encodeURIComponent(JSON.stringify(emptyIdentity))}`,
     ))).toBe("/investigations");
+  });
+
+  it("drops invalid instants, reversed ranges, identity tokens, and overlong queries instead of keeping them active", () => {
+    const cases = [
+      "?recordedFrom=yesterday&q=checkout",
+      "?recordedFrom=2026-08-20T00:00:00.000Z&recordedTo=2026-08-01T00:00:00.000Z",
+      "?contributorId=uid%3Dcarol%2Cou%3Dpeople&q=checkout",
+      `?q=${"a".repeat(513)}&status=open`,
+    ];
+    for (const search of cases) {
+      const location = parsePathname("/investigations", search);
+      expect(location).toEqual({ area: "investigations", caseId: null, stage: "situation" });
+      expect(pathFor(location)).toBe("/investigations");
+      expect(JSON.stringify(location)).not.toContain("checkout");
+      expect(JSON.stringify(location)).not.toContain("uid=carol");
+    }
+  });
+
+  it("keeps offset-equivalent recorded instants and UTC date-only bounds exact", () => {
+    const zoned = parsePathname(
+      "/investigations",
+      "?recordedFrom=2026-07-31T20:00:00.000-04:00",
+    );
+    const utc = parsePathname(
+      "/investigations",
+      "?recordedFrom=2026-08-01T00:00:00.000Z",
+    );
+    expect(zoned).toMatchObject({
+      collectionQuery: { recordedFrom: "2026-07-31T20:00:00.000-04:00" },
+    });
+    expect(utc).toMatchObject({
+      collectionQuery: { recordedFrom: "2026-08-01T00:00:00.000Z" },
+    });
+    expect(Date.parse("2026-07-31T20:00:00.000-04:00")).toBe(Date.parse("2026-08-01T00:00:00.000Z"));
+    expect(recordedFromInstant("2026-03-08")).toBe("2026-03-08T00:00:00.000Z");
+    expect(recordedToInstant("2026-11-01")).toBe("2026-11-01T23:59:59.999Z");
+    expect(recordedFromInstant("2026-03-08")).not.toBe(recordedToInstant("2026-03-08"));
   });
 
   it("invokes the additive runtime command with normalized shell filters", async () => {
