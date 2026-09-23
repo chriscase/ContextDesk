@@ -4,10 +4,11 @@ This receipt supersedes `TRUSTED_INVESTIGATION_DISCOVERY_RECEIPT.md` for
 acceptance. That older file is the historical TID-1..TID-5 map. It is not
 G1-01 through G1-10.
 
-Behavior is `612a4bce`. Exact publication head `1e68749f` is that behavior
-plus the prior receipt text. Hosted collab, release qualification, and root
-CI for `1e68749f` succeeded, and an independent review of that head passed.
-The commit that adds those run ids is documentation only.
+Behavior through the query fence is `612a4bce`. The four-presentation
+clear-and-open journey is `b23fb1ed`. Hosted collab, release qualification,
+and root CI for that exact SHA succeeded. An independent review of that SHA
+passed with two suggestions and no defects. The commit that records those
+checks is documentation only.
 
 ## Pins
 
@@ -18,7 +19,7 @@ The commit that adds those run ids is documentation only.
 | Merge base | `10073524218496926f7e06df654b33fb1c4609fa` |
 | Behavior head | `612a4bce90a09eb7ac0adda9ca4587ca793a1caf` |
 | Behavior tree | `b2cf0458fb52cc854704da67e01ee4381ba52da8` |
-| Checked publication head | `1e68749f0992415accd233399be09a717ebfffc7` |
+| Checked publication head | `b23fb1ed2fbbcf022ec884664c10956ab4589f44` |
 | PR #1181 | Draft, open, unmerged. https://github.com/chriscase/ContextDesk/pull/1181 |
 | PR #1180 | Draft, open, unmerged, head `18f2e77a2cfa71caa9c85e9b34a3692a71d97404`, tree `0155061acba76b78b97bc6c7aa0bb6d42af7e547`. Ancestor of this branch. Not rewritten and not closed. |
 | Owner goal artifact | `docs/goals/03-GOAL-1-TRUSTED-DISCOVERY.md`, added in `38fd2d20523b1e41329ed9ad61e0447db646ac91` |
@@ -50,7 +51,7 @@ branch. #1180 was not rewritten.
 | G1-07 | Met for the disposable server; fixture pagination stays labeled | `trusted-discovery-built-server-browser.mjs` creates 52 records, two impact identities, contributor `identity-synth-eve`, and one archived row. On each presentation it applies the shared query, continues with a real cursor, reloads the canonical URL, uses back and forward, selects the contributor and the alpha impact, clears the last filters, and opens the newest investigation. `routeInjected` is false. The re-run recorded `openedAfterClear: true` and the same `openedId` for War Room, Investigation First, Keystone, and Beacon. Spec 37 remains route-injected. |
 | G1-08 | Met for the checks that were performed | Visible labels, keyboard clear, focus return, 320px, forced colors, and reduced motion are in spec 37. Screenshots from the built app: `docs/goals/trusted-discovery-screenshots/`. No assistive-technology audit was performed. |
 | G1-09 | Met | Shipped tests fail when forwarding drops impact, a label is treated as authority, a denied reader issues a request, or invalid input stays active. Temporary mutations of query forwarding, invalid-input broadening, and the three runtime scope fences failed the named tests and passed after restore. Those mutations are not in the published tree. They were not repeated after `612a4bce`; that commit does not edit those mutated lines. |
-| G1-10 | Met for exact head `1e68749f` | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted collab, browser qualification, release qualification, and root/desktop CI for `1e68749f` succeeded. An independent review of that head passed. `612a4bce` is the behavior parent. The diff between them is only this receipt. |
+| G1-10 | Met for exact head `b23fb1ed` | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted collab, browser qualification, release qualification, and root/desktop CI for `b23fb1ed` succeeded. An independent review of that head passed with two suggestions and no defects. |
 
 ## Commands at the behavior head
 
@@ -88,6 +89,18 @@ Exact publication head `1e68749f0992415accd233399be09a717ebfffc7`:
 | CI | `35811810458` | success. Desktop UI `107024828341`. Tauri host ubuntu `107024828277` and macos `107024828365`. Rust aggregates ubuntu `107032745333`, windows `107033774010`, macos `107032092574`. Gitleaks `107024828246`. |
 
 Skipped on that CI run: the same two rust cache warmup jobs. They are not passes. Collab test, browser qualification, desktop UI, Tauri, and rust tests succeeded.
+
+Journey head `b23fb1ed2fbbcf022ec884664c10956ab4589f44`, attempt 1:
+
+| Workflow | Run | Conclusion |
+| --- | --- | --- |
+| collab | `35889607552` | success. Typecheck/lint/test/build job `107278446790`. Browser qualification `107278446709`. Bridge `107278446791`. Degraded lane `107278446561`. Windows `107278446895`. |
+| collab | `35889602561` | success. Same five jobs, ids `107278429883`, `107278429768`, `107278429846`, `107278429499`, `107278429696`. |
+| collab-qualify | `35889607591` | success. Job `107278446255`. |
+| collab-qualify | `35889602542` | success. Job `107278427968`. |
+| CI | `35889607549` | success. Desktop UI `107278449087`. Tauri host ubuntu `107278449205` and macos `107278449221`. Rust aggregates ubuntu `107293138039`, macos `107295349490`, windows `107296193380`. Gitleaks `107278450179`. |
+
+Skipped on that CI run: `rust cache warmup (macos-latest)` job `107278602371` and `rust cache warmup (windows-latest)` job `107278627264`. Those are cache jobs, not test passes. No collab, browser, desktop, Tauri, or rust test job failed or was skipped.
 
 ## Screenshots
 
@@ -136,6 +149,16 @@ Review of exact head `1e68749f` passed with no open issues. The worktree was
 clean. `612a4bce..1e68749f` changes only this receipt. The reviewer checked
 the G1-07 script claims and the query fence against the tree at that head.
 
+Review of exact head `b23fb1ed` passed with two suggestions and no defects.
+The four presentations share one loop: apply the shared query, continue with
+a server cursor, reload and use back/forward, clear the remaining filters,
+open the newest investigation, and restore the filtered URL before the next
+presentation. The report fields are written only if those checks do not throw.
+They are still literal `true` values, so deleting one check would not by
+itself make its field false. The switch check throws when `q` is dropped and
+does not, at that moment, throw when a recorded bound is dropped. The reload
+later requires `recordedFrom`. Spec 37 stays route-injected.
+
 ## Handbook and backlog
 
 `docs/design/PROVEN_METHODS.md` and
@@ -156,7 +179,8 @@ shipped. No issue was closed. This pull request is not merged.
 - No assistive-technology audit. Spec 37 and the built-app screenshots are the usability evidence.
 - Spec 37 continuation is route-injected. The disposable built-server script is the real second page.
 - `01-STANDING-INSTRUCTIONS.md` was unavailable.
-- The three mutation proofs were not repeated on `612a4bce`. The published tree does not contain those mutants.
+- The journey report fields are literals after the checks. Removing one check would not flip its field to false. The experience-switch check requires `q` and does not, at that line, require the recorded bounds.
+- The three mutation proofs were re-run on `c952aeea` and restored. `b23fb1ed` does not edit those lines. The published tree does not contain those mutants.
 - Catalog consistency and export handoff were not started. Inspect `main` after this draft lands before recommending that slice. `main` is still `10073524218496926f7e06df654b33fb1c4609fa`.
 
 ## Next slice
