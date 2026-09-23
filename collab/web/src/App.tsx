@@ -172,7 +172,7 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
               collectionQuery: props.collectionQuery,
               onCollectionQueryChange: props.onCollectionQueryChange,
               onCollectionNextPage: collection.nextPage,
-              collectionCursorRestartNotice: runtime.resources.investigationCollectionNotice,
+              collectionCursorRestartNotice: collection.cursorRestartNotice,
             })}
         lifecycleBinding={{
           lifecycle: runtime.resources.lifecycle,
