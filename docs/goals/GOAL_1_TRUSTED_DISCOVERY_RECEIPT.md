@@ -4,8 +4,10 @@ This receipt supersedes `TRUSTED_INVESTIGATION_DISCOVERY_RECEIPT.md` for
 acceptance. That older file is the historical TID-1..TID-5 map. It is not
 G1-01 through G1-10.
 
-The behavior head below is the commit that hosted checks and the independent
-review examined. The commit that updates this file is documentation only.
+Behavior is `612a4bce`. Exact publication head `1e68749f` is that behavior
+plus the prior receipt text. Hosted collab, release qualification, and root
+CI for `1e68749f` succeeded, and an independent review of that head passed.
+The commit that adds those run ids is documentation only.
 
 ## Pins
 
@@ -16,6 +18,7 @@ review examined. The commit that updates this file is documentation only.
 | Merge base | `10073524218496926f7e06df654b33fb1c4609fa` |
 | Behavior head | `612a4bce90a09eb7ac0adda9ca4587ca793a1caf` |
 | Behavior tree | `b2cf0458fb52cc854704da67e01ee4381ba52da8` |
+| Checked publication head | `1e68749f0992415accd233399be09a717ebfffc7` |
 | PR #1181 | Draft, open, unmerged. https://github.com/chriscase/ContextDesk/pull/1181 |
 | PR #1180 | Draft, open, unmerged, head `18f2e77a2cfa71caa9c85e9b34a3692a71d97404`, tree `0155061acba76b78b97bc6c7aa0bb6d42af7e547`. Ancestor of this branch. Not rewritten and not closed. |
 | Owner goal artifact | `docs/goals/03-GOAL-1-TRUSTED-DISCOVERY.md`, added in `38fd2d20523b1e41329ed9ad61e0447db646ac91` |
@@ -47,7 +50,7 @@ branch. #1180 was not rewritten.
 | G1-07 | Met for the disposable server; fixture pagination stays labeled | `trusted-discovery-built-server-browser.mjs` creates 52 records, two impact identities, contributor `identity-synth-eve`, and one archived row. On each presentation it continues with a real cursor, hides the archived title, opens the oldest investigation, restores the URL, and selects the contributor and the alpha impact. Beacon then clears the last filters and opens the newest investigation. `routeInjected` is false. Re-run against the web build of `612a4bce` exited 0. Spec 37 remains route-injected. |
 | G1-08 | Met for the checks that were performed | Visible labels, keyboard clear, focus return, 320px, forced colors, and reduced motion are in spec 37. Screenshots from the built app: `docs/goals/trusted-discovery-screenshots/`. No assistive-technology audit was performed. |
 | G1-09 | Met | Shipped tests fail when forwarding drops impact, a label is treated as authority, a denied reader issues a request, or invalid input stays active. Temporary mutations of query forwarding, invalid-input broadening, and the three runtime scope fences failed the named tests and passed after restore. Those mutations are not in the published tree. They were not repeated after `612a4bce`; that commit does not edit those mutated lines. |
-| G1-10 | Met for behavior head `612a4bce` | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted collab, browser qualification, release qualification, and root/desktop CI for this SHA succeeded. Independent review of this SHA passed after an earlier review blocked the previous head. |
+| G1-10 | Met for exact head `1e68749f` | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted collab, browser qualification, release qualification, and root/desktop CI for `1e68749f` succeeded. An independent review of that head passed. `612a4bce` is the behavior parent. The diff between them is only this receipt. |
 
 ## Commands at the behavior head
 
@@ -75,6 +78,16 @@ Behavior head `612a4bce90a09eb7ac0adda9ca4587ca793a1caf`:
 | CI | `35808188344` | success. Desktop UI `107014507008`. Tauri host ubuntu `107014506939` and macos `107014507083`. Rust test aggregates ubuntu `107022684410`, windows `107023622914`, macos `107023722225`. Gitleaks `107014507063`. |
 
 Skipped on that CI run: `rust cache warmup (macos-latest)` and `rust cache warmup (windows-latest)`. Those are cache jobs, not test results, and they are not counted as passes. No persistence test was skipped inside the successful collab test job; the earlier local server skip count remains a non-pass.
+
+Exact publication head `1e68749f0992415accd233399be09a717ebfffc7`:
+
+| Workflow | Run | Conclusion |
+| --- | --- | --- |
+| collab | `35811810521` | success. Typecheck/lint/test/build job `107024827615`. Browser qualification `107024827865`. Bridge `107024827758`. Degraded lane `107024827947`. Windows `107024827811`. |
+| collab-qualify | `35811810456` | success. Job `107024827510`. |
+| CI | `35811810458` | success. Desktop UI `107024828341`. Tauri host ubuntu `107024828277` and macos `107024828365`. Rust aggregates ubuntu `107032745333`, windows `107033774010`, macos `107032092574`. Gitleaks `107024828246`. |
+
+Skipped on that CI run: the same two rust cache warmup jobs. They are not passes. Collab test, browser qualification, desktop UI, Tauri, and rust tests succeeded.
 
 ## Screenshots
 
@@ -118,6 +131,10 @@ ref check is removed. They do not by themselves fail if only the second
 `locationOwnsCollection` return, or only the notice ternary, is removed. The
 product code still has both. The fixture used by that test has a null notice,
 so the paint string cannot see a leaked notice.
+
+Review of exact head `1e68749f` passed with no open issues. The worktree was
+clean. `612a4bce..1e68749f` changes only this receipt. The reviewer checked
+the G1-07 script claims and the query fence against the tree at that head.
 
 ## Handbook and backlog
 
