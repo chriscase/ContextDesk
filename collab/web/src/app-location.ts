@@ -584,6 +584,31 @@ function impactIdentityQueryParam(
   });
 }
 
+/**
+ * A query the shell may store. Contract rejection means the value must not
+ * become an active filter or be sent as a collection request.
+ */
+export function shareableCollectionQuery(
+  query: CollectionQueryLocation,
+): CollectionQueryLocation | null {
+  try {
+    parseInvestigationCollectionQuery({
+      schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+      q: query.q,
+      status: [...query.status],
+      includeArchived: query.includeArchived,
+      entityId: query.entityId,
+      impactIdentity: query.impactIdentity,
+      contributorId: query.contributorId,
+      recordedFrom: query.recordedFrom,
+      recordedTo: query.recordedTo,
+    });
+    return query;
+  } catch {
+    return null;
+  }
+}
+
 function locationQueryFromContract(query: InvestigationCollectionQueryV1): CollectionQueryLocation {
   return Object.freeze({
     q: query.q,

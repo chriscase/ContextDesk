@@ -43,6 +43,7 @@ import {
   parsePathname,
   restoreAfterSignIn,
   sameLocation,
+  shareableCollectionQuery,
   titleFor,
   type AreaId,
   type ShellLocation,
@@ -83,7 +84,6 @@ import {
 } from "./ui-strategy.js";
 import { useUiStrategyGovernance } from "./useUiStrategyGovernance.js";
 import { ActivityCenter } from "./overview/ActivityCenter.js";
-import { shareableCollectionQuery } from "./investigations/strategies/collection-discovery.js";
 import { useWarRoomCollectionQuery } from "./investigations/war-room/useWarRoomCollectionQuery.js";
 import { OperationsQueue } from "./operations-queue/index.js";
 
