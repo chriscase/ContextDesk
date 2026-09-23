@@ -1,5 +1,11 @@
 # Sanitized evidence: trusted investigation discovery
 
+Historical note. The pagination step below is route-injected: the fixture
+slices a real response and supplies an opaque cursor. It is not a second
+server page. The later built-server browser script is a separate real Runtime
+journey and is recorded in `GOAL_1_TRUSTED_DISCOVERY_RECEIPT.md`. This file
+is not the G1-01..G1-10 ledger.
+
 Rerun against `7d56c2c0eafab5c70b1ffae50c02d2087904a305` after the collection controls moved onto the collection-query adapter. An earlier gate log recorded a dependency-boundary failure from before that move. That log was replaced. The results below are the replacement.
 
 No passwords, database files, or private corpora are included.

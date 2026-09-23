@@ -1,5 +1,8 @@
 # Receipt: trusted investigation discovery
 
+Historical TID-1..TID-5 map. It is not the G1-01..G1-10 ledger. See
+`GOAL_1_TRUSTED_DISCOVERY_RECEIPT.md`.
+
 Source Goal 1 file: absent at `origin/main` `10073524218496926f7e06df654b33fb1c4609fa` and at foundation `18f2e77a2cfa71caa9c85e9b34a3692a71d97404`. The frozen acceptance block is `docs/goals/GOAL_TRUSTED_INVESTIGATION_DISCOVERY.md`. Its content hash is `32bda7ec117072f1ff9c346e4c00860bd4b1ec18b1d86f75aa9ab68fbab3dcd8`.
 
 Inherited foundation, unchanged and still the head of open draft PR #1180: `18f2e77a2cfa71caa9c85e9b34a3692a71d97404`. This branch does not rewrite or close that pull request.
