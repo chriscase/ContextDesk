@@ -4,6 +4,9 @@ This receipt supersedes `TRUSTED_INVESTIGATION_DISCOVERY_RECEIPT.md` for
 acceptance. That older file is the historical TID-1..TID-5 map. It is not
 G1-01 through G1-10.
 
+The behavior head below is the commit that hosted checks and the independent
+review examined. The commit that updates this file is documentation only.
+
 ## Pins
 
 | Pin | Value |
@@ -11,12 +14,13 @@ G1-01 through G1-10.
 | Base `origin/main` | `10073524218496926f7e06df654b33fb1c4609fa` |
 | Main tree | `e88d8e6b20397d52d7084db0dfcb9c0dbd6a37c9` |
 | Merge base | `10073524218496926f7e06df654b33fb1c4609fa` |
-| Behavior head | `bc60b6299bd256cf09037eb5ee1febe303e6aaa4` |
-| Lint-only follow-up | `77297c6ae7c76e39c903d2e39d8a279af1e9279f` removes an unused import. No behavior change. |
+| Behavior head | `612a4bce90a09eb7ac0adda9ca4587ca793a1caf` |
+| Behavior tree | `b2cf0458fb52cc854704da67e01ee4381ba52da8` |
 | PR #1181 | Draft, open, unmerged. https://github.com/chriscase/ContextDesk/pull/1181 |
-| PR #1180 | Draft, open, unmerged, head `18f2e77a2cfa71caa9c85e9b34a3692a71d97404`, tree `0155061acba76b78b97bc6c7aa0bb6d42af7e547`. Ancestor of this branch. Not rewritten. |
+| PR #1180 | Draft, open, unmerged, head `18f2e77a2cfa71caa9c85e9b34a3692a71d97404`, tree `0155061acba76b78b97bc6c7aa0bb6d42af7e547`. Ancestor of this branch. Not rewritten and not closed. |
 | Owner goal artifact | `docs/goals/03-GOAL-1-TRUSTED-DISCOVERY.md`, added in `38fd2d20523b1e41329ed9ad61e0447db646ac91` |
-| Historical TID freeze | `493c6abdd84ff59b4f043872170fbd5a6ae0c327`. Five-item subset only. Not equivalent to G1. |
+| Owner goal SHA-256 | `5c64ca43d6b2003717c1b95b382de7fb78879d4a56be4f6e5d634d8c7a351ac9` |
+| Historical TID freeze | `493c6abdd84ff59b4f043872170fbd5a6ae0c327`. Five-item subset only. Not equivalent to G1. History was not rewritten. |
 
 `01-STANDING-INSTRUCTIONS.md` was not on this machine. No standing-instruction
 rules were invented.
@@ -25,58 +29,64 @@ Readiness for #1158, #1159, and #1165 is deferred. Their files do not overlap
 this slice. They were not merged or incorporated. #1179 remains an open draft
 backlog edit and was not merged.
 
+Inherited from open draft #1180, unchanged: canonical impact-identity URL
+support and stable-first pagination dedup at `18f2e77a`. Everything after that
+commit on `integrate/trusted-investigation-discovery-v1` is new work on this
+branch. #1180 was not rewritten.
+
 ## Acceptance map
 
 | ID | Status | Evidence |
 | --- | --- | --- |
-| G1-01 | Met on the four presentations | `CollectionDiscoveryFilters` summary, clear-one, clear-all. No fifth strategy. In-memory stage and focus are kept when the shell accepts a query. |
-| G1-02 | Met for contract rejection | Invalid URL queries parse to the bare list. A reversed range or overlong query is refused by `shareableCollectionQuery` before it is stored. The previous accepted query stays visible. |
-| G1-03 | Met | Facet identities come from the server object. Outside the top window, the label has no invented count. Recorded dates are UTC calendar days. War Room observed-from stays page-local. |
-| G1-04 | Met for the controller | Opaque cursors, first-seen dedup, one rejected-cursor restart, and the restart sentence. The fixture browser continuation is route-injected, not a second server page. |
-| G1-05 | Met for identity, authority, and a changed query | `ignores a collection command captured before the identity changes` records the first paint as idle, drops the late page, and ignores the captured command after an authority change. `does not apply a captured continuation after the query changes` keeps the new query. |
-| G1-06 | Partial | Unfiltered empty, filtered empty, denied, unavailable, and same-scope refresh failure are covered. Not every filter-family combination has its own test. |
-| G1-07 | Met for the built-server continuation; fixture pagination stays labeled | `trusted-discovery-built-server-browser.mjs` creates 52 records, archives one, and on each of the four presentations loads the real second page, keeps the newest row, opens the oldest investigation, and restores the recorded range. `routeInjected` is false. Spec 37's page split remains route-injected and is labeled as such. |
-| G1-08 | Partial | Labels, keyboard clear at 320px, forced colors, and reduced motion are in spec 37. Screenshots: `docs/goals/trusted-discovery-screenshots/`. No assistive-technology audit was performed. The other three presentations were not screenshotted. |
-| G1-09 | Partial | Shipped tests cover dropped forwarding, label reconstruction, denied reads, and invalid input. Temporary mutations of query forwarding, invalid-input broadening, and the three scope fences failed the named tests and passed after restore. Those mutations are not in the published tree. |
-| G1-10 | Partial until the lint-fix head's hosted test job is green | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted browser qualification of `bc60b629` passed. The same run's lint failed on an unused import. `77297c6a` fixes that import. Its hosted run was started and is not recorded as passed here. |
+| G1-01 | Met | `CollectionDiscoveryFilters` is mounted by War Room, Investigation First, Keystone, and Beacon. Clear-one and clear-all keep unrelated location state. Switching presentation keeps the shell query. No fifth strategy. |
+| G1-02 | Met | Invalid URL queries parse to the bare list. `shareableCollectionQuery` refuses a reversed range, overlong query, bad identity, or malformed impact before it is stored. The previous accepted query stays visible. The URL does not carry cursor, schema id, or limit. |
+| G1-03 | Met | Facet identities come from the server object. A selected value outside the top window stays clearable and is labeled `not in the current top matches` with no invented count. Recorded dates are UTC calendar days, `T00:00:00.000Z` through `T23:59:59.999Z`, inclusive. War Room observed-from stays page-local. |
+| G1-04 | Met | Opaque server cursors, first-seen dedup, and one rejected-cursor restart. The restart sentence is shown for the current scope. Spec 37's page split remains route-injected and is labeled as such. |
+| G1-05 | Met | Identity and authority fencing stays in the runtime. `612a4bce` also withholds the previous rows and restart notice on the render where the shell query changes, and a continuation or refresh captured for the old query does not run. |
+| G1-06 | Met | Unfiltered empty, filtered empty, denied, unavailable, first-fetch failure, same-scope refresh failure, continuation failure, and stale-cursor restart are covered. The shared empty predicate treats search, status, entity, impact, contributor, and both recorded bounds as filters, including one combination. A network failure is not zero results. |
+| G1-07 | Met for the disposable server; fixture pagination stays labeled | `trusted-discovery-built-server-browser.mjs` creates 52 records, two impact identities, contributor `identity-synth-eve`, and one archived row. On each presentation it continues with a real cursor, hides the archived title, opens the oldest investigation, restores the URL, and selects the contributor and the alpha impact. Beacon then clears the last filters and opens the newest investigation. `routeInjected` is false. Re-run against the web build of `612a4bce` exited 0. Spec 37 remains route-injected. |
+| G1-08 | Met for the checks that were performed | Visible labels, keyboard clear, focus return, 320px, forced colors, and reduced motion are in spec 37. Screenshots from the built app: `docs/goals/trusted-discovery-screenshots/`. No assistive-technology audit was performed. |
+| G1-09 | Met | Shipped tests fail when forwarding drops impact, a label is treated as authority, a denied reader issues a request, or invalid input stays active. Temporary mutations of query forwarding, invalid-input broadening, and the three runtime scope fences failed the named tests and passed after restore. Those mutations are not in the published tree. They were not repeated after `612a4bce`; that commit does not edit those mutated lines. |
+| G1-10 | Met for behavior head `612a4bce` | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted collab, browser qualification, release qualification, and root/desktop CI for this SHA succeeded. Independent review of this SHA passed after an earlier review blocked the previous head. |
 
-## Commands at the functional commits
+## Commands at the behavior head
 
-Local, on this worktree, after `35e19791` unless noted:
+Local, on this worktree:
 
-- Web `npx vitest run` at `35e19791`: 101 files, 1615 passed.
-- Server `npx vitest run`: 1287 passed, 115 skipped. Skipped tests are not passes. They are environment-gated persistence tests.
-- Web lint, server lint, e2e typecheck: exit 0.
-- `npm run e2e` in `collab`: 143 passed, 8 skipped. Skipped tests are the durable-server, live-profile, bridge, and log-time lanes that the suite skips without those services. They are not passes.
-- Spec 37 after `83fd7f1c`, retries 0, one worker: 6 passed.
-- Dependency-boundary test after `bd6233bf`: passed.
-- Built-server browser script: one real Runtime journey, `routeInjected: false`.
+- Web `npx vitest run` at `e21f0fc5`: 101 files, 1619 passed. That head is the parent of the query-fence commit.
+- At `612a4bce`, `collection-query.test.tsx` and `useWarRoomCollectionQuery.test.tsx`: 25 passed. `tsc -p tsconfig.json --noEmit` in `collab/web` passed, and eslint on the fence files passed.
+- Web production build at `612a4bce`: `npm run build -w @cd-collab/web` exited 0.
+- Disposable built-server browser script against that web build, port 8842: exit 0. Report kind `built-server-browser-runtime`, `routeInjected: false`, `recordCount: 52`, all four presentations `continuationHasCursor: true`, Beacon `openedAfterClear: true`. The script throws if the contributor filter, impact filter, archived row, cursor, or canonical URL check fails.
+- Earlier full server suite: 1287 passed, 115 skipped. Skipped tests are environment-gated persistence tests. They are not passes.
+- Earlier `npm run e2e` in `collab`: 143 passed, 8 skipped. Skipped tests are the durable-server, live-profile, bridge, and log-time lanes. They are not passes.
 
 ## Hosted checks
 
-Green browser qualification of `83fd7f1c934a954ff6b28ce9b05b5f5a1f3a5d4f`,
-workflow run `35803066300`, attempt 1, job `collab war-room browser
-qualification` `106997590558`. The log shows spec 37 passing once each, with
-no retry line. The same run's `collab (typecheck, lint, test, migrate
-dry-run)` job failed because `collection-discovery.ts` imported the collection
-contract. `bd6233bf` moves that check into `app-location.ts`.
+`8f228b88` collab run `35806168307` failed. Job `107007575613` (`collab (typecheck, lint, test, migrate dry-run)`) failed `HandoffPanel.test.tsx` because the failure copy was asserted before the in-flight recording state cleared. Browser qualification, the degraded lane, the bridge, and Windows `demo:check` on that run succeeded. Root CI run `35806168305` was cancelled before jobs started. Qualify run `35806168301` succeeded. `6de7ee4f` waits for the visible handoff outcome. That fix is in the behavior head.
 
-Hosted collab run for behavior head `bc60b6299bd256cf09037eb5ee1febe303e6aaa4`:
+Behavior head `612a4bce90a09eb7ac0adda9ca4587ca793a1caf`:
 
-- https://github.com/chriscase/ContextDesk/actions/runs/35805384871
-- Browser qualification job `107005188802`: success. Degraded lane and browser bridge also succeeded.
-- `collab (typecheck, lint, test, migrate dry-run)` job `107005188575`: failed lint, unused `shareableCollectionQuery` import.
-- Windows `demo:check` job `107005188861`: the same lint error.
+| Workflow | Run | Conclusion |
+| --- | --- | --- |
+| collab | `35808188350` | success. Typecheck/lint/test/build job `107013566830`. Browser qualification job `107013566682`. Bridge `107013566522`. Degraded lane `107013566670`. Windows `107013566700`. |
+| collab | `35808184801` | success. Same five jobs, ids `107013556024`, `107013555980`, `107013555974`, `107013555771`, `107013555964`. |
+| collab-qualify | `35808188358` | success. Job `107013566665`. |
+| collab-qualify | `35808184800` | success. Job `107013555651`. |
+| CI | `35808188344` | success. Desktop UI `107014507008`. Tauri host ubuntu `107014506939` and macos `107014507083`. Rust test aggregates ubuntu `107022684410`, windows `107023622914`, macos `107023722225`. Gitleaks `107014507063`. |
 
-Lint-only head `77297c6a` is pushed. Its hosted conclusion is not in this receipt.
+Skipped on that CI run: `rust cache warmup (macos-latest)` and `rust cache warmup (windows-latest)`. Those are cache jobs, not test results, and they are not counted as passes. No persistence test was skipped inside the successful collab test job; the earlier local server skip count remains a non-pass.
 
 ## Screenshots
 
 From the built web app served by `collab/server/dist/index.js` against a new
 sqlite file:
 
-- `docs/goals/trusted-discovery-screenshots/built-server-1280.png`
+- `docs/goals/trusted-discovery-screenshots/built-server-war-room-1280.png`
+- `docs/goals/trusted-discovery-screenshots/built-server-investigation-first-1280.png`
+- `docs/goals/trusted-discovery-screenshots/built-server-keystone-1280.png`
+- `docs/goals/trusted-discovery-screenshots/built-server-beacon-1280.png`
 - `docs/goals/trusted-discovery-screenshots/built-server-320-forced-colors.png`
+- `docs/goals/trusted-discovery-screenshots/built-server-1280.png`
 
 ## Mutations
 
@@ -94,16 +104,20 @@ is not the scope-fencing proof.
 
 ## Independent review
 
-Review of `35e19791` blocked the draft. It required the reversed-range and
-overlong-query fix, an identity-stamped collection command, removal of the
-tautological focus assertion, and an honest label on route-injected
-pagination.
+Review of `e21f0fc5` blocked. A shell query change still published the previous
+collection page, and a stored continuation was still able to run, until the
+adapter effect. That review is not a pass for this head.
 
-Review of `83fd7f1c` said those four points were fixed or labeled. Review of
-`853bb115` accepted the late-page fence and the real second page, and asked
-for a first-paint assertion, an authority check, a stale continuation after
-a query change, and an open on every presentation. `bc60b629` adds those.
-The rejection alert clears when the shell location changes.
+Review of `612a4bce` passed with no open issues. Both adapters publish a
+loading view and a null restart notice when the location key differs from the
+runtime query. A captured continuation or refresh returns before the passive
+effect. Same-scope continuation still uses the cursor-stripped base key.
+
+The new tests fail if the render-time loading branch or the captured-callback
+ref check is removed. They do not by themselves fail if only the second
+`locationOwnsCollection` return, or only the notice ternary, is removed. The
+product code still has both. The fixture used by that test has a null notice,
+so the paint string cannot see a leaked notice.
 
 ## Handbook and backlog
 
@@ -114,19 +128,22 @@ Help article do not contradict a sentence in those files, so those chapters
 were not edited. Help article `find-investigations` is the user-facing
 description of recorded time versus War Room's page-local observed date.
 
+Handbook impact: none — those chapters do not claim a collection cursor or a
+discovery filter.
+
 `docs/design/WAR_ROOM_CONTINUOUS_DELIVERY_BACKLOG.md` says draft #1181 is not
-shipped. No issue was closed.
+shipped. No issue was closed. This pull request is not merged.
 
-## Residuals
+## Residuals and nonclaims
 
-- No assistive-technology audit.
-- Spec 37 continuation is still route-injected. The built-server script is
-  the real second page.
-- The built-server corpus creates two impacts, one extra contributor, and one
-  archived case. The browser assertions use the recorded-day search and the
-  outside-day empty result. They do not click those impact or contributor
-  controls.
-- No assistive-technology audit. Screenshots exist for all four presentations
-  at normal width and one 320px forced-colors frame.
-- Hosted lint for `77297c6a` was not finished when this receipt was written.
+- No assistive-technology audit. Spec 37 and the built-app screenshots are the usability evidence.
+- Spec 37 continuation is route-injected. The disposable built-server script is the real second page.
 - `01-STANDING-INSTRUCTIONS.md` was unavailable.
+- The three mutation proofs were not repeated on `612a4bce`. The published tree does not contain those mutants.
+- Catalog consistency and export handoff were not started. Inspect `main` after this draft lands before recommending that slice. `main` is still `10073524218496926f7e06df654b33fb1c4609fa`.
+
+## Next slice
+
+Do not start catalog consistency or export handoff from this branch. After
+#1181 is integrated, re-read `main` and only then decide whether that handoff
+is the next slice.
