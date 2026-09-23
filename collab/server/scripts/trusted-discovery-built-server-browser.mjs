@@ -238,12 +238,24 @@ try {
   ];
   const shotDir = process.env.SCREENSHOT_DIR;
   if (shotDir) await mkdir(shotDir, { recursive: true });
+  const expectedRecordedFrom = `${recordedDay}T00:00:00.000Z`;
+  const expectedRecordedTo = `${recordedDay}T23:59:59.999Z`;
+  function observedSharedQuery() {
+    const params = new URL(page.url()).searchParams;
+    return {
+      q: params.get("q") === token,
+      recordedFrom: params.get("recordedFrom") === expectedRecordedFrom,
+      recordedTo: params.get("recordedTo") === expectedRecordedTo,
+      cursorAbsent: !params.has("cursor"),
+    };
+  }
   const journeys = [];
   for (const presentation of presentations) {
     await selectExperience(presentation.name);
-    const queryValue = new URL(page.url()).searchParams.get("q");
-    if (queryValue !== token) {
-      throw new Error(`${presentation.name} dropped the shared query: ${page.url()}`);
+    const applied = observedSharedQuery();
+    const appliedQuery = applied.q && applied.recordedFrom && applied.recordedTo && applied.cursorAbsent;
+    if (!appliedQuery) {
+      throw new Error(`${presentation.name} dropped a shared bound after the presentation switch: ${page.url()}`);
     }
     const rows = page.locator(presentation.row);
     await rows.filter({ hasText: newest.title }).waitFor();
@@ -259,32 +271,44 @@ try {
     if (continuedText.includes(corpus[2].title)) {
       throw new Error(`${presentation.name} showed archived ${corpus[2].title} without including archived records`);
     }
-    const continuation = collectionRequests.slice(beforeCount).find((url) => url.includes("cursor="));
-    if (!continuation) throw new Error(`${presentation.name} continuation did not send a server cursor`);
-    if (new URL(page.url()).searchParams.has("cursor")) {
-      throw new Error(`${presentation.name} put the cursor in the browser URL`);
+    const continuation = collectionRequests.slice(beforeCount).find((url) => {
+      try {
+        return new URL(url).searchParams.has("cursor");
+      } catch {
+        return false;
+      }
+    });
+    const continuationHasCursor = typeof continuation === "string"
+      && !new URL(page.url()).searchParams.has("cursor");
+    if (!continuationHasCursor) {
+      throw new Error(`${presentation.name} continuation did not keep the server cursor off the page URL`);
     }
     await rows.filter({ hasText: oldest.title }).click();
     await page.waitForURL(new RegExp(`/investigations/${oldest.id}/`));
     await page.goto(filtered);
     await page.reload();
     await rows.filter({ hasText: newest.title }).waitFor();
-    if (new URL(page.url()).searchParams.get("q") !== token) {
-      throw new Error(`${presentation.name} dropped the query on reload`);
+    const reloaded = observedSharedQuery();
+    const reloadedCanonicalQuery = reloaded.q && reloaded.recordedFrom && reloaded.recordedTo && reloaded.cursorAbsent;
+    if (!reloadedCanonicalQuery) {
+      throw new Error(`${presentation.name} dropped a shared bound on reload: ${page.url()}`);
     }
     const filteredUrl = page.url();
     await page.goto(`${base}/investigations`);
     await page.goBack();
     await page.waitForURL(filteredUrl);
-    if (new URL(page.url()).searchParams.get("q") !== token) {
-      throw new Error(`${presentation.name} did not restore the query on back`);
+    const backed = observedSharedQuery();
+    if (!(backed.q && backed.recordedFrom && backed.recordedTo && backed.cursorAbsent)) {
+      throw new Error(`${presentation.name} did not restore both recorded bounds on back: ${page.url()}`);
     }
     await page.goForward();
     await page.waitForURL(`${base}/investigations`);
     await page.goBack();
     await rows.filter({ hasText: newest.title }).waitFor();
-    if (new URL(page.url()).searchParams.get("recordedFrom") !== `${recordedDay}T00:00:00.000Z`) {
-      throw new Error(`${presentation.name} did not restore the recorded range`);
+    const restored = observedSharedQuery();
+    const restoredOnBack = restored.q && restored.recordedFrom && restored.recordedTo && restored.cursorAbsent;
+    if (!restoredOnBack) {
+      throw new Error(`${presentation.name} did not restore both recorded bounds after forward and back: ${page.url()}`);
     }
     const impactIdentity = {
       productName: `${token}-alpha`,
@@ -333,22 +357,36 @@ try {
     await page.getByRole("button", { name: `Clear Search: ${token}` }).click();
     await page.getByText("No collection filters are active.").waitFor();
     const cleared = new URL(page.url()).searchParams;
-    if (cleared.has("q") || cleared.has("recordedFrom") || cleared.has("recordedTo") || cleared.has("impactIdentity") || cleared.has("contributorId")) {
+    const clearedLastFilter = !cleared.has("q")
+      && !cleared.has("recordedFrom")
+      && !cleared.has("recordedTo")
+      && !cleared.has("impactIdentity")
+      && !cleared.has("contributorId")
+      && !cleared.has("status")
+      && !cleared.has("entityId")
+      && !cleared.has("includeArchived")
+      && !cleared.has("cursor");
+    if (!clearedLastFilter) {
       throw new Error(`${presentation.name} left a filter in the URL after clearing the last one`);
     }
     const openRow = page.locator(presentation.row).filter({ hasText: newest.title });
     await openRow.waitFor();
     await openRow.click();
     await page.waitForURL(new RegExp(`/investigations/${newest.id}/`));
+    const openedId = new URL(page.url()).pathname.match(/^\/investigations\/([^/]+)/u)?.[1] ?? null;
+    const openedAfterClear = clearedLastFilter && openedId === newest.id;
+    if (!openedAfterClear) {
+      throw new Error(`${presentation.name} opened ${openedId ?? "no case"} after clearing filters`);
+    }
     journeys.push({
       presentation: presentation.name,
-      appliedQuery: true,
-      continuationHasCursor: true,
-      reloadedCanonicalQuery: true,
-      restoredOnBack: true,
-      clearedLastFilter: true,
-      openedAfterClear: true,
-      openedId: newest.id,
+      appliedQuery,
+      continuationHasCursor,
+      reloadedCanonicalQuery,
+      restoredOnBack,
+      clearedLastFilter,
+      openedAfterClear,
+      openedId,
     });
     if (presentation.name === "Beacon" && shotDir) {
       await page.setViewportSize({ width: 320, height: 700 });
