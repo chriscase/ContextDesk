@@ -229,7 +229,6 @@ try {
 
   await page.goto(`${base}/investigations?q=${encodeURIComponent(token)}&recordedTo=${outsideDay}T23:59:59.999Z`);
   await page.getByText("No investigations match the current search or filter.").waitFor();
-  let recordedRequestMark = collectionRequests.length;
   await page.goto(filtered);
   const presentations = [
     { name: "War Room", row: ".case-card__open" },
@@ -269,10 +268,6 @@ try {
     }
     const rows = page.locator(presentation.row);
     await rows.filter({ hasText: newest.title }).waitFor();
-    const recordedRequest = collectionRequests.slice(recordedRequestMark).find(requestHasRecordedBounds);
-    if (!recordedRequest) {
-      throw new Error(`${presentation.name} collection request omitted a recorded bound`);
-    }
     const before = await rows.allInnerTexts();
     if (before.some((text) => text.includes(oldest.title))) {
       throw new Error(`${presentation.name} showed the oldest row before continuation`);
@@ -287,7 +282,8 @@ try {
     }
     const continuation = collectionRequests.slice(beforeCount).find((url) => {
       try {
-        return new URL(url).searchParams.has("cursor");
+        const params = new URL(url).searchParams;
+        return params.has("cursor") && requestHasRecordedBounds(url);
       } catch {
         return false;
       }
@@ -295,7 +291,7 @@ try {
     const continuationHasCursor = typeof continuation === "string"
       && !new URL(page.url()).searchParams.has("cursor");
     if (!continuationHasCursor) {
-      throw new Error(`${presentation.name} continuation did not keep the server cursor off the page URL`);
+      throw new Error(`${presentation.name} continuation omitted the server cursor or a recorded bound`);
     }
     await rows.filter({ hasText: oldest.title }).click();
     await page.waitForURL(new RegExp(`/investigations/${oldest.id}/`));
@@ -408,7 +404,6 @@ try {
       await page.screenshot({ path: join(shotDir, "built-server-320-forced-colors.png"), fullPage: false });
     }
     if (presentation !== presentations[presentations.length - 1]) {
-      recordedRequestMark = collectionRequests.length;
       await page.goto(filtered);
     }
   }
