@@ -4,10 +4,10 @@ This receipt supersedes `TRUSTED_INVESTIGATION_DISCOVERY_RECEIPT.md` for
 acceptance. That older file is the historical TID-1..TID-5 map. It is not
 G1-01 through G1-10.
 
-Behavior through the query fence is `612a4bce`. The four-presentation
-clear-and-open journey is `b23fb1ed`. Hosted collab, release qualification,
-and root CI for that exact SHA succeeded. An independent review of that SHA
-passed with two suggestions and no defects. The commit that records those
+Behavior through the query fence is `612a4bce`. The journey whose flags
+are observed URL and request predicates is `8a7ae553`. Hosted collab, release
+qualification, and root CI for that exact SHA succeeded. An independent
+review of that SHA passed with no open issues. The commit that records those
 checks is documentation only.
 
 ## Pins
@@ -19,7 +19,7 @@ checks is documentation only.
 | Merge base | `10073524218496926f7e06df654b33fb1c4609fa` |
 | Behavior head | `612a4bce90a09eb7ac0adda9ca4587ca793a1caf` |
 | Behavior tree | `b2cf0458fb52cc854704da67e01ee4381ba52da8` |
-| Checked publication head | `b23fb1ed2fbbcf022ec884664c10956ab4589f44` |
+| Checked publication head | `8a7ae5534dde280016d74210119912eac5f58af4` |
 | PR #1181 | Draft, open, unmerged. https://github.com/chriscase/ContextDesk/pull/1181 |
 | PR #1180 | Draft, open, unmerged, head `18f2e77a2cfa71caa9c85e9b34a3692a71d97404`, tree `0155061acba76b78b97bc6c7aa0bb6d42af7e547`. Ancestor of this branch. Not rewritten and not closed. |
 | Owner goal artifact | `docs/goals/03-GOAL-1-TRUSTED-DISCOVERY.md`, added in `38fd2d20523b1e41329ed9ad61e0447db646ac91` |
@@ -48,10 +48,10 @@ branch. #1180 was not rewritten.
 | G1-04 | Met | Opaque server cursors, first-seen dedup, and one rejected-cursor restart. The restart sentence is shown for the current scope. Spec 37's page split remains route-injected and is labeled as such. |
 | G1-05 | Met | Identity and authority fencing stays in the runtime. `612a4bce` also withholds the previous rows and restart notice on the render where the shell query changes, and a continuation or refresh captured for the old query does not run. |
 | G1-06 | Met | Unfiltered empty, filtered empty, denied, unavailable, first-fetch failure, same-scope refresh failure, continuation failure, and stale-cursor restart are covered. The shared empty predicate treats search, status, entity, impact, contributor, and both recorded bounds as filters, including one combination. A network failure is not zero results. |
-| G1-07 | Met for the disposable server; fixture pagination stays labeled | `trusted-discovery-built-server-browser.mjs` creates 52 records, two impact identities, contributor `identity-synth-eve`, and one archived row. On each presentation it applies the shared query, continues with a real cursor, reloads the canonical URL, uses back and forward, selects the contributor and the alpha impact, clears the last filters, and opens the newest investigation. `routeInjected` is false. The re-run recorded `openedAfterClear: true` and the same `openedId` for War Room, Investigation First, Keystone, and Beacon. Spec 37 remains route-injected. |
+| G1-07 | Met for the disposable server; fixture pagination stays labeled | `trusted-discovery-built-server-browser.mjs` creates 52 records, two impact identities, contributor `identity-synth-eve`, and one archived row. On each presentation it applies the shared query, continues with a real cursor, reloads the canonical URL, uses back and forward, selects the contributor and the alpha impact, clears the last filters, and opens the newest investigation. `routeInjected` is false. Each report flag is the observed URL or request predicate, and `openedId` is the case id in the landed URL. The local re-run of this script exited 0 with all four presentations true and the same `openedId`. Spec 37 remains route-injected. |
 | G1-08 | Met for the checks that were performed | Visible labels, keyboard clear, focus return, 320px, forced colors, and reduced motion are in spec 37. Screenshots from the built app: `docs/goals/trusted-discovery-screenshots/`. No assistive-technology audit was performed. |
 | G1-09 | Met | Shipped tests fail when forwarding drops impact, a label is treated as authority, a denied reader issues a request, or invalid input stays active. Temporary mutations of query forwarding, invalid-input broadening, and the three runtime scope fences failed the named tests and passed after restore. Those mutations are not in the published tree. They were not repeated after `612a4bce`; that commit does not edit those mutated lines. |
-| G1-10 | Met for exact head `b23fb1ed` | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted collab, browser qualification, release qualification, and root/desktop CI for `b23fb1ed` succeeded. An independent review of that head passed with two suggestions and no defects. |
+| G1-10 | Met for exact head `8a7ae553` | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted collab, browser qualification, release qualification, and root/desktop CI for `8a7ae553` succeeded. An independent review of that head passed with no open issues. |
 
 ## Commands at the behavior head
 
@@ -102,6 +102,18 @@ Journey head `b23fb1ed2fbbcf022ec884664c10956ab4589f44`, attempt 1:
 
 Skipped on that CI run: `rust cache warmup (macos-latest)` job `107278602371` and `rust cache warmup (windows-latest)` job `107278627264`. Those are cache jobs, not test passes. No collab, browser, desktop, Tauri, or rust test job failed or was skipped.
 
+Predicate journey head `8a7ae5534dde280016d74210119912eac5f58af4`, attempt 1:
+
+| Workflow | Run | Conclusion |
+| --- | --- | --- |
+| collab | `35895543211` | success. Typecheck/lint/test/build job `107298799184`. Browser qualification `107298798974`. Bridge `107298799203`. Degraded lane `107298798630`. Windows `107298799170`. |
+| collab | `35895536201` | success. Same five jobs, ids `107298410810`, `107298410245`, `107298410526`, `107298410609`, `107298410589`. |
+| collab-qualify | `35895543490` | success. Job `107298807401`. |
+| collab-qualify | `35895536374` | success. Job `107298409720`. |
+| CI | `35895543350` | success. Desktop UI `107314277255`. Tauri host ubuntu `107314277146` and macos `107314276922`. Rust aggregates ubuntu `107328981305`, windows `107332648731`, macos `107335590436`. Gitleaks `107314276947`. |
+
+Skipped on that CI run: `rust cache warmup (macos-latest)` job `107314438845` and `rust cache warmup (windows-latest)` job `107314459130`. Those are cache jobs, not test passes. No collab, browser, desktop, Tauri, or rust test job failed or was skipped.
+
 ## Screenshots
 
 From the built web app served by `collab/server/dist/index.js` against a new
@@ -150,14 +162,20 @@ clean. `612a4bce..1e68749f` changes only this receipt. The reviewer checked
 the G1-07 script claims and the query fence against the tree at that head.
 
 Review of exact head `b23fb1ed` passed with two suggestions and no defects.
-The four presentations share one loop: apply the shared query, continue with
-a server cursor, reload and use back/forward, clear the remaining filters,
-open the newest investigation, and restore the filtered URL before the next
-presentation. The report fields are written only if those checks do not throw.
-They are still literal `true` values, so deleting one check would not by
-itself make its field false. The switch check throws when `q` is dropped and
-does not, at that moment, throw when a recorded bound is dropped. The reload
-later requires `recordedFrom`. Spec 37 stays route-injected.
+Those suggestions were the literal journey flags and the switch check that
+required only `q`. `8a7ae553` closes both.
+
+Review of exact head `8a7ae553` passed with no open issues. `appliedQuery`,
+`reloadedCanonicalQuery`, and `restoredOnBack` are the observed `q`,
+`recordedFrom`, and `recordedTo` predicates after the presentation switch,
+reload, and back/forward. `continuationHasCursor` is a collection request
+that has `cursor` while the page URL does not. `clearedLastFilter` is the
+absence of the shareable filter keys. `openedId` is the case id in the URL
+accepted after the click, and `openedAfterClear` requires that id to be the
+newest case. Deleting a throw leaves the stored field as that predicate, so
+it can be false. Spec 37 stays route-injected. A local disposable-server run
+of this script exited 0 with all four presentations true and the same
+`openedId`.
 
 ## Handbook and backlog
 
@@ -179,7 +197,7 @@ shipped. No issue was closed. This pull request is not merged.
 - No assistive-technology audit. Spec 37 and the built-app screenshots are the usability evidence.
 - Spec 37 continuation is route-injected. The disposable built-server script is the real second page.
 - `01-STANDING-INSTRUCTIONS.md` was unavailable.
-- The journey report fields are literals after the checks. Removing one check would not flip its field to false. The experience-switch check requires `q` and does not, at that line, require the recorded bounds.
+- `8a7ae553` stores journey flags from the observed URL and request. The earlier literal-flag residual applied to `b23fb1ed` and is closed on this head.
 - The three mutation proofs were re-run on `c952aeea` and restored. `b23fb1ed` does not edit those lines. The published tree does not contain those mutants.
 - Catalog consistency and export handoff were not started. Inspect `main` after this draft lands before recommending that slice. `main` is still `10073524218496926f7e06df654b33fb1c4609fa`.
 
