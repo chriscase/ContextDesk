@@ -255,6 +255,10 @@ try {
     await page.getByRole("button", { name: "Load next page" }).click();
     await rows.filter({ hasText: oldest.title }).waitFor();
     await rows.filter({ hasText: newest.title }).waitFor();
+    const continuedText = (await rows.allInnerTexts()).join("\n");
+    if (continuedText.includes(corpus[2].title)) {
+      throw new Error(`${presentation.name} showed archived ${corpus[2].title} without including archived records`);
+    }
     const continuation = collectionRequests.slice(beforeCount).find((url) => url.includes("cursor="));
     if (!continuation) throw new Error(`${presentation.name} continuation did not send a server cursor`);
     if (new URL(page.url()).searchParams.has("cursor")) {
@@ -281,6 +285,44 @@ try {
     await rows.filter({ hasText: newest.title }).waitFor();
     if (new URL(page.url()).searchParams.get("recordedFrom") !== `${recordedDay}T00:00:00.000Z`) {
       throw new Error(`${presentation.name} did not restore the recorded range`);
+    }
+    const impactIdentity = {
+      productName: `${token}-alpha`,
+      version: "1",
+      build: "",
+      component: "worker",
+      environment: "lab",
+    };
+    const impactValue = JSON.stringify(impactIdentity);
+    const contributorRequests = collectionRequests.length;
+    await page.getByLabel("Filter investigations by contributor").selectOption("identity-synth-eve");
+    await rows.filter({ hasText: oldest.title }).waitFor();
+    if ((await rows.allInnerTexts()).some((text) => text.includes(newest.title))) {
+      throw new Error(`${presentation.name} contributor filter still showed ${newest.title}`);
+    }
+    if (new URL(page.url()).searchParams.get("contributorId") !== "identity-synth-eve") {
+      throw new Error(`${presentation.name} did not put contributorId in the URL`);
+    }
+    if (!collectionRequests.slice(contributorRequests).some((url) => url.includes("contributorId=identity-synth-eve"))) {
+      throw new Error(`${presentation.name} contributor filter did not request contributorId`);
+    }
+    await page.getByRole("button", { name: "Clear Contributor: identity-synth-eve" }).click();
+    const impactRequests = collectionRequests.length;
+    await page.getByLabel("Filter investigations by software impact").selectOption(impactValue);
+    await rows.filter({ hasText: oldest.title }).waitFor();
+    if ((await rows.allInnerTexts()).some((text) => text.includes(newest.title))) {
+      throw new Error(`${presentation.name} impact filter still showed ${newest.title}`);
+    }
+    const impactParam = new URL(page.url()).searchParams.get("impactIdentity") ?? "";
+    if (!impactParam.includes(`${token}-alpha`)) {
+      throw new Error(`${presentation.name} did not put the impact identity in the URL`);
+    }
+    if (!collectionRequests.slice(impactRequests).some((url) => url.includes("impactIdentity="))) {
+      throw new Error(`${presentation.name} impact filter did not request impactIdentity`);
+    }
+    await page.getByRole("button", { name: `Clear Software impact: ${token}-alpha · 1 · worker · lab` }).click();
+    if (new URL(page.url()).searchParams.has("impactIdentity") || new URL(page.url()).searchParams.has("contributorId")) {
+      throw new Error(`${presentation.name} left a cleared identity filter in the URL`);
     }
     if (shotDir) {
       const fileName = `built-server-${presentation.name.toLowerCase().replace(/\s+/gu, "-")}-1280.png`;
