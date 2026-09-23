@@ -328,22 +328,36 @@ try {
       const fileName = `built-server-${presentation.name.toLowerCase().replace(/\s+/gu, "-")}-1280.png`;
       await page.screenshot({ path: join(shotDir, fileName), fullPage: false });
     }
-    journeys.push({ presentation: presentation.name, continuationHasCursor: true, openedAfterClear: false });
-  }
-
-  await page.getByRole("button", { name: /Clear Recorded to / }).click();
-  await page.getByRole("button", { name: /Clear Recorded from / }).click();
-  await page.getByRole("button", { name: `Clear Search: ${token}` }).click();
-  await page.getByText("No collection filters are active.").waitFor();
-  const openRow = page.locator(".beacon__case-list button").filter({ hasText: newest.title });
-  await openRow.waitFor();
-  await openRow.click();
-  await page.waitForURL(new RegExp(`/investigations/${newest.id}/`));
-  journeys[journeys.length - 1].openedAfterClear = true;
-  if (shotDir) {
-    await page.setViewportSize({ width: 320, height: 700 });
-    await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
-    await page.screenshot({ path: join(shotDir, "built-server-320-forced-colors.png"), fullPage: false });
+    await page.getByRole("button", { name: /Clear Recorded to / }).click();
+    await page.getByRole("button", { name: /Clear Recorded from / }).click();
+    await page.getByRole("button", { name: `Clear Search: ${token}` }).click();
+    await page.getByText("No collection filters are active.").waitFor();
+    const cleared = new URL(page.url()).searchParams;
+    if (cleared.has("q") || cleared.has("recordedFrom") || cleared.has("recordedTo") || cleared.has("impactIdentity") || cleared.has("contributorId")) {
+      throw new Error(`${presentation.name} left a filter in the URL after clearing the last one`);
+    }
+    const openRow = page.locator(presentation.row).filter({ hasText: newest.title });
+    await openRow.waitFor();
+    await openRow.click();
+    await page.waitForURL(new RegExp(`/investigations/${newest.id}/`));
+    journeys.push({
+      presentation: presentation.name,
+      appliedQuery: true,
+      continuationHasCursor: true,
+      reloadedCanonicalQuery: true,
+      restoredOnBack: true,
+      clearedLastFilter: true,
+      openedAfterClear: true,
+      openedId: newest.id,
+    });
+    if (presentation.name === "Beacon" && shotDir) {
+      await page.setViewportSize({ width: 320, height: 700 });
+      await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
+      await page.screenshot({ path: join(shotDir, "built-server-320-forced-colors.png"), fullPage: false });
+    }
+    if (presentation !== presentations[presentations.length - 1]) {
+      await page.goto(filtered);
+    }
   }
   const report = {
     kind: "built-server-browser-runtime",
