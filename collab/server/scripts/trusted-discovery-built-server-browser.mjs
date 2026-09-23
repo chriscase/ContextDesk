@@ -201,7 +201,7 @@ try {
     await page.getByRole("button", { name: /^Signed in as / }).click();
     const fieldset = page.getByRole("group", { name: "Investigation experience" });
     await fieldset.waitFor();
-    await page.waitForFunction(() => !document.body.innerText.includes("Loading the workspace investigation-experience policy"));
+    await page.getByText("Loading the workspace investigation-experience policy").waitFor({ state: "hidden" });
     const applied = (await topbar.innerText()).trim();
     const appliedRadio = fieldset.getByRole("radio", { name: new RegExp(`^${escapeRegExp(applied)}\\b`, "u") });
     await appliedRadio.waitFor();
