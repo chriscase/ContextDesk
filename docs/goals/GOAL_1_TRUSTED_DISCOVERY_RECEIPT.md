@@ -4,13 +4,12 @@ This receipt supersedes `TRUSTED_INVESTIGATION_DISCOVERY_RECEIPT.md` for
 acceptance. That older file is the historical TID-1..TID-5 map. It is not
 G1-01 through G1-10.
 
-Behavior through the query fence is `612a4bce`. The checked head is
-`88eccd0e`, which adds the contributor and recorded-bound request assertions
-on top of the predicate journey in `8a7ae553`. Hosted collab, release
-qualification, and root CI for `88eccd0e` succeeded. An independent review
-of that SHA passed with no open issues. The commit that records those checks
-is documentation only. `79975204` is an earlier receipt commit and is not
-this head.
+Behavior through the query fence is `612a4bce`. The checked product head is
+`0b5de58d`. Each presentation's Load next page request must carry the server
+cursor and both recorded bounds. Hosted collab, release qualification, and
+root CI for that exact SHA succeeded. An independent review of that SHA
+passed with no open issues. The commit that records those checks is
+documentation only.
 
 ## Pins
 
@@ -21,7 +20,7 @@ this head.
 | Merge base | `10073524218496926f7e06df654b33fb1c4609fa` |
 | Behavior head | `612a4bce90a09eb7ac0adda9ca4587ca793a1caf` |
 | Behavior tree | `b2cf0458fb52cc854704da67e01ee4381ba52da8` |
-| Checked publication head | `88eccd0efd0d8f2d6809cd84c098ee80881e8a4b` |
+| Checked publication head | `0b5de58d74fc099b5871ab1df6cbc0f926e8d703` |
 | PR #1181 | Draft, open, unmerged. https://github.com/chriscase/ContextDesk/pull/1181 |
 | PR #1180 | Draft, open, unmerged, head `18f2e77a2cfa71caa9c85e9b34a3692a71d97404`, tree `0155061acba76b78b97bc6c7aa0bb6d42af7e547`. Ancestor of this branch. Not rewritten and not closed. |
 | Owner goal artifact | `docs/goals/03-GOAL-1-TRUSTED-DISCOVERY.md`, added in `38fd2d20523b1e41329ed9ad61e0447db646ac91` |
@@ -50,10 +49,10 @@ branch. #1180 was not rewritten.
 | G1-04 | Met | Opaque server cursors, first-seen dedup, and one rejected-cursor restart. The restart sentence is shown for the current scope. Spec 37's page split remains route-injected and is labeled as such. |
 | G1-05 | Met | Identity and authority fencing stays in the runtime. `612a4bce` also withholds the previous rows and restart notice on the render where the shell query changes, and a continuation or refresh captured for the old query does not run. |
 | G1-06 | Met | Unfiltered empty, filtered empty, denied, unavailable, first-fetch failure, same-scope refresh failure, continuation failure, and stale-cursor restart are covered. The shared empty predicate treats search, status, entity, impact, contributor, and both recorded bounds as filters, including one combination. A network failure is not zero results. |
-| G1-07 | Met for the disposable server; fixture pagination stays labeled | `trusted-discovery-built-server-browser.mjs` creates 52 records, two impact identities, contributor `identity-synth-eve`, and one archived row. On each presentation it applies the shared query, continues with a real cursor, reloads the canonical URL, uses back and forward, selects the contributor and the alpha impact, clears the last filters, and opens the newest investigation. `routeInjected` is false. Each presentation throws unless a collection request after the filtered navigation contains both recorded bounds. Each report flag is the observed URL or request predicate, and `openedId` is the case id in the landed URL. The local re-run of this script exited 0 with all four presentations true and the same `openedId`. Spec 37 remains route-injected. |
+| G1-07 | Met for the disposable server; fixture pagination stays labeled | `trusted-discovery-built-server-browser.mjs` creates 52 records, two impact identities, contributor `identity-synth-eve`, and one archived row. On each presentation it applies the shared query, continues with a real cursor, reloads the canonical URL, uses back and forward, selects the contributor and the alpha impact, clears the last filters, and opens the newest investigation. `routeInjected` is false. Each presentation throws unless its own Load next page request contains the server cursor and both recorded bounds. A request from the previous presentation's filtered navigation cannot satisfy that check. Each report flag is the observed URL or request predicate, and `openedId` is the case id in the landed URL. The local re-run of this script exited 0 with all four presentations true and the same `openedId`. Spec 37 remains route-injected. |
 | G1-08 | Met for the checks that were performed | Visible labels, keyboard clear, focus return, 320px, forced colors, and reduced motion are in spec 37. Screenshots from the built app: `docs/goals/trusted-discovery-screenshots/`. No assistive-technology audit was performed. |
 | G1-09 | Met | Shipped tests fail when forwarding drops impact, contributorId, recordedFrom, or recordedTo, when a label is treated as authority, when a denied reader issues a request, or when invalid input stays active. Setting `recordedFrom` to null in both adapters failed both command tests; restore passed. The earlier query-forwarding, invalid-input, and scope-fence mutations also failed and were restored. None of those mutants are in the published tree. |
-| G1-10 | Met for exact head `88eccd0e` | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted collab, browser qualification, release qualification, and root/desktop CI for `88eccd0e` succeeded. An independent review of that head passed with no open issues. |
+| G1-10 | Met for exact head `0b5de58d` | Help article `find-investigations` is published. The backlog says draft #1181 is not shipped. Hosted collab, browser qualification, release qualification, and root/desktop CI for `0b5de58d` succeeded. An independent review of that head passed with no open issues. |
 
 ## Commands at the behavior head
 
@@ -128,6 +127,18 @@ Request-assertion head `88eccd0efd0d8f2d6809cd84c098ee80881e8a4b`, attempt 1. Th
 
 Skipped on that CI run: `rust cache warmup (macos-latest)` job `107364869608` and `rust cache warmup (windows-latest)` job `107364925758`. Those are cache jobs, not test passes. No collab, browser, desktop, Tauri, or rust test job failed or was skipped.
 
+Continuation-bound head `0b5de58d74fc099b5871ab1df6cbc0f926e8d703`, attempt 1:
+
+| Workflow | Run | Conclusion |
+| --- | --- | --- |
+| collab | `35926759941` | success. Typecheck/lint/test/build job `107403586271`. Browser qualification `107403586287`. Bridge `107403586462`. Degraded lane `107403586387`. Windows `107403586042`. |
+| collab | `35926756209` | success. Same five jobs, ids `107403574104`, `107403573743`, `107403574048`, `107403574076`, `107403574020`. |
+| collab-qualify | `35926759808` | success. Job `107403585393`. |
+| collab-qualify | `35926756234` | success. Job `107403573903`. |
+| CI | `35926759830` | success. Desktop UI `107403586543`. Tauri host ubuntu `107403586503` and macos `107403586229`. Rust aggregates ubuntu `107415951330`, macos `107415514128`, windows `107416567003`. Gitleaks `107403586201`. |
+
+Skipped on that CI run: `rust cache warmup (macos-latest)` job `107403707361` and `rust cache warmup (windows-latest)` job `107403725046`. Those are cache jobs, not test passes. No collab, browser, desktop, Tauri, or rust test job failed or was skipped.
+
 ## Screenshots
 
 From the built web app served by `collab/server/dist/index.js` against a new
@@ -193,9 +204,14 @@ of this script exited 0 with all four presentations true and the same
 
 Review of exact head `88eccd0e` passed with no open issues. Both adapter
 command tests require `contributorId`, `recordedFrom`, and `recordedTo` on
-the runtime command. Each presentation throws unless a collection request
-after the filtered navigation contains both recorded bounds. Hosted CI for
-this review was recorded separately and was not assumed by the review.
+the runtime command.
+
+Review of exact head `0b5de58d` passed with no open issues. `recordedRequestMark`
+is gone. The recorded-bound check applies only to collection requests captured
+after the on-screen Load next page click, so the previous presentation's
+filtered navigation cannot satisfy it. War Room, Investigation First, Keystone,
+and Beacon share that loop. Hosted CI for this review was recorded separately
+and was not assumed by the review.
 
 ## Handbook and backlog
 
