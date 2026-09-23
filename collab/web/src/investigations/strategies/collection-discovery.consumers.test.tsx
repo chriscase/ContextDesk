@@ -228,15 +228,42 @@ describe("War Room collection discovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Clear all collection filters" }));
     const cleared = onQueryChange.mock.calls.at(-1)?.[0] as CollectionQueryLocation;
     expect(cleared).toEqual(DEFAULT_COLLECTION_QUERY);
-    const preserved = {
-      area: "investigations" as const,
-      caseId: null,
-      stage: "capture" as const,
-      focus: { section: "notes", item: null, lane: null, experiment: null },
-      collectionQuery: cleared,
-    };
-    expect(preserved.stage).toBe("capture");
-    expect(preserved.focus.section).toBe("notes");
+    expect(Object.keys(cleared).sort()).toEqual([
+      "contributorId",
+      "entityId",
+      "impactIdentity",
+      "includeArchived",
+      "q",
+      "recordedFrom",
+      "recordedTo",
+      "status",
+    ]);
+  });
+
+  it("does not keep a reversed recorded range active", () => {
+    const onQueryChange = vi.fn();
+    render(
+      <WarRoomCollectionList
+        page={available(discoveryPage([]))}
+        query={{
+          ...DEFAULT_COLLECTION_QUERY,
+          recordedFrom: "2026-08-01T00:00:00.000Z",
+          recordedTo: "2026-08-31T23:59:59.999Z",
+        }}
+        canRead
+        readOnly
+        onOccurredFromChange={vi.fn()}
+        onQueryChange={onQueryChange}
+        onRefresh={vi.fn()}
+        onOpenCase={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Filter investigations by recorded date from"), {
+      target: { value: "2026-09-15" },
+    });
+    expect(onQueryChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Clear Recorded from 2026-08-01 UTC" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Recorded from 2026-09-15/u })).toBeNull();
   });
 
   it("does not show collection actions or prior filters to a denied reader", () => {
@@ -360,10 +387,10 @@ describe.each(PRESENTATIONS)("$name collection discovery", ({ Strategy, row }) =
     expect(mounted.onOpenCase).toHaveBeenCalledWith(item.id);
 
     fireEvent.change(screen.getByLabelText("Filter investigations by recorded date from"), {
-      target: { value: "2026-09-01" },
+      target: { value: "2026-08-15" },
     });
     const next = mounted.onCollectionQueryChange.mock.calls.at(-1)?.[0] as CollectionQueryLocation;
-    expect(next.recordedFrom).toBe("2026-09-01T00:00:00.000Z");
+    expect(next.recordedFrom).toBe("2026-08-15T00:00:00.000Z");
     expect(next).not.toHaveProperty("cursor");
     expect(pathFor({
       area: "investigations",

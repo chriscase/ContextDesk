@@ -17,6 +17,7 @@ export {
   activeCollectionFilters,
   collectionEmptyMessage,
   collectionQueryWithoutFilter,
+  shareableCollectionQuery,
   impactIdentityLabel,
   RECORDED_RANGE_UTC_NOTE,
   shareableQueryNarrows,

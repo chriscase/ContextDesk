@@ -7,6 +7,7 @@ import {
   impactIdentitiesEqual,
   impactIdentityLabel,
   impactIdentityValue,
+  shareableCollectionQuery,
   impactOptionLabel,
   OUTSIDE_TOP_FACET_NOTE,
   RECORDED_RANGE_UTC_NOTE,
@@ -37,7 +38,9 @@ function changeQuery(
   onQueryChange: CollectionDiscoveryFiltersProps["onQueryChange"],
   next: Partial<CollectionQueryLocation>,
 ) {
-  onQueryChange?.({ ...query, ...next });
+  const candidate = { ...query, ...next };
+  if (shareableCollectionQuery(candidate) === null) return;
+  onQueryChange?.(candidate);
 }
 
 function selectedImpactValue(identity: ImpactIdentity | null): string {

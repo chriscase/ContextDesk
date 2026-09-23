@@ -357,11 +357,23 @@ export function InvestigationRuntimeProvider({
     () => investigationOperationsQueueGateway(gateway),
     [gateway],
   );
-  const [collectionQueryInput, setCollectionQueryInput] =
-    useState<InvestigationCollectionQueryInput | null>(null);
+  const [collectionQueryRequest, setCollectionQueryRequest] = useState<{
+    readonly identityKey: string;
+    readonly authorityKey: string;
+    readonly input: InvestigationCollectionQueryInput;
+  } | null>(null);
   const requestInvestigationCollection = useCallback((input: InvestigationCollectionQueryInput) => {
-    setCollectionQueryInput(snapshotInvestigationCollectionQueryInput(input));
-  }, []);
+    setCollectionQueryRequest(Object.freeze({
+      identityKey,
+      authorityKey,
+      input: snapshotInvestigationCollectionQueryInput(input),
+    }));
+  }, [authorityKey, identityKey]);
+  const collectionQueryInput = collectionQueryRequest !== null
+    && collectionQueryRequest.identityKey === identityKey
+    && collectionQueryRequest.authorityKey === authorityKey
+    ? collectionQueryRequest.input
+    : null;
   const [operationsQueueRequest, setOperationsQueueRequest] = useState<{
     readonly identityKey: string;
     readonly authorityKey: string;

@@ -24,7 +24,11 @@ import {
   sameLocation,
   type CollectionQueryLocation,
 } from "../../app-location.js";
-import { recordedFromInstant, recordedToInstant } from "./collection-discovery.js";
+import {
+  recordedFromInstant,
+  recordedToInstant,
+  shareableCollectionQuery,
+} from "./collection-discovery.js";
 import { useInvestigationCollectionQuery } from "./collection-query.js";
 
 afterEach(() => cleanup());
@@ -232,6 +236,19 @@ describe("investigation collection query shell adapter", () => {
       expect(JSON.stringify(location)).not.toContain("checkout");
       expect(JSON.stringify(location)).not.toContain("uid=carol");
     }
+  });
+
+  it("refuses a reversed range or overlong query before it can become active", () => {
+    const reversed = {
+      ...DEFAULT_COLLECTION_QUERY,
+      recordedFrom: "2026-08-20T00:00:00.000Z",
+      recordedTo: "2026-08-01T00:00:00.000Z",
+    };
+    const overlong = { ...DEFAULT_COLLECTION_QUERY, q: "a".repeat(513) };
+    const valid = { ...DEFAULT_COLLECTION_QUERY, q: "checkout", contributorId: "identity-carol" };
+    expect(shareableCollectionQuery(reversed)).toBeNull();
+    expect(shareableCollectionQuery(overlong)).toBeNull();
+    expect(shareableCollectionQuery(valid)).toEqual(valid);
   });
 
   it("keeps offset-equivalent recorded instants and UTC date-only bounds exact", () => {

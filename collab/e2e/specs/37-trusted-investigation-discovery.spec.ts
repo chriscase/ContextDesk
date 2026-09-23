@@ -209,6 +209,9 @@ test.describe("trusted investigation discovery journey", () => {
         }
 
         let sourcePage: CollectionPage | null = null;
+        // ROUTE-INJECTED page boundary. The fixture page size is larger than
+        // two rows, so this fulfillment slices the real server body and adds
+        // an opaque cursor. It is not proof of a real second server page.
         const continuePage = async (route: Route) => {
           const requestUrl = new URL(route.request().url());
           if (requestUrl.searchParams.get("schemaId") !== COLLECTION_QUERY_SCHEMA_ID) {

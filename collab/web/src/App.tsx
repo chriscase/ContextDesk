@@ -83,6 +83,7 @@ import {
 } from "./ui-strategy.js";
 import { useUiStrategyGovernance } from "./useUiStrategyGovernance.js";
 import { ActivityCenter } from "./overview/ActivityCenter.js";
+import { shareableCollectionQuery } from "./investigations/strategies/collection-discovery.js";
 import { useWarRoomCollectionQuery } from "./investigations/war-room/useWarRoomCollectionQuery.js";
 import { OperationsQueue } from "./operations-queue/index.js";
 
@@ -527,6 +528,7 @@ export function App() {
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
   );
+  const [collectionQueryRejection, setCollectionQueryRejection] = useState<string | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [startSignal, setStartSignal] = useState(0);
   const [focusedCaseTitle, setFocusedCaseTitle] = useState<string | null>(null);
@@ -1228,6 +1230,9 @@ export function App() {
                   </section>
                 ) : (
                   <WarRoomStrategyContext.Provider value={warRoomBindings}>
+                    {collectionQueryRejection ? (
+                      <p className="app-notice" role="alert">{collectionQueryRejection}</p>
+                    ) : null}
                     <InvestigationStrategyRenderer
                       strategy={surfaceStrategy}
                       registrations={INVESTIGATION_STRATEGY_REGISTRATIONS}
@@ -1253,14 +1258,22 @@ export function App() {
                       {...(work.caseId === null
                         ? {
                             collectionQuery: work.collectionQuery ?? DEFAULT_COLLECTION_QUERY,
-                            onCollectionQueryChange: (collectionQuery) =>
+                            onCollectionQueryChange: (collectionQuery) => {
+                              if (shareableCollectionQuery(collectionQuery) === null) {
+                                setCollectionQueryRejection(
+                                  "That filter was not applied. The previous search is still in effect.",
+                                );
+                                return;
+                              }
+                              setCollectionQueryRejection(null);
                               navigate({
                                 area: "investigations",
                                 caseId: null,
                                 stage: work.stage,
                                 ...(work.focus ? { focus: work.focus } : {}),
                                 collectionQuery,
-                              }, "replace"),
+                              }, "replace");
+                            },
                           }
                         : {})}
                       onOpenAdvancedTools={(caseId, stage) => {

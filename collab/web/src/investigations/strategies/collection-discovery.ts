@@ -1,3 +1,7 @@
+import {
+  INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+  parseInvestigationCollectionQuery,
+} from "@cd-collab/contracts/investigation-collection";
 import type { CollectionQueryLocation } from "../../app-location.js";
 import type { InvestigationCollectionPageV1 } from "../runtime/public.js";
 
@@ -7,6 +11,31 @@ type ImpactIdentity = NonNullable<CollectionQueryLocation["impactIdentity"]>;
  * A shareable filter narrows the server collection. Archive inclusion widens
  * the same collection, so it does not by itself mean "nothing was recorded".
  */
+/**
+ * A query the shell may store. Contract rejection means the value must not
+ * become an active filter or be sent as a collection request.
+ */
+export function shareableCollectionQuery(
+  query: CollectionQueryLocation,
+): CollectionQueryLocation | null {
+  try {
+    parseInvestigationCollectionQuery({
+      schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+      q: query.q,
+      status: [...query.status],
+      includeArchived: query.includeArchived,
+      entityId: query.entityId,
+      impactIdentity: query.impactIdentity,
+      contributorId: query.contributorId,
+      recordedFrom: query.recordedFrom,
+      recordedTo: query.recordedTo,
+    });
+    return query;
+  } catch {
+    return null;
+  }
+}
+
 export function shareableQueryNarrows(query: CollectionQueryLocation): boolean {
   return query.q.trim().length > 0
     || query.status.length > 0

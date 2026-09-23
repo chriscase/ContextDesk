@@ -7,6 +7,7 @@ import type { CollectionQueryLocation } from "../../app-location.js";
 import {
   CollectionDiscoveryFilters,
   collectionEmptyMessage,
+  shareableCollectionQuery,
   shareableQueryNarrows,
 } from "../strategies/collection-query.js";
 import { CollectionPagination } from "../strategies/shared/index.js";
@@ -41,7 +42,9 @@ function updateQuery(
   onQueryChange: WarRoomCollectionListProps["onQueryChange"],
   next: Partial<CollectionQueryLocation>,
 ) {
-  onQueryChange?.({ ...query, ...next });
+  const candidate = { ...query, ...next };
+  if (shareableCollectionQuery(candidate) === null) return;
+  onQueryChange?.(candidate);
 }
 
 export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
