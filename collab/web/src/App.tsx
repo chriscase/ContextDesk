@@ -536,6 +536,9 @@ export function App() {
   const [leaveRequest, setLeaveRequest] = useState(false);
   const locationRef = useRef(location);
   locationRef.current = location;
+  useEffect(() => {
+    setCollectionQueryRejection(null);
+  }, [location]);
   const profileDirtyRef = useRef(false);
   profileDirtyRef.current = profileDirty;
   const pendingLeaveRef = useRef<

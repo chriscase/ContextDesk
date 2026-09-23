@@ -79,6 +79,25 @@ describe("collection discovery empty copy", () => {
     expect(collectionEmptyMessage(false)).toBe("No investigations have been recorded yet.");
     expect(collectionEmptyMessage(true)).not.toMatch(/have been recorded/u);
     expect(collectionEmptyMessage(true, { pageLocal: true })).toMatch(/on this loaded page/u);
+    for (const query of [
+      { ...DEFAULT_COLLECTION_QUERY, q: "checkout" },
+      { ...DEFAULT_COLLECTION_QUERY, status: ["open"] as const },
+      { ...DEFAULT_COLLECTION_QUERY, entityId: "ent-northwind" },
+      { ...DEFAULT_COLLECTION_QUERY, impactIdentity: IMPACT },
+      { ...DEFAULT_COLLECTION_QUERY, contributorId: "identity-erin" },
+      { ...DEFAULT_COLLECTION_QUERY, recordedFrom: "2026-08-01T00:00:00.000Z" },
+      { ...DEFAULT_COLLECTION_QUERY, recordedTo: "2026-08-31T23:59:59.999Z" },
+      {
+        ...DEFAULT_COLLECTION_QUERY,
+        q: "checkout",
+        contributorId: "identity-erin",
+        recordedFrom: "2026-08-01T00:00:00.000Z",
+      },
+    ]) {
+      expect(shareableQueryNarrows(query)).toBe(true);
+      expect(collectionEmptyMessage(true)).toBe("No investigations match the current search or filter.");
+      expect(collectionEmptyMessage(true)).not.toMatch(/have been recorded yet/u);
+    }
   });
 });
 

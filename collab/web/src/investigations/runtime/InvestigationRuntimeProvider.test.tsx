@@ -2598,6 +2598,67 @@ describe("InvestigationRuntimeProvider", () => {
       });
       expect(requests[1]).toEqual(continued.ok ? continued.value : null);
     });
+
+    it("ignores a collection command captured before the identity changes", async () => {
+      const alicePage = collectionPage({
+        items: [{ ...makePopulatedCase(), id: "case-alice-scope", title: "Alice scope row" }],
+        nextCursor: OPAQUE_CURSOR,
+      });
+      const deferred = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+      const queryInvestigations = vi.fn(
+        (_query: InvestigationCollectionQueryInput, _options: { signal: AbortSignal }) => deferred.promise,
+      );
+      const gateway = makeGateway({ queryInvestigations });
+
+      function Harness() {
+        const [identityKey, setIdentityKey] = useState("alice");
+        return (
+          <>
+            <button type="button" onClick={() => setIdentityKey("mallory")}>rotate identity</button>
+            <ProviderUnderTest
+              identityKey={identityKey}
+              identity={{ id: identityKey, username: identityKey, displayName: identityKey }}
+              authorityKey="shared-authority"
+              capabilities={["investigation:read"]}
+              readOnly={false}
+              active
+              focusCaseId={null}
+              isInvestigationLocation
+              onOpenCreated={vi.fn()}
+              gateway={gateway}
+            >
+              <RuntimeProbe />
+            </ProviderUnderTest>
+          </>
+        );
+      }
+
+      render(<Harness />);
+      const captured = currentRuntime().commands.queryInvestigations;
+      expect(captured).toEqual(expect.any(Function));
+      act(() => captured?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+
+      act(() => screen.getByRole("button", { name: "rotate identity" }).click());
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      expect(currentRuntime().resources.investigationCollectionQuery).toBeNull();
+      expect(currentRuntime().resources.investigationCollectionNotice).toBeNull();
+
+      await act(async () => {
+        deferred.resolve(succeeded(alicePage));
+      });
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      if (currentRuntime().resources.investigationCollection.status === "ready") {
+        throw new Error("a late page from the previous identity was published");
+      }
+
+      const callsBeforeStaleCommand = queryInvestigations.mock.calls.length;
+      act(() => captured?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await act(async () => undefined);
+      expect(queryInvestigations).toHaveBeenCalledTimes(callsBeforeStaleCommand);
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      expect(JSON.stringify(currentRuntime().resources.investigationCollection)).not.toContain("Alice scope row");
+    });
   });
 
   describe("operations queue resource", () => {
