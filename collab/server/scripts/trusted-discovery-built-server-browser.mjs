@@ -229,6 +229,7 @@ try {
 
   await page.goto(`${base}/investigations?q=${encodeURIComponent(token)}&recordedTo=${outsideDay}T23:59:59.999Z`);
   await page.getByText("No investigations match the current search or filter.").waitFor();
+  let recordedRequestMark = collectionRequests.length;
   await page.goto(filtered);
   const presentations = [
     { name: "War Room", row: ".case-card__open" },
@@ -249,6 +250,15 @@ try {
       cursorAbsent: !params.has("cursor"),
     };
   }
+  function requestHasRecordedBounds(url) {
+    try {
+      const params = new URL(url).searchParams;
+      return params.get("recordedFrom") === expectedRecordedFrom
+        && params.get("recordedTo") === expectedRecordedTo;
+    } catch {
+      return false;
+    }
+  }
   const journeys = [];
   for (const presentation of presentations) {
     await selectExperience(presentation.name);
@@ -259,6 +269,10 @@ try {
     }
     const rows = page.locator(presentation.row);
     await rows.filter({ hasText: newest.title }).waitFor();
+    const recordedRequest = collectionRequests.slice(recordedRequestMark).find(requestHasRecordedBounds);
+    if (!recordedRequest) {
+      throw new Error(`${presentation.name} collection request omitted a recorded bound`);
+    }
     const before = await rows.allInnerTexts();
     if (before.some((text) => text.includes(oldest.title))) {
       throw new Error(`${presentation.name} showed the oldest row before continuation`);
@@ -394,6 +408,7 @@ try {
       await page.screenshot({ path: join(shotDir, "built-server-320-forced-colors.png"), fullPage: false });
     }
     if (presentation !== presentations[presentations.length - 1]) {
+      recordedRequestMark = collectionRequests.length;
       await page.goto(filtered);
     }
   }

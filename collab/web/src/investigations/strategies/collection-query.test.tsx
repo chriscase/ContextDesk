@@ -281,12 +281,18 @@ describe("investigation collection query shell adapter", () => {
       ...DEFAULT_COLLECTION_QUERY,
       q: "checkout",
       status: ["monitoring"],
+      contributorId: "identity-erin",
+      recordedFrom: "2026-08-01T00:00:00.000Z",
+      recordedTo: "2026-08-31T23:59:59.999Z",
     });
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
     expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({
       q: "checkout",
       status: ["monitoring"],
       includeArchived: false,
+      contributorId: "identity-erin",
+      recordedFrom: "2026-08-01T00:00:00.000Z",
+      recordedTo: "2026-08-31T23:59:59.999Z",
     });
   });
 
