@@ -363,11 +363,23 @@ export function InvestigationRuntimeProvider({
     readonly input: InvestigationCollectionQueryInput;
   } | null>(null);
   const requestInvestigationCollection = useCallback((input: InvestigationCollectionQueryInput) => {
-    setCollectionQueryRequest(Object.freeze({
-      identityKey,
-      authorityKey,
-      input: snapshotInvestigationCollectionQueryInput(input),
-    }));
+    const snapshot = snapshotInvestigationCollectionQueryInput(input);
+    setCollectionQueryRequest((current) => {
+      const baseKey = (value: InvestigationCollectionQueryInput) =>
+        JSON.stringify({ ...value, cursor: undefined });
+      if (
+        current !== null
+        && snapshot.cursor
+        && baseKey(current.input) !== baseKey(snapshot)
+      ) {
+        return current;
+      }
+      return Object.freeze({
+        identityKey,
+        authorityKey,
+        input: snapshot,
+      });
+    });
   }, [authorityKey, identityKey]);
   const collectionQueryInput = collectionQueryRequest !== null
     && collectionQueryRequest.identityKey === identityKey

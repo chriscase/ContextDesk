@@ -241,8 +241,9 @@ try {
   const journeys = [];
   for (const presentation of presentations) {
     await selectExperience(presentation.name);
-    if (!page.url().includes(`q=${encodeURIComponent(token)}`) && !page.url().includes(`q=${token}`)) {
-      await page.goto(filtered);
+    const queryValue = new URL(page.url()).searchParams.get("q");
+    if (queryValue !== token) {
+      throw new Error(`${presentation.name} dropped the shared query: ${page.url()}`);
     }
     const rows = page.locator(presentation.row);
     await rows.filter({ hasText: newest.title }).waitFor();
@@ -253,11 +254,15 @@ try {
     const beforeCount = collectionRequests.length;
     await page.getByRole("button", { name: "Load next page" }).click();
     await rows.filter({ hasText: oldest.title }).waitFor();
+    await rows.filter({ hasText: newest.title }).waitFor();
     const continuation = collectionRequests.slice(beforeCount).find((url) => url.includes("cursor="));
     if (!continuation) throw new Error(`${presentation.name} continuation did not send a server cursor`);
     if (new URL(page.url()).searchParams.has("cursor")) {
       throw new Error(`${presentation.name} put the cursor in the browser URL`);
     }
+    await rows.filter({ hasText: oldest.title }).click();
+    await page.waitForURL(new RegExp(`/investigations/${oldest.id}/`));
+    await page.goto(filtered);
     await page.reload();
     await rows.filter({ hasText: newest.title }).waitFor();
     if (new URL(page.url()).searchParams.get("q") !== token) {
@@ -274,6 +279,9 @@ try {
     await page.waitForURL(`${base}/investigations`);
     await page.goBack();
     await rows.filter({ hasText: newest.title }).waitFor();
+    if (new URL(page.url()).searchParams.get("recordedFrom") !== `${recordedDay}T00:00:00.000Z`) {
+      throw new Error(`${presentation.name} did not restore the recorded range`);
+    }
     if (shotDir) {
       const fileName = `built-server-${presentation.name.toLowerCase().replace(/\s+/gu, "-")}-1280.png`;
       await page.screenshot({ path: join(shotDir, fileName), fullPage: false });
