@@ -1,8 +1,8 @@
 # Goal 1 receipt — trusted investigation discovery
 
 This receipt supersedes `TRUSTED_INVESTIGATION_DISCOVERY_RECEIPT.md` for
-acceptance. That older file is the historical TID-1..TID-5 map. It is not
-G1-01 through G1-10.
+acceptance. That older file, with `GOAL_TRUSTED_INVESTIGATION_DISCOVERY.md`,
+is the historical TID-1..TID-5 subset. It is not G1-01 through G1-10.
 
 Behavior through the query fence is `612a4bce`. The checked product head is
 `0b5de58d`. Each presentation's Load next page request must carry the server
@@ -23,9 +23,15 @@ documentation only.
 | Checked publication head | `0b5de58d74fc099b5871ab1df6cbc0f926e8d703` |
 | PR #1181 | Draft, open, unmerged. https://github.com/chriscase/ContextDesk/pull/1181 |
 | PR #1180 | Draft, open, unmerged, head `18f2e77a2cfa71caa9c85e9b34a3692a71d97404`, tree `0155061acba76b78b97bc6c7aa0bb6d42af7e547`. Ancestor of this branch. Not rewritten and not closed. |
-| Owner goal artifact | `docs/goals/03-GOAL-1-TRUSTED-DISCOVERY.md`, added in `38fd2d20523b1e41329ed9ad61e0447db646ac91` |
-| Owner goal SHA-256 | `5c64ca43d6b2003717c1b95b382de7fb78879d4a56be4f6e5d634d8c7a351ac9` |
-| Historical TID freeze | `493c6abdd84ff59b4f043872170fbd5a6ae0c327`. Five-item subset only. Not equivalent to G1. History was not rewritten. |
+| Exact owner goal | `docs/goals/03-GOAL-1-TRUSTED-DISCOVERY.md` |
+| Exact owner SHA-256 | `2b0aaf9893c1a399b6232a01a942bfdfc8b3764d9031f213e481a86410e3edf0` |
+| Historical TID subset | `493c6abdd84ff59b4f043872170fbd5a6ae0c327` (`GOAL_TRUSTED_INVESTIGATION_DISCOVERY.md`). TID-1..TID-5 only. Not equivalent to G1. History was not rewritten. |
+| Criteria-only reconstruction | `docs/goals/GOAL_1_CRITERIA_RECONSTRUCTION.md`, SHA-256 `5c64ca43d6b2003717c1b95b382de7fb78879d4a56be4f6e5d634d8c7a351ac9`. Added in `38fd2d20523b1e41329ed9ad61e0447db646ac91` at `03-GOAL-1-TRUSTED-DISCOVERY.md`. Not the exact owner artifact. |
+
+The exact owner file is the supplied Goal 1 text, byte for byte, and it has
+no provenance commentary. The criteria-only reconstruction kept the acceptance
+IDs in a later file. It is not the owner artifact. The TID subset remains the
+earlier five-item freeze.
 
 `01-STANDING-INSTRUCTIONS.md` was not on this machine. No standing-instruction
 rules were invented.
