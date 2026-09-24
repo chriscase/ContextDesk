@@ -4,8 +4,10 @@ import {
   INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
   INVESTIGATION_RESOURCE_LOCATOR_SCHEMA_ID,
   INVESTIGATION_RESOURCE_RESOLVE_SCHEMA_ID,
+  type InvestigationActivityFilterV1,
   type InvestigationActivityItemV1,
   type InvestigationActivityPageV1,
+  type InvestigationResourceLocatorV1,
   type InvestigationResourceResolveV1,
 } from "@cd-collab/contracts/investigation-activity";
 import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
@@ -200,7 +202,7 @@ describe("useActivityCenter", () => {
       readonly identityKey: string;
       readonly authorityKey: string;
       readonly enabled: boolean;
-      readonly filter: Record<string, never> | { readonly kinds: readonly ["evidence_added"] };
+      readonly filter: InvestigationActivityFilterV1;
       readonly releaseStored: boolean;
     }) {
       const controller = useActivityCenter({
@@ -225,7 +227,7 @@ describe("useActivityCenter", () => {
     const callsBefore = listActivity.mock.calls.length;
     const mark = paints.length;
     rendered.rerender(
-      <Probe identityKey="bob" authorityKey="editor" enabled filter={{ kinds: ["evidence_added"] }} releaseStored />,
+      <Probe identityKey="bob" authorityKey="editor" enabled filter={{ activityKind: "handoff_recorded" }} releaseStored />,
     );
     expect(paints[mark]?.activity).toEqual({ status: "loading" });
     expect(paints[mark]?.nextCursor).toBeNull();
@@ -233,7 +235,7 @@ describe("useActivityCenter", () => {
     expect(paints[mark]?.openFailure).toBeNull();
     expect(paints[mark]?.investigations).toEqual([]);
     expect(listActivity.mock.calls.length).toBe(callsBefore + 1);
-    expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { kinds: ["evidence_added"] } });
+    expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { activityKind: "handoff_recorded" } });
     expect(sharedGateway.resolve).not.toHaveBeenCalled();
   });
 
@@ -278,7 +280,7 @@ describe("useActivityCenter", () => {
     let refresh = () => undefined as void;
     function Probe() {
       const controller = useActivityCenter({
-        enabled: true, identityKey: "alice", authorityKey: "viewer", filter: { q: "checkout" }, gateway: sharedGateway,
+        enabled: true, identityKey: "alice", authorityKey: "viewer", filter: { activityKind: "investigation_updated" }, gateway: sharedGateway,
       });
       refresh = controller.refresh;
       paints.push(controller);
@@ -294,6 +296,6 @@ describe("useActivityCenter", () => {
     await waitFor(() => expect(paints.at(-1)?.activity.status).toBe("failed"));
     const failed = paints.at(-1)?.activity;
     expect(failed?.status === "failed" && failed.previous).toEqual([item("a")]);
-    expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { q: "checkout" } });
+    expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { activityKind: "investigation_updated" } });
   });
 });
