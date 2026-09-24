@@ -255,9 +255,11 @@ describe("shared handoff panel", () => {
     });
     fireEvent.submit(screen.getByRole("form", { name: "Record a handoff" }));
 
-    await waitFor(() => expect(createContribution).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(createContribution).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(copy)).toBeTruthy();
+    });
     expect((screen.getByRole("textbox", { name: "Note" }) as HTMLTextAreaElement).value).toBe("Keep this draft.");
-    expect(screen.getByText(copy)).toBeTruthy();
   });
 
   it("asks the operator to review the record after an uncertain result", async () => {

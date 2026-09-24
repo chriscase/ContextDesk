@@ -20,6 +20,7 @@ import "./styles/investigation-strategy-shared.css";
 import "./styles/operations.css";
 import "./styles/keystone.css";
 import "./styles/beacon.css";
+import "./styles/collection-discovery.css";
 
 const root = document.getElementById("root");
 if (!root) {

@@ -1211,8 +1211,9 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(screen.getByText("Count unavailable")).toBeTruthy();
     expect(screen.queryByText("0 shown · 0 total")).toBeNull();
     expect(screen.queryByText(/No investigations match this view/)).toBeNull();
+    expect(screen.queryByText(/have been recorded yet/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Retry loading investigations" }));
-    expect(await screen.findByText("No investigations match this view. Try a different search or create a new one.")).toBeTruthy();
+    expect(await screen.findByText("No investigations have been recorded yet.")).toBeTruthy();
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
   });
 

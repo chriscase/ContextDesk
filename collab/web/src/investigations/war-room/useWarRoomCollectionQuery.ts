@@ -4,13 +4,19 @@ import {
   useInvestigationRuntime,
   type InvestigationCollectionPageV1,
   type InvestigationCollectionQueryInput,
+  type InvestigationCollectionQueryV1,
   type ResourceView,
 } from "../runtime/public.js";
-import type { CollectionQueryLocation } from "../../app-location.js";
+import {
+  DEFAULT_COLLECTION_QUERY,
+  type CollectionQueryLocation,
+} from "../../app-location.js";
 
 export interface WarRoomCollectionQueryPresentation {
   readonly input: InvestigationCollectionQueryInput;
   readonly view: ResourceView<InvestigationCollectionPageV1>;
+  /** Restart notice for this location only. Null while a different query is still published. */
+  readonly cursorRestartNotice: string | null;
   readonly refresh: () => void;
   /** Continue with the server-issued opaque cursor without changing the URL. */
   readonly nextPage: () => void;
@@ -24,6 +30,7 @@ function inputForLocation(query: CollectionQueryLocation): InvestigationCollecti
     status: [...query.status],
     includeArchived: query.includeArchived,
     entityId: query.entityId,
+    impactIdentity: query.impactIdentity,
     contributorId: query.contributorId,
     recordedFrom: query.recordedFrom,
     recordedTo: query.recordedTo,
@@ -56,6 +63,14 @@ function canonicalCollectionBaseKey(input: InvestigationCollectionQueryInput): s
   });
 }
 
+/** True only when the runtime request is already this location's query. */
+function locationOwnsCollection(
+  activeQuery: InvestigationCollectionQueryV1 | null,
+  inputKey: string,
+): boolean {
+  return activeQuery !== null && canonicalCollectionBaseKey(activeQuery) === inputKey;
+}
+
 /**
  * War Room's deliberately small bridge to the public collection seam.
  *
@@ -67,17 +82,10 @@ export function useWarRoomCollectionQuery(
   locationQuery: CollectionQueryLocation | undefined,
 ): WarRoomCollectionQueryPresentation {
   const runtime = useInvestigationRuntime();
-  const input = useMemo(() => inputForLocation(locationQuery ?? {
-    q: "",
-    status: [],
-    includeArchived: false,
-    entityId: null,
-    contributorId: null,
-    recordedFrom: null,
-    recordedTo: null,
-  }), [
+  const input = useMemo(() => inputForLocation(locationQuery ?? DEFAULT_COLLECTION_QUERY), [
     locationQuery?.contributorId,
     locationQuery?.entityId,
+    locationQuery?.impactIdentity,
     locationQuery?.includeArchived,
     locationQuery?.q,
     locationQuery?.recordedFrom,
@@ -85,16 +93,22 @@ export function useWarRoomCollectionQuery(
     locationQuery?.status,
   ]);
   const inputKey = useMemo(() => canonicalCollectionBaseKey(input), [input]);
+  const inputKeyRef = useRef(inputKey);
+  inputKeyRef.current = inputKey;
   const command = runtime.commands.queryInvestigations;
   const enabled = locationQuery !== undefined && command !== null && command !== undefined;
-  const view = enabled
-    ? selectResourceView(runtime.resources.investigationCollection)
-    : { availability: "idle" } as const;
+  const activeCollectionQuery = runtime.resources.investigationCollectionQuery;
+  const queryMatches = locationOwnsCollection(activeCollectionQuery, inputKey);
+  const view = !enabled
+    ? { availability: "idle" } as const
+    : queryMatches
+      ? selectResourceView(runtime.resources.investigationCollection)
+      : { availability: "loading" } as const;
   const continuationPendingRef = useRef(false);
   const pendingInputKeyRef = useRef(inputKey);
   const requestedInputKeyRef = useRef<string | null>(null);
   const inactiveRef = useRef(!enabled);
-  const activeCursor = runtime.resources.investigationCollectionQuery?.cursor ?? null;
+  const activeCursor = activeCollectionQuery?.cursor ?? null;
   const collectionStatus = runtime.resources.investigationCollection.status;
   const activeQueryRef = useRef(runtime.resources.investigationCollectionQuery);
   activeQueryRef.current = runtime.resources.investigationCollectionQuery;
@@ -119,7 +133,9 @@ export function useWarRoomCollectionQuery(
       return () => undefined;
     }
     return () => {
+      if (inputKeyRef.current !== inputKey) return;
       const activeQuery = activeQueryRef.current;
+      if (!locationOwnsCollection(activeQuery, inputKey)) return;
       const retryAvailable =
         view.availability === "available"
         && view.refresh === "failed"
@@ -163,10 +179,13 @@ export function useWarRoomCollectionQuery(
   return {
     input,
     view,
+    cursorRestartNotice: queryMatches ? runtime.resources.investigationCollectionNotice : null,
     refresh: enabled && command !== null && command !== undefined
       ? () => {
+          if (inputKeyRef.current !== inputKey) return;
+          const activeQuery = activeQueryRef.current;
+          if (!locationOwnsCollection(activeQuery, inputKey)) return;
           if (view.availability === "available" && view.refresh === "loading") return;
-          const activeQuery = runtime.resources.investigationCollectionQuery;
           if (
             view.availability === "available"
             && view.refresh === "failed"

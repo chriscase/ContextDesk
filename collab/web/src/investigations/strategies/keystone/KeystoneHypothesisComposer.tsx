@@ -76,6 +76,8 @@ function failureOutcomeIsUnknown(error: RuntimeFailure): boolean {
     case "lifecycle_refused":
     case "coordination_changed":
     case "coordination_refused":
+    case "stale_cursor":
+    case "malformed_cursor":
       return false;
   }
 }
@@ -95,6 +97,8 @@ function contributionFailureCopy(error: RuntimeFailure): string {
     case "coordination_refused":
       return "The investigation changed before the hypothesis was recorded. Review the current record before trying again.";
     case "lifecycle_refused":
+    case "stale_cursor":
+    case "malformed_cursor":
       return "The investigation does not currently allow this contribution.";
     case "unavailable":
     case "server_failure":

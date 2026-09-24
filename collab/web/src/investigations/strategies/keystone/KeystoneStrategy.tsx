@@ -7,7 +7,12 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
-import { useInvestigationCollectionQuery } from "../collection-query.js";
+import {
+  CollectionDiscoveryFilters,
+  collectionEmptyMessage,
+  shareableQueryNarrows,
+  useInvestigationCollectionQuery,
+} from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
@@ -336,6 +341,15 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                 <option value="archived">Archived</option>
               </select>
             </label>
+            {collectionEnabled && collectionQuery !== undefined ? (
+              <CollectionDiscoveryFilters
+                query={collectionQuery}
+                onQueryChange={props.onCollectionQueryChange}
+                facets={collectionView.availability === "available" ? collectionView.value.facets : null}
+                showEntity
+                cursorRestartNotice={collection.cursorRestartNotice}
+              />
+            ) : null}
             {collectionEnabled ? (
               <label className="keystone-strategy__checkbox">
                 <input
@@ -396,10 +410,16 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
             </StrategyStateNotice>
           ) : null}
           {listView.availability === "available" && filteredCases.length === 0 ? (
-            <StrategyStateNotice title={browseCases.length === 0 ? "No investigations recorded" : "No matching investigations"}>
-              {browseCases.length === 0
-                ? "The available collection is empty."
-                : "Try a different search or recorded status."}
+            <StrategyStateNotice title={(
+              collectionEnabled && collectionQuery !== undefined
+                ? shareableQueryNarrows(collectionQuery)
+                : browseQuery.trim().length > 0 || browseStatus !== "all"
+            ) ? "No matching investigations" : "No investigations recorded"}>
+              {collectionEmptyMessage(
+                collectionEnabled && collectionQuery !== undefined
+                  ? shareableQueryNarrows(collectionQuery)
+                  : browseQuery.trim().length > 0 || browseStatus !== "all",
+              )}
             </StrategyStateNotice>
           ) : null}
           {listView.availability === "available" && filteredCases.length > 0 ? (

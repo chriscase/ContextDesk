@@ -2598,6 +2598,132 @@ describe("InvestigationRuntimeProvider", () => {
       });
       expect(requests[1]).toEqual(continued.ok ? continued.value : null);
     });
+
+    it("ignores a collection command captured before the identity changes", async () => {
+      const alicePage = collectionPage({
+        items: [{ ...makePopulatedCase(), id: "case-alice-scope", title: "Alice scope row" }],
+        nextCursor: OPAQUE_CURSOR,
+      });
+      const deferred = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+      const queryInvestigations = vi.fn(
+        (_query: InvestigationCollectionQueryInput, _options: { signal: AbortSignal }) => deferred.promise,
+      );
+      const gateway = makeGateway({ queryInvestigations });
+
+      const paints: string[] = [];
+      function PaintProbe() {
+        const runtime = useInvestigationRuntime();
+        observedRuntime = runtime;
+        const page = runtime.resources.investigationCollection;
+        paints.push(page.status === "ready"
+          ? `ready:${page.value.items.map((item) => item.id).join(",")}`
+          : page.status);
+        return <div>probe</div>;
+      }
+
+      function Harness() {
+        const [identityKey, setIdentityKey] = useState("alice");
+        const [authorityKey, setAuthorityKey] = useState("shared-authority");
+        return (
+          <>
+            <button type="button" onClick={() => setIdentityKey("mallory")}>rotate identity</button>
+            <button type="button" onClick={() => setAuthorityKey("other-authority")}>rotate authority</button>
+            <ProviderUnderTest
+              identityKey={identityKey}
+              identity={{ id: identityKey, username: identityKey, displayName: identityKey }}
+              authorityKey={authorityKey}
+              capabilities={["investigation:read"]}
+              readOnly={false}
+              active
+              focusCaseId={null}
+              isInvestigationLocation
+              onOpenCreated={vi.fn()}
+              gateway={gateway}
+            >
+              <PaintProbe />
+            </ProviderUnderTest>
+          </>
+        );
+      }
+
+      render(<Harness />);
+      const captured = currentRuntime().commands.queryInvestigations;
+      expect(captured).toEqual(expect.any(Function));
+      act(() => captured?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+      const callsAtIdentityChange = queryInvestigations.mock.calls.length;
+      const paintMark = paints.length;
+
+      act(() => screen.getByRole("button", { name: "rotate identity" }).click());
+      expect(paints.slice(paintMark)[0]).toBe("idle");
+      expect(paints.slice(paintMark).join(" ")).not.toContain("case-alice-scope");
+      expect(queryInvestigations).toHaveBeenCalledTimes(callsAtIdentityChange);
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      expect(currentRuntime().resources.investigationCollectionQuery).toBeNull();
+      expect(currentRuntime().resources.investigationCollectionNotice).toBeNull();
+
+      await act(async () => {
+        deferred.resolve(succeeded(alicePage));
+      });
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      expect(paints.join(" ")).not.toContain("case-alice-scope");
+
+      const callsBeforeStaleCommand = queryInvestigations.mock.calls.length;
+      act(() => captured?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await act(async () => undefined);
+      expect(queryInvestigations).toHaveBeenCalledTimes(callsBeforeStaleCommand);
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+
+      const authorityCommand = currentRuntime().commands.queryInvestigations;
+      act(() => screen.getByRole("button", { name: "rotate authority" }).click());
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      act(() => authorityCommand?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await act(async () => undefined);
+      expect(queryInvestigations).toHaveBeenCalledTimes(callsBeforeStaleCommand);
+    });
+
+    it("does not apply a captured continuation after the query changes", async () => {
+      const checkoutPage = collectionPage({
+        items: [{ ...makePopulatedCase(), id: "case-checkout", title: "Checkout row" }],
+        nextCursor: OPAQUE_CURSOR,
+      });
+      const otherPage = collectionPage({
+        items: [{ ...makePopulatedCase(), id: "case-other", title: "Other row" }],
+        nextCursor: null,
+      });
+      const queryInvestigations = vi.fn(async (query: InvestigationCollectionQueryInput) => (
+        succeeded(query.q === "other" ? otherPage : checkoutPage)
+      ));
+      const gateway = makeGateway({ queryInvestigations });
+      render(
+        <ProviderUnderTest
+          identityKey="alice"
+          authorityKey="alice-authority"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={gateway}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      act(() => currentRuntime().commands.queryInvestigations?.({ q: "checkout" }));
+      await waitFor(() => expect(currentRuntime().resources.investigationCollectionQuery?.q).toBe("checkout"));
+      const capturedContinuation = currentRuntime().commands.queryInvestigations;
+      act(() => currentRuntime().commands.queryInvestigations?.({ q: "other" }));
+      await waitFor(() => expect(currentRuntime().resources.investigationCollectionQuery?.q).toBe("other"));
+      const callsAfterQueryChange = queryInvestigations.mock.calls.length;
+      act(() => capturedContinuation?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await act(async () => undefined);
+      expect(queryInvestigations).toHaveBeenCalledTimes(callsAfterQueryChange);
+      expect(currentRuntime().resources.investigationCollectionQuery?.q).toBe("other");
+      expect(currentRuntime().resources.investigationCollectionQuery?.cursor ?? null).toBeNull();
+      const page = currentRuntime().resources.investigationCollection;
+      expect(page.status === "ready" && page.value.items.some((item) => item.id === "case-checkout")).toBe(false);
+    });
   });
 
   describe("operations queue resource", () => {

@@ -3,7 +3,7 @@ import {
   parseInvestigationCollectionPage,
 } from "@cd-collab/contracts/investigation-collection";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InvestigationRuntimeGatewayHarness,
@@ -24,6 +24,11 @@ import {
   sameLocation,
   type CollectionQueryLocation,
 } from "../../app-location.js";
+import {
+  recordedFromInstant,
+  recordedToInstant,
+  shareableCollectionQuery,
+} from "./collection-discovery.js";
 import { useInvestigationCollectionQuery } from "./collection-query.js";
 
 afterEach(() => cleanup());
@@ -133,6 +138,140 @@ describe("investigation collection query shell adapter", () => {
     expect(pathFor(location)).toBe("/investigations");
   });
 
+  it("round-trips a fully populated impact identity with deterministic field order", () => {
+    const shuffled = {
+      environment: "  test  ",
+      component: "  web  ",
+      build: "  2026.02  ",
+      version: "  4.2  ",
+      productName: "  ContextDesk  ",
+    };
+    const canonical = {
+      productName: "ContextDesk",
+      version: "4.2",
+      build: "2026.02",
+      component: "web",
+      environment: "test",
+    };
+    const location = parsePathname(
+      "/investigations",
+      `?q=checkout&impactIdentity=${encodeURIComponent(JSON.stringify(shuffled))}`
+        + "&cursor=eyJwYWdlIjoyfQ&limit=25&schemaId=cd-collab.investigation_collection_query.v1",
+    );
+    expect(location).toMatchObject({
+      area: "investigations",
+      caseId: null,
+      collectionQuery: {
+        q: "checkout",
+        impactIdentity: canonical,
+      },
+    });
+    const duplicateIdentity = { ...canonical };
+    expect(duplicateIdentity).not.toBe(canonical);
+    expect(sameLocation(location, {
+      area: "investigations",
+      caseId: null,
+      stage: "situation",
+      collectionQuery: { ...DEFAULT_COLLECTION_QUERY, q: "checkout", impactIdentity: duplicateIdentity },
+    })).toBe(true);
+    const url = pathFor(location);
+    expect(url).not.toContain("cursor");
+    expect(url).not.toContain("schemaId");
+    expect(url).not.toContain("limit");
+    const encoded = new URL(url, "https://contextdesk.invalid").searchParams.get("impactIdentity");
+    expect(encoded).toBe(JSON.stringify(canonical));
+    expect(Object.keys(JSON.parse(encoded ?? "{}"))).toEqual([
+      "productName",
+      "version",
+      "build",
+      "component",
+      "environment",
+    ]);
+    const reparsed = new URL(url, "https://contextdesk.invalid");
+    expect(parsePathname(reparsed.pathname, reparsed.search)).toEqual(location);
+  });
+
+  it("fails closed for malformed, unknown-key, and empty impact identities", () => {
+    const emptyIdentity = {
+      productName: "",
+      version: "",
+      build: "",
+      component: "",
+      environment: "",
+    };
+    const unknownKeys = {
+      productName: "ContextDesk",
+      version: "4.2",
+      build: "",
+      component: "web",
+      environment: "test",
+      extra: true,
+    };
+    expect(pathFor(parsePathname("/investigations", "?impactIdentity=not-json"))).toBe("/investigations");
+    expect(pathFor(parsePathname(
+      "/investigations",
+      `?q=checkout&impactIdentity=${encodeURIComponent("{")}`,
+    ))).toBe("/investigations");
+    expect(pathFor(parsePathname(
+      "/investigations",
+      `?q=checkout&impactIdentity=${encodeURIComponent(JSON.stringify(unknownKeys))}`,
+    ))).toBe("/investigations");
+    expect(pathFor(parsePathname(
+      "/investigations",
+      `?q=checkout&impactIdentity=${encodeURIComponent(JSON.stringify(emptyIdentity))}`,
+    ))).toBe("/investigations");
+  });
+
+  it("drops invalid instants, reversed ranges, identity tokens, and overlong queries instead of keeping them active", () => {
+    const cases = [
+      "?recordedFrom=yesterday&q=checkout",
+      "?recordedFrom=2026-08-20T00:00:00.000Z&recordedTo=2026-08-01T00:00:00.000Z",
+      "?contributorId=uid%3Dcarol%2Cou%3Dpeople&q=checkout",
+      `?q=${"a".repeat(513)}&status=open`,
+    ];
+    for (const search of cases) {
+      const location = parsePathname("/investigations", search);
+      expect(location).toEqual({ area: "investigations", caseId: null, stage: "situation" });
+      expect(pathFor(location)).toBe("/investigations");
+      expect(JSON.stringify(location)).not.toContain("checkout");
+      expect(JSON.stringify(location)).not.toContain("uid=carol");
+    }
+  });
+
+  it("refuses a reversed range or overlong query before it can become active", () => {
+    const reversed = {
+      ...DEFAULT_COLLECTION_QUERY,
+      recordedFrom: "2026-08-20T00:00:00.000Z",
+      recordedTo: "2026-08-01T00:00:00.000Z",
+    };
+    const overlong = { ...DEFAULT_COLLECTION_QUERY, q: "a".repeat(513) };
+    const valid = { ...DEFAULT_COLLECTION_QUERY, q: "checkout", contributorId: "identity-carol" };
+    expect(shareableCollectionQuery(reversed)).toBeNull();
+    expect(shareableCollectionQuery(overlong)).toBeNull();
+    expect(shareableCollectionQuery(valid)).toEqual(valid);
+  });
+
+  it("keeps offset-equivalent recorded instants and UTC date-only bounds exact", () => {
+    const zoned = parsePathname(
+      "/investigations",
+      "?recordedFrom=2026-07-31T20:00:00.000-04:00",
+    );
+    const utc = parsePathname(
+      "/investigations",
+      "?recordedFrom=2026-08-01T00:00:00.000Z",
+    );
+    expect(zoned).toMatchObject({
+      collectionQuery: { recordedFrom: "2026-07-31T20:00:00.000-04:00" },
+    });
+    expect(utc).toMatchObject({
+      collectionQuery: { recordedFrom: "2026-08-01T00:00:00.000Z" },
+    });
+    expect(Date.parse("2026-07-31T20:00:00.000-04:00")).toBe(Date.parse("2026-08-01T00:00:00.000Z"));
+    expect(recordedFromInstant("2026-03-08")).toBe("2026-03-08T00:00:00.000Z");
+    expect(recordedToInstant("2026-11-01")).toBe("2026-11-01T23:59:59.999Z");
+    expect(recordedFromInstant("2026-03-08")).not.toBe(recordedToInstant("2026-03-08"));
+  });
+
   it("invokes the additive runtime command with normalized shell filters", async () => {
     const queryInvestigations = vi.fn<QueryFn>(
       async (_input, _options) => gatewayOk(pageFixture()),
@@ -142,12 +281,78 @@ describe("investigation collection query shell adapter", () => {
       ...DEFAULT_COLLECTION_QUERY,
       q: "checkout",
       status: ["monitoring"],
+      contributorId: "identity-erin",
+      recordedFrom: "2026-08-01T00:00:00.000Z",
+      recordedTo: "2026-08-31T23:59:59.999Z",
     });
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
     expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({
       q: "checkout",
       status: ["monitoring"],
       includeArchived: false,
+      contributorId: "identity-erin",
+      recordedFrom: "2026-08-01T00:00:00.000Z",
+      recordedTo: "2026-08-31T23:59:59.999Z",
+    });
+  });
+
+  it("sends impactIdentity and does not refetch semantically identical values", async () => {
+    const identity = {
+      productName: "ContextDesk",
+      version: "4.2",
+      build: "2026.02",
+      component: "web",
+      environment: "test",
+    };
+    const queryInvestigations = vi.fn<QueryFn>(
+      async () => gatewayOk(pageFixture()),
+    );
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    const provider = (query: CollectionQueryLocation) => (
+      <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <Probe query={query} />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>
+    );
+    const rendered = render(provider({
+      ...DEFAULT_COLLECTION_QUERY,
+      impactIdentity: {
+        productName: "  ContextDesk  ",
+        version: " 4.2 ",
+        build: " 2026.02 ",
+        component: " web ",
+        environment: " test ",
+      },
+    }));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({ impactIdentity: identity });
+
+    await act(async () => {
+      rendered.rerender(provider({
+        ...DEFAULT_COLLECTION_QUERY,
+        impactIdentity: { ...identity },
+      }));
+    });
+    expect(queryInvestigations).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(provider({
+      ...DEFAULT_COLLECTION_QUERY,
+      impactIdentity: { ...identity, environment: "staging" },
+    }));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[1]?.[0]).toMatchObject({
+      impactIdentity: { ...identity, environment: "staging" },
     });
   });
 
@@ -385,6 +590,76 @@ describe("investigation collection query shell adapter", () => {
     expect(queryInvestigations.mock.calls[1]?.[0].cursor).toBe("eyJwYWdlIjoyfQ");
     expect(queryInvestigations.mock.calls[2]?.[0]).toEqual(queryInvestigations.mock.calls[1]?.[0]);
     expect(queryInvestigations.mock.calls[2]?.[0].q).toBe("checkout");
+  });
+
+  it("hides the previous page before the query effect and ignores a stored continuation", async () => {
+    const [seed] = makeCaseList().cases;
+    const queryInvestigations = vi.fn<QueryFn>(async (input) => gatewayOk({
+      ...pageFixture(),
+      items: [{ ...seed!, id: input.q === "other" ? "case-other" : "case-checkout", title: input.q ?? "" }],
+      nextCursor: input.q === "other" ? null : "eyJwYWdlIjoyfQ",
+    }));
+    const paints: string[] = [];
+    const stored = { next: () => undefined as void, refresh: () => undefined as void };
+    function ScopeProbe({
+      query,
+      releaseStored,
+    }: {
+      readonly query: CollectionQueryLocation;
+      readonly releaseStored: boolean;
+    }) {
+      const collection = useInvestigationCollectionQuery(query);
+      const releaseRef = useRef(releaseStored);
+      releaseRef.current = releaseStored;
+      if (!releaseStored) {
+        stored.next = collection.nextPage;
+        stored.refresh = collection.refresh;
+      }
+      useLayoutEffect(() => {
+        if (!releaseRef.current) return;
+        stored.next();
+        stored.refresh();
+      }, [releaseStored]);
+      const text = collection.view.availability === "available"
+        ? collection.view.value.items.map((item) => item.id).join(",")
+        : `${collection.view.availability}:${collection.cursorRestartNotice ?? ""}`;
+      paints.push(text);
+      return <output data-testid="scope-page">{text}</output>;
+    }
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    function provider(query: CollectionQueryLocation, releaseStored: boolean) {
+      return (
+        <InvestigationRuntimeGatewayHarness gateway={gateway}>
+          <InvestigationRuntimeProvider
+            identityKey="alice"
+            identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+            authorityKey="authority-v1"
+            capabilities={["investigation:read"]}
+            readOnly={false}
+            active
+            focusCaseId={null}
+            isInvestigationLocation
+            onOpenCreated={vi.fn()}
+          >
+            <ScopeProbe query={query} releaseStored={releaseStored} />
+          </InvestigationRuntimeProvider>
+        </InvestigationRuntimeGatewayHarness>
+      );
+    }
+    const rendered = render(provider({ ...DEFAULT_COLLECTION_QUERY, q: "checkout" }, false));
+    await waitFor(() => expect(screen.getByTestId("scope-page").textContent).toBe("case-checkout"));
+    const mark = paints.length;
+    const before = queryInvestigations.mock.calls.length;
+    rendered.rerender(provider({ ...DEFAULT_COLLECTION_QUERY, q: "other" }, true));
+    expect(paints[mark]).toBe("loading:");
+    expect(paints.slice(mark).join(" ")).not.toContain("case-checkout");
+    expect(screen.getByTestId("scope-page").textContent).not.toContain("case-checkout");
+    const added = queryInvestigations.mock.calls.slice(before).map((call) => ({
+      q: call[0]?.q ?? null,
+      cursor: call[0]?.cursor ?? null,
+    }));
+    expect(added).toEqual([{ q: "other", cursor: null }]);
+    await waitFor(() => expect(screen.getByTestId("scope-page").textContent).toBe("case-other"));
   });
 
   it("does not invoke or expose a query when the shell has no list query", async () => {

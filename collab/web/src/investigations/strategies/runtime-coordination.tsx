@@ -42,6 +42,8 @@ function actionError(error: RuntimeFailure): CoordinationFailureKind {
     case "unexpected":
     case "lifecycle_changed":
     case "lifecycle_refused":
+    case "stale_cursor":
+    case "malformed_cursor":
       return "definitive";
   }
 }

@@ -101,6 +101,8 @@ export interface InvestigationRuntimeResources {
   readonly investigations: ResourceState<readonly CaseV1[]>;
   readonly investigationCollection: ResourceState<InvestigationCollectionPageV1>;
   readonly investigationCollectionQuery: InvestigationCollectionQueryV1 | null;
+  /** Null unless a rejected cursor was replaced by a fresh first page. */
+  readonly investigationCollectionNotice: string | null;
   readonly operationsQueue: ResourceState<InvestigationOperationsQueuePageV1>;
   readonly operationsQueueQuery: InvestigationOperationsQueueQueryV1 | null;
   /** Monotonic request start signal for the currently visible queue scope. */
@@ -355,11 +357,35 @@ export function InvestigationRuntimeProvider({
     () => investigationOperationsQueueGateway(gateway),
     [gateway],
   );
-  const [collectionQueryInput, setCollectionQueryInput] =
-    useState<InvestigationCollectionQueryInput | null>(null);
+  const [collectionQueryRequest, setCollectionQueryRequest] = useState<{
+    readonly identityKey: string;
+    readonly authorityKey: string;
+    readonly input: InvestigationCollectionQueryInput;
+  } | null>(null);
   const requestInvestigationCollection = useCallback((input: InvestigationCollectionQueryInput) => {
-    setCollectionQueryInput(snapshotInvestigationCollectionQueryInput(input));
-  }, []);
+    const snapshot = snapshotInvestigationCollectionQueryInput(input);
+    setCollectionQueryRequest((current) => {
+      const baseKey = (value: InvestigationCollectionQueryInput) =>
+        JSON.stringify({ ...value, cursor: undefined });
+      if (
+        current !== null
+        && snapshot.cursor
+        && baseKey(current.input) !== baseKey(snapshot)
+      ) {
+        return current;
+      }
+      return Object.freeze({
+        identityKey,
+        authorityKey,
+        input: snapshot,
+      });
+    });
+  }, [authorityKey, identityKey]);
+  const collectionQueryInput = collectionQueryRequest !== null
+    && collectionQueryRequest.identityKey === identityKey
+    && collectionQueryRequest.authorityKey === authorityKey
+    ? collectionQueryRequest.input
+    : null;
   const [operationsQueueRequest, setOperationsQueueRequest] = useState<{
     readonly identityKey: string;
     readonly authorityKey: string;
@@ -727,6 +753,7 @@ export function InvestigationRuntimeProvider({
       investigations: investigationList.investigations,
       investigationCollection: investigationCollection.page,
       investigationCollectionQuery: investigationCollection.query,
+      investigationCollectionNotice: investigationCollection.cursorRestartNotice,
       operationsQueue: operationsQueue.page,
       operationsQueueQuery: operationsQueue.query,
       operationsQueueRequestGeneration: operationsQueue.latestRequestGeneration,
@@ -876,6 +903,7 @@ export function InvestigationRuntimeProvider({
     identity,
     investigationCollection.page,
     investigationCollection.query,
+    investigationCollection.cursorRestartNotice,
     investigationCollection.refresh,
     operationsQueue.page,
     operationsQueue.query,

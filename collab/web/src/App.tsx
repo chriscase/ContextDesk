@@ -43,6 +43,7 @@ import {
   parsePathname,
   restoreAfterSignIn,
   sameLocation,
+  shareableCollectionQuery,
   titleFor,
   type AreaId,
   type ShellLocation,
@@ -171,6 +172,7 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
               collectionQuery: props.collectionQuery,
               onCollectionQueryChange: props.onCollectionQueryChange,
               onCollectionNextPage: collection.nextPage,
+              collectionCursorRestartNotice: collection.cursorRestartNotice,
             })}
         lifecycleBinding={{
           lifecycle: runtime.resources.lifecycle,
@@ -526,6 +528,7 @@ export function App() {
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
   );
+  const [collectionQueryRejection, setCollectionQueryRejection] = useState<string | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [startSignal, setStartSignal] = useState(0);
   const [focusedCaseTitle, setFocusedCaseTitle] = useState<string | null>(null);
@@ -533,6 +536,9 @@ export function App() {
   const [leaveRequest, setLeaveRequest] = useState(false);
   const locationRef = useRef(location);
   locationRef.current = location;
+  useEffect(() => {
+    setCollectionQueryRejection(null);
+  }, [location]);
   const profileDirtyRef = useRef(false);
   profileDirtyRef.current = profileDirty;
   const pendingLeaveRef = useRef<
@@ -1227,6 +1233,9 @@ export function App() {
                   </section>
                 ) : (
                   <WarRoomStrategyContext.Provider value={warRoomBindings}>
+                    {collectionQueryRejection ? (
+                      <p className="app-notice" role="alert">{collectionQueryRejection}</p>
+                    ) : null}
                     <InvestigationStrategyRenderer
                       strategy={surfaceStrategy}
                       registrations={INVESTIGATION_STRATEGY_REGISTRATIONS}
@@ -1252,13 +1261,22 @@ export function App() {
                       {...(work.caseId === null
                         ? {
                             collectionQuery: work.collectionQuery ?? DEFAULT_COLLECTION_QUERY,
-                            onCollectionQueryChange: (collectionQuery) =>
+                            onCollectionQueryChange: (collectionQuery) => {
+                              if (shareableCollectionQuery(collectionQuery) === null) {
+                                setCollectionQueryRejection(
+                                  "That filter was not applied. The previous search is still in effect.",
+                                );
+                                return;
+                              }
+                              setCollectionQueryRejection(null);
                               navigate({
                                 area: "investigations",
                                 caseId: null,
-                                stage: "situation",
+                                stage: work.stage,
+                                ...(work.focus ? { focus: work.focus } : {}),
                                 collectionQuery,
-                              }, "replace"),
+                              }, "replace");
+                            },
                           }
                         : {})}
                       onOpenAdvancedTools={(caseId, stage) => {

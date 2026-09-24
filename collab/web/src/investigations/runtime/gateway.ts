@@ -673,6 +673,33 @@ async function parseSuccessfulResponse<T>(
   return { ok: true, value: deepFreezeDto(parsed) };
 }
 
+/**
+ * Collection cursors are rejected with a bounded code. Only those two codes
+ * restart a page; every other 400 stays a generic validation failure.
+ * Authentication loss is classified from the status alone.
+ */
+async function classifyCollectionCursorFailure(
+  response: Response,
+  signal: AbortSignal,
+): Promise<RuntimeFailure> {
+  if (response.status === 401 || response.status === 403 || response.status !== 400) {
+    return classifyHttpFailure(response.status);
+  }
+  if (signal.aborted) return { kind: "aborted" };
+  const bounded = await readBoundedFailureBody(response, signal);
+  if (bounded.kind === "aborted") return { kind: "aborted" };
+  if (bounded.kind !== "body") return classifyHttpFailure(400);
+  let code: unknown;
+  try {
+    const parsed = JSON.parse(bounded.text) as { error?: unknown };
+    code = typeof parsed === "object" && parsed !== null ? parsed.error : undefined;
+  } catch {
+    return classifyHttpFailure(400);
+  }
+  if (code === "stale_cursor" || code === "malformed_cursor") return { kind: code };
+  return classifyHttpFailure(400);
+}
+
 async function requestParsed<T>(
   route: string,
   init: RequestInit,
@@ -1731,9 +1758,13 @@ export const investigationGateway: InvestigationGatewayWithWrites
       return signal.aborted ? aborted() : failed({ kind: "unexpected" });
     }
     if (signal.aborted) return aborted();
-    return requestParsed(
-      `/api/cases?${search}`,
-      {},
+    const fetched = await fetchProtected(`/api/cases?${search}`, {}, signal);
+    if (!fetched.ok) return failed(fetched.error);
+    if (!fetched.response.ok) {
+      return failed(await classifyCollectionCursorFailure(fetched.response, signal));
+    }
+    return parseSuccessfulResponse(
+      fetched.response,
       signal,
       parseInvestigationCollectionPage,
       investigationCollectionPageIdentity,
