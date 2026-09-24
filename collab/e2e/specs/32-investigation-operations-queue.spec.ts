@@ -385,4 +385,82 @@ test.describe("Investigation Operations Queue", () => {
       await page.unroute("**/api/cases?**");
     }
   });
+
+  test("round-trips a private saved view through canonical queue location without a server mutation", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const title = uniqueTitle("Operations saved view");
+    await createInvestigation(page, title);
+    await page.waitForLoadState("networkidle");
+    const mutationRequests: string[] = [];
+    page.on("request", (request) => {
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method())) {
+        mutationRequests.push(`${request.method()} ${new URL(request.url()).pathname}`);
+      }
+    });
+
+    await page.goto(`/operations?q=${encodeURIComponent(title)}&status=open&coordinationScope=mine`);
+    await expect(page.getByRole("heading", { name: "Operations Queue", exact: true })).toBeVisible();
+    await page.getByLabel("View name").fill("My open handoffs");
+    await page.getByRole("button", { name: "Save current view" }).click();
+    await expect(page.locator(".operations-queue__saved-notice")).toContainText(
+      "Saved “My open handoffs” for this account on this browser.",
+    );
+    await expect(page.getByRole("button", { name: "Apply saved view My open handoffs" })).toBeVisible();
+
+    await page.getByRole("link", { name: /Unassigned/u }).click();
+    await expect(page).toHaveURL(/coordinationScope=unassigned/u);
+    await page.getByRole("button", { name: "Apply saved view My open handoffs" }).click();
+    await expect.poll(() => new URL(page.url()).searchParams.get("q")).toBe(title);
+    const applied = new URL(page.url());
+    expect(applied.searchParams.get("status")).toBe("open");
+    expect(applied.searchParams.get("coordinationScope")).toBe("mine");
+    expect(applied.searchParams.has("cursor")).toBe(false);
+    await expect(page.locator(".operations-queue__saved-notice")).toContainText("Applied “My open handoffs”.");
+
+    await page.getByRole("button", { name: "Remove saved view My open handoffs" }).click();
+    await expect(page.locator(".operations-queue__saved-notice")).toContainText("Removed “My open handoffs”.");
+    await expect(page.getByRole("button", { name: "Apply saved view My open handoffs" })).toHaveCount(0);
+    expect(mutationRequests).toEqual([]);
+  });
+
+  test("keeps saved views isolated by account and reports browser-storage failure without clearing the queue", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const title = uniqueTitle("Operations account view");
+    await createInvestigation(page, title);
+    await page.goto(`/operations?q=${encodeURIComponent(title)}&status=open`);
+    await page.getByLabel("View name").fill("Dave only");
+    await page.getByRole("button", { name: "Save current view" }).click();
+    await expect(page.getByRole("button", { name: "Apply saved view Dave only" })).toBeVisible();
+
+    await loginAs(page, FIXTURE_USERS.carol);
+    await page.goto("/operations");
+    await expect(page.getByRole("button", { name: "Apply saved view Dave only" })).toHaveCount(0);
+    await expect(page.getByText("No saved views yet.")).toBeVisible();
+
+    await loginAs(page, FIXTURE_USERS.dave);
+    await page.goto("/operations");
+    await expect(page.getByRole("button", { name: "Apply saved view Dave only" })).toBeVisible();
+    await page.getByRole("button", { name: "Apply saved view Dave only" }).click();
+    await expect.poll(() => new URL(page.url()).searchParams.get("q")).toBe(title);
+    await expect(page.getByRole("link", { name: title })).toBeVisible();
+
+    await page.addInitScript(() => {
+      const originalSetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function setItem(key: string, value: string): void {
+        if (key.startsWith("cd-operations-views:")) {
+          throw new DOMException("blocked", "QuotaExceededError");
+        }
+        originalSetItem.call(this, key, value);
+      };
+    });
+    await page.reload();
+    await page.getByLabel("View name").fill("Blocked view");
+    await page.getByRole("button", { name: "Save current view" }).click();
+    await expect(page.locator(".operations-queue__saved-notice")).toContainText("This browser could not save the view.");
+    await expect(page.getByRole("link", { name: title })).toBeVisible();
+    const preserved = new URL(page.url());
+    expect(preserved.searchParams.get("q")).toBe(title);
+    expect(preserved.searchParams.get("status")).toBe("open");
+    await expect(page.getByRole("button", { name: "Apply saved view Dave only" })).toBeVisible();
+  });
 });
