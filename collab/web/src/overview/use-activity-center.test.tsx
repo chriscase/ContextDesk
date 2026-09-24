@@ -306,6 +306,45 @@ describe("useActivityCenter", () => {
     expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { activityKind: "investigation_updated" } });
   });
 
+  it("does not navigate when an in-flight open settles on the replacement render", async () => {
+    const pending = deferred<OverviewGatewayResult<InvestigationResourceResolveV1>>();
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>(async () => ({ ok: true, value: page([item("a")], null) }));
+    const sharedGateway = gateway(listActivity);
+    sharedGateway.resolve = vi.fn(() => pending.promise);
+    let open = (_locator: InvestigationResourceLocatorV1) => Promise.resolve(null as string | null);
+    const paints: ActivityCenterController[] = [];
+    function Probe({ identityKey }: { readonly identityKey: string }) {
+      const controller = useActivityCenter({
+        enabled: true, identityKey, authorityKey: "viewer", filter: {}, gateway: sharedGateway,
+      });
+      open = controller.open;
+      paints.push(controller);
+      useLayoutEffect(() => {
+        if (identityKey !== "bob") return;
+        pending.resolve({
+          ok: true,
+          value: {
+            schemaId: INVESTIGATION_RESOURCE_RESOLVE_SCHEMA_ID,
+            locator: item("a").locator,
+            resourceKind: "investigation",
+            resourceLabel: "Gateway resets",
+            investigationTitle: "Gateway resets",
+            revision: null,
+            authorized: true,
+          },
+        });
+      });
+      return null;
+    }
+    const view = render(<Probe identityKey="alice" />);
+    await waitFor(() => expect(listActivity).toHaveBeenCalled());
+    const pendingOpen = open(item("a").locator);
+    await waitFor(() => expect(sharedGateway.resolve).toHaveBeenCalledTimes(1));
+    view.rerender(<Probe identityKey="bob" />);
+    await expect(pendingOpen).resolves.toBeNull();
+    expect(paints.at(-1)?.openFailure).toBeNull();
+  });
+
   it.each([
     ["identity", { identityKey: "bob", authorityKey: "viewer", filter: {} satisfies InvestigationActivityFilterV1 }],
     ["authority", { identityKey: "alice", authorityKey: "editor", filter: {} satisfies InvestigationActivityFilterV1 }],

@@ -182,9 +182,11 @@ export function useActivityCenter(options: {
     setLoadingMore(true);
     void gateway.listActivity({ filter, cursor }, request.signal)
       .then(async (result) => {
+        if (liveRef.current.key !== publicationKey || !liveRef.current.enabled) return;
         if (generation.current !== requestGeneration || request.signal.aborted) return;
         if (!result.ok && (result.error.kind === "stale_cursor" || result.error.kind === "malformed_cursor")) {
           const fresh = await gateway.listActivity({ filter }, request.signal);
+          if (liveRef.current.key !== publicationKey || !liveRef.current.enabled) return;
           if (generation.current !== requestGeneration || request.signal.aborted) return;
           if (fresh.ok) {
             setActivity({ status: "ready", items: fresh.value.items });
@@ -211,7 +213,7 @@ export function useActivityCenter(options: {
         }
       })
       .finally(() => {
-        if (generation.current === requestGeneration) setLoadingMore(false);
+        if (generation.current === requestGeneration && liveRef.current.key === publicationKey) setLoadingMore(false);
       });
   }, [gateway, publicationKey]);
 
@@ -224,6 +226,7 @@ export function useActivityCenter(options: {
     const requestGeneration = generation.current;
     setOpenFailure(null);
     const result = await gateway.resolve(locator, request.signal);
+    if (liveRef.current.key !== publicationKey || !liveRef.current.enabled) return null;
     if (generation.current !== requestGeneration || request.signal.aborted) return null;
     if (!result.ok || result.value.authorized !== true) {
       if (result.ok) setOpenFailure({ kind: "protocol" });
