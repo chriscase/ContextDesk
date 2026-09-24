@@ -275,9 +275,10 @@ describe("MultiModelReviewToggle", () => {
     expect(host.setMode).toHaveBeenCalledWith("review");
     expect(host.get).toHaveBeenCalledTimes(2);
 
-    const status = screen.getByRole("status");
-    expect(status.textContent).toBe(
-      "Saved — Reviewer is now the default team.",
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe(
+        "Saved — Reviewer is now the default team.",
+      ),
     );
     // A mode save never touches the reviewer assignment.
     expect(host.setReviewer).not.toHaveBeenCalled();
