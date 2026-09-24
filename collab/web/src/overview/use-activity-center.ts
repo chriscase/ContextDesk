@@ -73,6 +73,8 @@ export function useActivityCenter(options: {
   const resolveController = useRef<AbortController | null>(null);
   const publishedScope = useRef<string | null>(null);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [appliedRefresh, setAppliedRefresh] = useState(0);
+  const [committedKey, setCommittedKey] = useState<string | null>(null);
   const [activity, setActivity] = useState<ActivityResource>({ status: "idle" });
   const [investigations, setInvestigations] = useState<readonly CaseV1[]>([]);
   const [investigationScopeKey, setInvestigationScopeKey] = useState<string | null>(null);
@@ -88,6 +90,8 @@ export function useActivityCenter(options: {
     controller.current = request;
     const requestGeneration = ++generation.current;
     const current = () => generation.current === requestGeneration && !request.signal.aborted;
+    setCommittedKey(options.enabled ? requestScopeKey : null);
+    setAppliedRefresh(refreshGeneration);
     setNextCursor(null);
     setLoadingMore(false);
     setOpenFailure(null);
@@ -145,21 +149,42 @@ export function useActivityCenter(options: {
     };
   }, [gateway, options.enabled, refreshGeneration, requestScopeKey, scope, stableFilter]);
 
+  const publicationKey = options.enabled ? requestScopeKey : null;
+  const concealed = publicationKey !== committedKey;
+  const refreshPending = !concealed && refreshGeneration !== appliedRefresh;
+  const liveRef = useRef({
+    enabled: options.enabled,
+    key: publicationKey,
+    filter: stableFilter,
+    nextCursor: null as string | null,
+    loadingMore: false,
+  });
+  liveRef.current = {
+    enabled: options.enabled,
+    key: publicationKey,
+    filter: stableFilter,
+    nextCursor: concealed || refreshPending ? null : nextCursor,
+    loadingMore: concealed || refreshPending ? false : loadingMore,
+  };
+
   const refresh = useCallback(() => setRefreshGeneration((value) => value + 1), []);
 
   const loadMore = useCallback(() => {
-    if (!options.enabled || !nextCursor || loadingMore) return;
+    const live = liveRef.current;
+    if (live.key !== publicationKey || !live.enabled || !live.nextCursor || live.loadingMore) return;
+    const cursor = live.nextCursor;
+    const filter = live.filter;
     const request = new AbortController();
     controller.current?.abort();
     resolveController.current?.abort();
     controller.current = request;
     const requestGeneration = ++generation.current;
     setLoadingMore(true);
-    void gateway.listActivity({ filter: stableFilter, cursor: nextCursor }, request.signal)
+    void gateway.listActivity({ filter, cursor }, request.signal)
       .then(async (result) => {
         if (generation.current !== requestGeneration || request.signal.aborted) return;
         if (!result.ok && (result.error.kind === "stale_cursor" || result.error.kind === "malformed_cursor")) {
-          const fresh = await gateway.listActivity({ filter: stableFilter }, request.signal);
+          const fresh = await gateway.listActivity({ filter }, request.signal);
           if (generation.current !== requestGeneration || request.signal.aborted) return;
           if (fresh.ok) {
             setActivity({ status: "ready", items: fresh.value.items });
@@ -188,10 +213,11 @@ export function useActivityCenter(options: {
       .finally(() => {
         if (generation.current === requestGeneration) setLoadingMore(false);
       });
-  }, [gateway, loadingMore, nextCursor, options.enabled, stableFilter]);
+  }, [gateway, publicationKey]);
 
   const open = useCallback(async (locator: InvestigationResourceLocatorV1): Promise<string | null> => {
-    if (!options.enabled) return null;
+    const live = liveRef.current;
+    if (live.key !== publicationKey || !live.enabled) return null;
     resolveController.current?.abort();
     const request = new AbortController();
     resolveController.current = request;
@@ -205,14 +231,25 @@ export function useActivityCenter(options: {
       return null;
     }
     return result.value.locator.pathname;
-  }, [gateway, options.enabled]);
+  }, [gateway, publicationKey]);
+
+  const retained = retainedItems(activity);
+  const publishedActivity: ActivityResource = !options.enabled
+    ? { status: "idle" }
+    : concealed
+      ? { status: "loading" }
+      : refreshPending
+        ? { status: "loading", ...(retained.length > 0 ? { previous: retained } : {}) }
+        : activity;
 
   return {
-    activity,
-    investigations: investigationScopeKey === requestScopeKey ? investigations : [],
-    investigationsLoading: options.enabled && (investigationScopeKey !== requestScopeKey || investigationsLoading),
-    investigationsFailed: investigationScopeKey === requestScopeKey && investigationsFailed,
-    nextCursor, loadingMore,
-    openFailure, refresh, loadMore, open,
+    activity: publishedActivity,
+    investigations: options.enabled && investigationScopeKey === requestScopeKey ? investigations : [],
+    investigationsLoading: options.enabled && (concealed || refreshPending || investigationScopeKey !== requestScopeKey || investigationsLoading),
+    investigationsFailed: options.enabled && !concealed && !refreshPending && investigationScopeKey === requestScopeKey && investigationsFailed,
+    nextCursor: concealed || refreshPending ? null : nextCursor,
+    loadingMore: concealed || refreshPending ? false : loadingMore,
+    openFailure: concealed ? null : openFailure,
+    refresh, loadMore, open,
   };
 }

@@ -8,11 +8,12 @@ import {
   type InvestigationActivityPageV1,
   type InvestigationResourceResolveV1,
 } from "@cd-collab/contracts/investigation-activity";
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CaseV1 } from "@cd-collab/contracts/investigation-runtime";
 import type { OverviewGateway, OverviewGatewayResult } from "./gateway.js";
-import { useActivityCenter } from "./use-activity-center.js";
+import { useActivityCenter, type ActivityCenterController } from "./use-activity-center.js";
 
 afterEach(cleanup);
 const CASE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -178,5 +179,121 @@ describe("useActivityCenter", () => {
     act(() => result.current.loadMore());
 
     await waitFor(() => expect(result.current.activity).toEqual({ status: "ready", items: [item("a"), item("b")] }));
+  });
+
+  it("conceals the previous scope on the render before effects and ignores stored callbacks", async () => {
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockResolvedValue({ ok: true, value: page([item("a")], "opaque_cursor") });
+    const sharedGateway = gateway(listActivity);
+    const paints: ActivityCenterController[] = [];
+    const stored = {
+      loadMore: () => undefined as void,
+      open: (_locator: InvestigationResourceLocatorV1) => Promise.resolve(null as string | null),
+    };
+    function Probe({
+      identityKey,
+      authorityKey,
+      enabled,
+      filter,
+      releaseStored,
+    }: {
+      readonly identityKey: string;
+      readonly authorityKey: string;
+      readonly enabled: boolean;
+      readonly filter: Record<string, never> | { readonly kinds: readonly ["evidence_added"] };
+      readonly releaseStored: boolean;
+    }) {
+      const controller = useActivityCenter({
+        enabled, identityKey, authorityKey, filter, gateway: sharedGateway,
+      });
+      paints.push(controller);
+      if (!releaseStored) {
+        stored.loadMore = controller.loadMore;
+        stored.open = controller.open;
+      }
+      useLayoutEffect(() => {
+        if (!releaseStored) return;
+        stored.loadMore();
+        void stored.open(item("a").locator);
+      });
+      return null;
+    }
+    const rendered = render(
+      <Probe identityKey="alice" authorityKey="viewer" enabled filter={{}} releaseStored={false} />,
+    );
+    await waitFor(() => expect(paints.some((paint) => paint.activity.status === "ready")).toBe(true));
+    const callsBefore = listActivity.mock.calls.length;
+    const mark = paints.length;
+    rendered.rerender(
+      <Probe identityKey="bob" authorityKey="editor" enabled filter={{ kinds: ["evidence_added"] }} releaseStored />,
+    );
+    expect(paints[mark]?.activity).toEqual({ status: "loading" });
+    expect(paints[mark]?.nextCursor).toBeNull();
+    expect(paints[mark]?.loadingMore).toBe(false);
+    expect(paints[mark]?.openFailure).toBeNull();
+    expect(paints[mark]?.investigations).toEqual([]);
+    expect(listActivity.mock.calls.length).toBe(callsBefore + 1);
+    expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { kinds: ["evidence_added"] } });
+    expect(sharedGateway.resolve).not.toHaveBeenCalled();
+  });
+
+  it("issues no reads when the center starts disabled and hides rows when read is removed", async () => {
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>(async () => ({ ok: true, value: page([item("a")], "opaque_cursor") }));
+    const sharedGateway = gateway(listActivity);
+    const disabled = renderHook(() => useActivityCenter({
+      enabled: false, identityKey: "alice", authorityKey: "viewer", filter: {}, gateway: sharedGateway,
+    }));
+    await act(async () => undefined);
+    expect(listActivity).not.toHaveBeenCalled();
+    expect(sharedGateway.listInvestigations).not.toHaveBeenCalled();
+    expect(sharedGateway.resolve).not.toHaveBeenCalled();
+    expect(disabled.result.current.activity).toEqual({ status: "idle" });
+    expect(disabled.result.current.loadingMore).toBe(false);
+    expect(disabled.result.current.nextCursor).toBeNull();
+
+    const paints: ActivityCenterController[] = [];
+    function Probe({ enabled }: { readonly enabled: boolean }) {
+      const controller = useActivityCenter({
+        enabled, identityKey: "alice", authorityKey: "viewer", filter: {}, gateway: sharedGateway,
+      });
+      paints.push(controller);
+      return null;
+    }
+    const shown = render(<Probe enabled />);
+    await waitFor(() => expect(paints.some((paint) => paint.activity.status === "ready")).toBe(true));
+    const mark = paints.length;
+    shown.rerender(<Probe enabled={false} />);
+    expect(paints[mark]?.activity).toEqual({ status: "idle" });
+    expect(paints[mark]?.nextCursor).toBeNull();
+    expect(paints[mark]?.openFailure).toBeNull();
+    expect(paints[mark]?.investigationsLoading).toBe(false);
+  });
+
+  it("keeps prior rows while a same-scope refresh is loading and drops the continuation cursor", async () => {
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockResolvedValueOnce({ ok: true, value: page([item("a")], "opaque_cursor") })
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } });
+    const sharedGateway = gateway(listActivity);
+    const paints: ActivityCenterController[] = [];
+    let refresh = () => undefined as void;
+    function Probe() {
+      const controller = useActivityCenter({
+        enabled: true, identityKey: "alice", authorityKey: "viewer", filter: { q: "checkout" }, gateway: sharedGateway,
+      });
+      refresh = controller.refresh;
+      paints.push(controller);
+      return null;
+    }
+    render(<Probe />);
+    await waitFor(() => expect(paints.some((paint) => paint.activity.status === "ready")).toBe(true));
+    const mark = paints.length;
+    act(() => refresh());
+    expect(paints[mark]?.activity).toEqual({ status: "loading", previous: [item("a")] });
+    expect(paints[mark]?.nextCursor).toBeNull();
+    expect(paints[mark]?.loadingMore).toBe(false);
+    await waitFor(() => expect(paints.at(-1)?.activity.status).toBe("failed"));
+    const failed = paints.at(-1)?.activity;
+    expect(failed?.status === "failed" && failed.previous).toEqual([item("a")]);
+    expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { q: "checkout" } });
   });
 });

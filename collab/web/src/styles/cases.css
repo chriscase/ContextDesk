@@ -172,6 +172,19 @@
   outline-offset: 2px;
 }
 
+.activity-feed__open {
+  transition: background-color 180ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-center,
+  .activity-center * {
+    scroll-behavior: auto;
+    animation: none;
+    transition: none;
+  }
+}
+
 .overview__grid {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(17rem, 0.9fr);
