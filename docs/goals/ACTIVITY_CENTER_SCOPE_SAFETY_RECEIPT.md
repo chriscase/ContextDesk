@@ -1,20 +1,21 @@
 # Activity Center scope-safety receipt
 
-Base at branch creation: `c83e21fc545991f44db95cdb79942b6ce7827a02`, tree `d6003582f73330d61b0e5b988f83116d5a9392e5`.
-Goal freeze: `2815f019554a94afe62a3cd8f75875d140fcfd89`.
-Historical sources, not merged: #1165 `c5029e888b273b0b1cb9bf2436c888ae0e9300ac`, #1167 `a2c5d4c5c55064c0a664e2bbdb10af654c17c435`.
+Base: `c83e21fc545991f44db95cdb79942b6ce7827a02`, tree `d6003582f73330d61b0e5b988f83116d5a9392e5`.
+Merge base with that main: the same commit. Goal freeze: `2815f019554a94afe62a3cd8f75875d140fcfd89`.
+Controller implementation: `a8dd2410453a3759fb1562433024feac510f6f75`.
+Historical sources, inspected and not merged: #1165 `c5029e888b273b0b1cb9bf2436c888ae0e9300ac`, #1167 `a2c5d4c5c55064c0a664e2bbdb10af654c17c435`.
 
-| ID | Evidence |
-| --- | --- |
-| ACS-01 | Branch starts at the verified main. Goal 1 spec `37-trusted-investigation-discovery.spec.ts` and desktop code are untouched. #1165 and #1167 stay open. |
-| ACS-02 | `use-activity-center.ts` returns loading without previous rows when `committedKey` is not the current publication key. Test: conceals the previous scope on the render before effects. |
-| ACS-03 | `loadMore` and `open` compare the captured publication key with `liveRef`. The same test fires the stored callbacks from a layout effect and expects no resolve call and no old cursor request. |
-| ACS-04 | Existing continuation, abort, and late-response tests remain. A stale cursor still reloads page one. |
-| ACS-05 | Same-scope refresh test expects loading with `previous` and a null cursor, then a failed refresh that keeps those rows. |
-| ACS-06 | Disabled-start test expects zero gateway calls. Readable-to-disabled paint is idle. |
-| ACS-07 | `open` still calls `gateway.resolve` and returns only an authorized pathname. |
-| ACS-08 | `collab/e2e/specs/38-activity-center-scope-safety.spec.ts`. The 503 is route-injected. Login as another account is not same-tree first-render proof. |
-| ACS-09 | Focused tests above. Mutation log is outside the published tree. |
-| ACS-10 | This receipt, `docs/goals/04-ACTIVITY-CENTER-SCOPE-SAFETY.md`, the backlog, and `INVESTIGATION_LOOP.md`. |
+| ID | Status | Evidence |
+| --- | --- | --- |
+| ACS-01 | proven | Branch `integrate/activity-center-scope-safety-v2` starts at the verified main. `git diff` against that main does not change `collab/e2e/specs/37-trusted-investigation-discovery.spec.ts` or `desktop/`. #1165 and #1167 stay open and were not rebased. |
+| ACS-02 | proven | `useActivityCenter` conceals publication while `publicationKey !== committedKey`, and `committedKey` changes only in the request effect. Tests: "conceals the previous scope on the render before effects and ignores stored callbacks", "conceals a identity change before effects", "conceals a authority change before effects", "conceals a filter change before effects", "issues no reads when the center starts disabled and hides rows when read is removed". The paint is recorded during render, before passive effects. |
+| ACS-03 | proven | `loadMore` and `open` return immediately when `liveRef.current.key` is not the key closed over by that callback. The stored-callback test fires both from a layout effect and again after the replacement scope is ready. "does not let a captured refresh resurrect the previous filter" shows refresh follows the current filter. |
+| ACS-04 | proven | Inherited and still passing: "drops a stale continuation and reloads page one without mixing windows", "aborts continuation reads when its request scope changes", "aborts and suppresses a pending locator resolution after unmount", "keeps page one when a failed continuation is retried successfully". New: "ignores a late success from the previous scope" and "ignores a late failure from the previous scope". |
+| ACS-05 | proven | "keeps prior rows while a same-scope refresh is loading and drops the continuation cursor" expects `{ status: "loading", previous: [...] }`, a null cursor, then a failed refresh that keeps those rows. "reports a first-load failure without retained rows and retries the current filter" expects a first failure with no `previous`, then retry requests that keep `activityKind` and send no cursor. |
+| ACS-06 | proven | The disabled-start test expects zero `listActivity`, `listInvestigations`, and `resolve` calls and an idle controller. The readable-to-disabled paint is idle, with a null cursor and `investigationsLoading: false`. Browser spec 38 projects an empty capability set and expects zero `GET /api/investigation-activity` and `GET /api/cases`, no Retry or Load more activity control, and the previous title absent. |
+| ACS-07 | proven | `open` still calls `gateway.resolve` and returns only `result.value.locator.pathname` when `authorized === true`. Spec 38 presses Enter on a recorded activity and waits for a successful `GET /api/investigation-resources/resolve` before the canonical `/investigations/` URL. Stale resolve remains the unmount test above. Old open failure is cleared on the first concealed paint. |
+| ACS-08 | proven | `collab/e2e/specs/38-activity-center-scope-safety.spec.ts`. The 503 is labeled route-injected fault proof. The no-read case is a capability projection through `/api/auth/me`, not an unmapped login and not same-tree first-render proof. Forced colors asserts `matchMedia("(forced-colors: active)")`, a keyboard-focused Apply filters outline with nonzero width, and a non-transparent Latest activity border. Reduced motion records a nonzero open-control transition and `scroll-behavior: smooth` first, then asserts every visible Activity Center descendant has a zero duration and `scroll-behavior: auto` while `prefers-reduced-motion: reduce` matches. |
+| ACS-09 | proven | The focused tests named above. Four temporary mutations of `use-activity-center.ts` failed the named test and were restored: `concealed = false` failed "conceals the previous scope on the render before effects" at the loading assertion; removing both `live.key !== publicationKey` checks failed that test because `resolve` was called; `if (false && !options.enabled)` failed "issues no reads when the center starts disabled" because `listActivity` was called; deleting `if (!current()) return` failed "ignores a late success from the previous scope" because the old row replaced the new row. The published tree does not contain those mutants. |
+| ACS-10 | proven | Backlog baseline is `c83e21fc`, #1181 and #1182 are recorded as shipped, this slice is the current goal, S3 ambiguous-upload reconciliation is the preferred successor, and #1158 stays lower priority. `docs/design/proven-methods/INVESTIGATION_LOOP.md` and both Investigation loop rows in `docs/design/PROVEN_METHODS.md` state the first-frame concealment. |
 
-Handbook: `docs/design/proven-methods/INVESTIGATION_LOOP.md` states that Overview conceals the previous scope on the render that receives the new scope, before passive effects run.
+Handbook impact: the investigation-loop chapter and status matrix now state that Overview conceals the previous scope on the render that receives the new scope, before passive effects run.

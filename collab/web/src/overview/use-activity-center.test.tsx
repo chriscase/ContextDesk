@@ -237,6 +237,13 @@ describe("useActivityCenter", () => {
     expect(listActivity.mock.calls.length).toBe(callsBefore + 1);
     expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { activityKind: "handoff_recorded" } });
     expect(sharedGateway.resolve).not.toHaveBeenCalled();
+    await waitFor(() => expect(paints.at(-1)?.activity).toEqual({ status: "ready", items: [item("a")] }));
+    const callsAfterReady = listActivity.mock.calls.length;
+    stored.loadMore();
+    await act(async () => { await stored.open(item("a").locator); });
+    expect(listActivity.mock.calls.length).toBe(callsAfterReady);
+    expect(listActivity.mock.calls.some((call) => call[0].cursor === "opaque_cursor")).toBe(false);
+    expect(sharedGateway.resolve).not.toHaveBeenCalled();
   });
 
   it("issues no reads when the center starts disabled and hides rows when read is removed", async () => {
@@ -297,5 +304,94 @@ describe("useActivityCenter", () => {
     const failed = paints.at(-1)?.activity;
     expect(failed?.status === "failed" && failed.previous).toEqual([item("a")]);
     expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { activityKind: "investigation_updated" } });
+  });
+
+  it.each([
+    ["identity", { identityKey: "bob", authorityKey: "viewer", filter: {} satisfies InvestigationActivityFilterV1 }],
+    ["authority", { identityKey: "alice", authorityKey: "editor", filter: {} satisfies InvestigationActivityFilterV1 }],
+    ["filter", { identityKey: "alice", authorityKey: "viewer", filter: { activityKind: "handoff_recorded" } satisfies InvestigationActivityFilterV1 }],
+  ])("conceals a %s change before effects", async (_label, next) => {
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockResolvedValue({ ok: true, value: page([item("a")], "opaque_cursor") });
+    const sharedGateway = gateway(listActivity);
+    const paints: ActivityCenterController[] = [];
+    function Probe(props: { readonly identityKey: string; readonly authorityKey: string; readonly filter: InvestigationActivityFilterV1 }) {
+      const controller = useActivityCenter({ enabled: true, ...props, gateway: sharedGateway });
+      paints.push(controller);
+      return null;
+    }
+    const rendered = render(<Probe identityKey="alice" authorityKey="viewer" filter={{}} />);
+    await waitFor(() => expect(paints.some((paint) => paint.activity.status === "ready")).toBe(true));
+    const mark = paints.length;
+    rendered.rerender(<Probe {...next} />);
+    expect(paints[mark]?.activity).toEqual({ status: "loading" });
+    expect(paints[mark]?.nextCursor).toBeNull();
+    expect(paints[mark]?.loadingMore).toBe(false);
+    expect(paints[mark]?.openFailure).toBeNull();
+    expect(paints[mark]?.investigations).toEqual([]);
+  });
+
+  it("does not let a captured refresh resurrect the previous filter", async () => {
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockResolvedValue({ ok: true, value: page([item("a")], null) });
+    const sharedGateway = gateway(listActivity);
+    let refresh = () => undefined as void;
+    function Probe({ filter }: { readonly filter: InvestigationActivityFilterV1 }) {
+      const controller = useActivityCenter({
+        enabled: true, identityKey: "alice", authorityKey: "viewer", filter, gateway: sharedGateway,
+      });
+      refresh = controller.refresh;
+      return null;
+    }
+    const rendered = render(<Probe filter={{}} />);
+    await waitFor(() => expect(listActivity).toHaveBeenCalledTimes(1));
+    const captured = refresh;
+    rendered.rerender(<Probe filter={{ activityKind: "handoff_recorded" }} />);
+    await waitFor(() => expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { activityKind: "handoff_recorded" } }));
+    const calls = listActivity.mock.calls.length;
+    act(() => captured());
+    await waitFor(() => expect(listActivity.mock.calls.length).toBe(calls + 1));
+    expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { activityKind: "handoff_recorded" } });
+    expect(listActivity.mock.calls.some((call) => call[0].cursor)).toBe(false);
+  });
+
+  it.each([
+    ["success", { ok: true as const, value: page([item("a")], "old_cursor") }],
+    ["failure", { ok: false as const, error: { kind: "network" as const } }],
+  ])("ignores a late %s from the previous scope", async (_label, lateResult) => {
+    const late = deferred<OverviewGatewayResult<InvestigationActivityPageV1>>();
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockImplementationOnce(() => late.promise)
+      .mockResolvedValueOnce({ ok: true, value: page([item("b")], "new_cursor") });
+    const sharedGateway = gateway(listActivity);
+    const { result, rerender } = renderHook(({ identityKey }) => useActivityCenter({
+      enabled: true, identityKey, authorityKey: "viewer", filter: {}, gateway: sharedGateway,
+    }), { initialProps: { identityKey: "alice" } });
+    await waitFor(() => expect(listActivity).toHaveBeenCalledTimes(1));
+    rerender({ identityKey: "bob" });
+    await waitFor(() => expect(result.current.activity).toEqual({ status: "ready", items: [item("b")] }));
+    await act(async () => late.resolve(lateResult));
+    expect(result.current.activity).toEqual({ status: "ready", items: [item("b")] });
+    expect(result.current.nextCursor).toBe("new_cursor");
+    expect(result.current.openFailure).toBeNull();
+  });
+
+  it("reports a first-load failure without retained rows and retries the current filter", async () => {
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } })
+      .mockResolvedValueOnce({ ok: false, error: { kind: "protocol" } })
+      .mockResolvedValueOnce({ ok: true, value: page([item("a")], null) });
+    const sharedGateway = gateway(listActivity);
+    const filter = { activityKind: "investigation_updated" } satisfies InvestigationActivityFilterV1;
+    const { result } = renderHook(() => useActivityCenter({
+      enabled: true, identityKey: "alice", authorityKey: "viewer", filter, gateway: sharedGateway,
+    }));
+    await waitFor(() => expect(result.current.activity).toEqual({ status: "failed", error: { kind: "network" } }));
+    expect(result.current.nextCursor).toBeNull();
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.activity).toEqual({ status: "failed", error: { kind: "protocol" } }));
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.activity).toEqual({ status: "ready", items: [item("a")] }));
+    expect(listActivity.mock.calls.every((call) => call[0].filter?.activityKind === "investigation_updated" && call[0].cursor === undefined)).toBe(true);
   });
 });
