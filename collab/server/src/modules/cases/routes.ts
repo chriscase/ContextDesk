@@ -67,6 +67,10 @@ import {
   requestsInvestigationCollectionPage,
   requestsInvestigationOperationsQueuePage,
 } from "./collection-query.js";
+import {
+  isS3CommitOutcomeUnknown,
+  S3EvidenceError,
+} from "../../evidence/s3-store.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -224,6 +228,14 @@ function domainError(
   if (err instanceof CaseStoreCommitOutcomeUnknownError) {
     void reply.code(503);
     return { error: "commit_outcome_unknown" };
+  }
+  if (isS3CommitOutcomeUnknown(err)) {
+    void reply.code(503);
+    return { error: "commit_outcome_unknown" };
+  }
+  if (err instanceof S3EvidenceError) {
+    void reply.code(503);
+    return { error: "storage_unavailable" };
   }
   if (err instanceof ContractViolation) {
     void reply.code(400);
@@ -651,6 +663,10 @@ function streamUploadError(
   if (/aborted/i.test(message)) {
     void reply.code(400);
     return { error: "upload_aborted" };
+  }
+  if (isS3CommitOutcomeUnknown(err)) {
+    void reply.code(503);
+    return { error: "commit_outcome_unknown" };
   }
   if (
     /evidence (blob|metadata)|failed verification|s3 evidence|hash verification failed after storage/i
