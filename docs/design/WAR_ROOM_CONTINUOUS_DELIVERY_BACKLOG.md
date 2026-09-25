@@ -8,7 +8,8 @@ ready slice, freezes its exact base, and starts that slice when it does not
 conflict with protected work.
 
 Baseline for this reconciliation: `main`
-`3b7b3b63cce2c762495024e3bdaa0bf406f5b723` (Attention & Handoff merged).
+`c83e21fc545991f44db95cdb79942b6ce7827a02` (Goal 1 and the desktop save-status
+repair are on main).
 
 ## Delivery loop
 
@@ -67,8 +68,10 @@ Required behavior:
   only with an explicit stale/failure notice.
 - Opening an activity reauthorizes its locator, then follows only a validated
   canonical investigation route.
-- Identity/capability/filter changes abort and fence old requests. A no-read
-  account performs no activity, case, or resolve request.
+- Identity/capability/filter changes abort and fence old requests. The first
+  render after that change conceals the previous rows, cursor, failure, and
+  load-more control before passive effects run. A no-read account performs no
+  activity, case, or resolve request.
 - Keyboard, focus, semantic structure, 390/560-pixel reflow, forced colors,
   and reduced motion are release evidence, not prose-only aspirations.
 
@@ -78,18 +81,20 @@ remain server-only.
 
 ## Provisional successor queue
 
-This order is re-evaluated after the Activity Center lands.
+Trusted Investigation Discovery shipped through merged PR #1181. The desktop
+investigation-team save-status synchronization shipped through merged PR #1182.
+The current integration goal is Activity Center first-frame scope safety.
+Unmerged historical branches, including #1165 and #1167, are source material,
+not shipped behavior. S3 ambiguous-upload reconciliation is the preferred
+successor. #1158 remains useful, lower-priority test qualification.
 
 1. **Evidence annotation workspace and safe bulk metadata.** Build on the
    shipped append-only annotation contract: compact review, structured tags or
    labels, cross-artifact selection, and safe bulk actions without mutating
    artifact identity or bypassing case permissions.
-2. **Investigation search and facets.** Move useful list filtering to a typed,
-   paged server query: recorded status, entity, software impact, contributor,
-   and dates. Add tags only with a canonical contract and audited writes.
-   Draft PR #1181 (branch `integrate/trusted-investigation-discovery-v1`,
-   built on open draft PR #1180) is a candidate for the collection-wide
-   controls. It is not merged, so this item is not shipped.
+2. **Investigation search and facets.** Collection-wide recorded status, entity,
+   software impact, contributor, and date filters shipped through #1181. Tags
+   still need a canonical contract before they are a backlog item of their own.
 3. **Product/version/build catalog quality.** Reuse recorded values across
    investigations, expose administrator-assisted deduplication later, and
    avoid creating a second software-impact truth model.

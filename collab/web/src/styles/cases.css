@@ -172,6 +172,25 @@
   outline-offset: 2px;
 }
 
+.overview.activity-center {
+  scroll-behavior: smooth;
+}
+
+.activity-feed__open {
+  transition: background-color 180ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-center,
+  .activity-center *,
+  .activity-center *::before,
+  .activity-center *::after {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
 .overview__grid {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(17rem, 0.9fr);
@@ -488,12 +507,23 @@
     border-color: CanvasText;
   }
 
+  .overview__activity,
+  .overview__attention {
+    border: 1px solid CanvasText;
+  }
+
+  .activity-feed__open:focus,
   .activity-feed__open:focus-visible,
+  .overview__thread-list a:focus,
   .overview__thread-list a:focus-visible,
+  .activity-center button:focus,
   .activity-center button:focus-visible,
+  .activity-center select:focus,
   .activity-center select:focus-visible,
+  .activity-center input:focus,
   .activity-center input:focus-visible {
-    outline-color: Highlight;
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
   }
 }
 

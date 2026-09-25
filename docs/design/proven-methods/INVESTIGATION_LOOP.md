@@ -75,7 +75,12 @@ The coordination writer foundation is a **local integration** of the existing co
 `/api/cases/:id/coordination` use live session capabilities, concealed case
 access, a case-row lock, a materialized projection, insert-only successful
 idempotency envelopes, and atomic timeline/audit writes. Generic activity maps
-the event to a factual investigation update.
+the event to a factual investigation update. Overview's Activity Center
+conceals the previous identity, authority, filter, and read scope on the
+render that receives the new scope, before passive effects run. A same-scope
+refresh may keep the prior rows only as loading or as an explicit failure.
+A disabled or no-read account does not request activity, cases, or locator
+resolution.
 
 The subsequent **local Operations Queue integration** adds a joined,
 server-ordered read query and a first-class `/operations` shell area. That
