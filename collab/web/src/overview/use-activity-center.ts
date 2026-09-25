@@ -185,19 +185,19 @@ export function useActivityCenter(options: {
         if (liveRef.current.key !== publicationKey || !liveRef.current.enabled) return;
         if (generation.current !== requestGeneration || request.signal.aborted) return;
         if (!result.ok && (result.error.kind === "stale_cursor" || result.error.kind === "malformed_cursor")) {
-          const fresh = await gateway.listActivity({ filter }, request.signal);
-          if (liveRef.current.key !== publicationKey || !liveRef.current.enabled) return;
-          if (generation.current !== requestGeneration || request.signal.aborted) return;
-          if (fresh.ok) {
-            setActivity({ status: "ready", items: fresh.value.items });
-            setNextCursor(fresh.value.nextCursor);
-          } else {
-            setActivity((value) => ({
-              status: "failed", error: fresh.error,
-              ...(retainedItems(value).length > 0 ? { previous: retainedItems(value) } : {}),
-            }));
-          }
-          return;
+          return gateway.listActivity({ filter }, request.signal).then((fresh) => {
+            if (liveRef.current.key !== publicationKey || !liveRef.current.enabled) return;
+            if (generation.current !== requestGeneration || request.signal.aborted) return;
+            if (fresh.ok) {
+              setActivity({ status: "ready", items: fresh.value.items });
+              setNextCursor(fresh.value.nextCursor);
+            } else {
+              setActivity((value) => ({
+                status: "failed", error: fresh.error,
+                ...(retainedItems(value).length > 0 ? { previous: retainedItems(value) } : {}),
+              }));
+            }
+          });
         }
         if (result.ok) {
           setActivity((value) => ({
@@ -217,23 +217,26 @@ export function useActivityCenter(options: {
       });
   }, [gateway, publicationKey]);
 
-  const open = useCallback(async (locator: InvestigationResourceLocatorV1): Promise<string | null> => {
+  const open = useCallback((locator: InvestigationResourceLocatorV1): Promise<string | null> => {
     const live = liveRef.current;
-    if (live.key !== publicationKey || !live.enabled) return null;
+    if (live.key !== publicationKey || !live.enabled) return Promise.resolve(null);
     resolveController.current?.abort();
     const request = new AbortController();
     resolveController.current = request;
     const requestGeneration = generation.current;
     setOpenFailure(null);
-    const result = await gateway.resolve(locator, request.signal);
-    if (liveRef.current.key !== publicationKey || !liveRef.current.enabled) return null;
-    if (generation.current !== requestGeneration || request.signal.aborted) return null;
-    if (!result.ok || result.value.authorized !== true) {
-      if (result.ok) setOpenFailure({ kind: "protocol" });
-      else setOpenFailure(result.error);
-      return null;
-    }
-    return result.value.locator.pathname;
+    // Call then on the gateway result directly. A synchronous thenable therefore
+    // runs this scope check before passive-effect cleanup can abort the signal.
+    return gateway.resolve(locator, request.signal).then((result) => {
+      if (liveRef.current.key !== publicationKey || !liveRef.current.enabled) return null;
+      if (generation.current !== requestGeneration || request.signal.aborted) return null;
+      if (!result.ok || result.value.authorized !== true) {
+        if (result.ok) setOpenFailure({ kind: "protocol" });
+        else setOpenFailure(result.error);
+        return null;
+      }
+      return result.value.locator.pathname;
+    });
   }, [gateway, publicationKey]);
 
   const retained = retainedItems(activity);

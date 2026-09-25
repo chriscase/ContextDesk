@@ -46,6 +46,27 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function hold<T>() {
+  let deliver: ((value: T) => unknown) | undefined;
+  return {
+    thenable: {
+      then(onFulfilled: (value: T) => unknown) {
+        return new Promise((resolve) => {
+          deliver = (value: T) => {
+            const returned = onFulfilled(value);
+            resolve(returned);
+            return returned;
+          };
+        });
+      },
+    },
+    settle(value: T) {
+      if (!deliver) throw new Error("synchronous thenable settled before then");
+      return deliver(value);
+    },
+  };
+}
+
 function gateway(listActivity: OverviewGateway["listActivity"]): OverviewGateway {
   return {
     listActivity,
@@ -306,43 +327,107 @@ describe("useActivityCenter", () => {
     expect(listActivity.mock.calls.at(-1)?.[0]).toEqual({ filter: { activityKind: "investigation_updated" } });
   });
 
-  it("does not navigate when an in-flight open settles on the replacement render", async () => {
-    const pending = deferred<OverviewGatewayResult<InvestigationResourceResolveV1>>();
-    const listActivity = vi.fn<OverviewGateway["listActivity"]>(async () => ({ ok: true, value: page([item("a")], null) }));
-    const sharedGateway = gateway(listActivity);
-    sharedGateway.resolve = vi.fn(() => pending.promise);
+  it("does not publish an in-flight open or continuation that settles on the replacement render", async () => {
+    const authorized: OverviewGatewayResult<InvestigationResourceResolveV1> = {
+      ok: true,
+      value: {
+        schemaId: INVESTIGATION_RESOURCE_RESOLVE_SCHEMA_ID,
+        locator: item("a").locator,
+        resourceKind: "investigation",
+        resourceLabel: "Gateway resets",
+        investigationTitle: "Gateway resets",
+        revision: null,
+        authorized: true,
+      },
+    };
+    let continuationReads = 0;
+    let restartReads = 0;
+    const guardedContinuation = {
+      ok: true as const,
+      value: {
+        ...page([item("c")], "leaked_continuation"),
+        get items() {
+          continuationReads += 1;
+          return [item("c")];
+        },
+        get nextCursor() {
+          continuationReads += 1;
+          return "leaked_continuation";
+        },
+      },
+    };
+    const guardedRestart = {
+      ok: true as const,
+      value: {
+        ...page([item("d")], "leaked_restart"),
+        get items() {
+          restartReads += 1;
+          return [item("d")];
+        },
+        get nextCursor() {
+          restartReads += 1;
+          return "leaked_restart";
+        },
+      },
+    };
+    const resolution = hold<OverviewGatewayResult<InvestigationResourceResolveV1>>();
+    const lateContinuation = hold<OverviewGatewayResult<InvestigationActivityPageV1>>();
+    const staleContinuation = hold<OverviewGatewayResult<InvestigationActivityPageV1>>();
+    const restart = hold<OverviewGatewayResult<InvestigationActivityPageV1>>();
+    const lateList = vi.fn<OverviewGateway["listActivity"]>((request) => {
+      if (request.cursor) return lateContinuation.thenable as ReturnType<OverviewGateway["listActivity"]>;
+      return Promise.resolve({ ok: true, value: page([item("a")], "opaque_cursor") });
+    });
+    const restartList = vi.fn<OverviewGateway["listActivity"]>((request) => {
+      if (request.cursor) return staleContinuation.thenable as ReturnType<OverviewGateway["listActivity"]>;
+      if (restartList.mock.calls.filter((call) => call[0].cursor === undefined).length > 1) {
+        return restart.thenable as ReturnType<OverviewGateway["listActivity"]>;
+      }
+      return Promise.resolve({ ok: true, value: page([item("a")], "opaque_cursor") });
+    });
+    const lateGateway = gateway(lateList);
+    lateGateway.resolve = vi.fn(() => resolution.thenable as ReturnType<OverviewGateway["resolve"]>);
+    const restartGateway = gateway(restartList);
     let open = (_locator: InvestigationResourceLocatorV1) => Promise.resolve(null as string | null);
+    let loadLate = () => undefined as void;
+    let loadRestart = () => undefined as void;
+    let openResult: unknown;
+    let settledOnReplacement = false;
     const paints: ActivityCenterController[] = [];
     function Probe({ identityKey }: { readonly identityKey: string }) {
-      const controller = useActivityCenter({
-        enabled: true, identityKey, authorityKey: "viewer", filter: {}, gateway: sharedGateway,
+      const late = useActivityCenter({
+        enabled: true, identityKey, authorityKey: "viewer", filter: {}, gateway: lateGateway,
       });
-      open = controller.open;
-      paints.push(controller);
-      useLayoutEffect(() => {
-        if (identityKey !== "bob") return;
-        pending.resolve({
-          ok: true,
-          value: {
-            schemaId: INVESTIGATION_RESOURCE_RESOLVE_SCHEMA_ID,
-            locator: item("a").locator,
-            resourceKind: "investigation",
-            resourceLabel: "Gateway resets",
-            investigationTitle: "Gateway resets",
-            revision: null,
-            authorized: true,
-          },
-        });
+      const restarted = useActivityCenter({
+        enabled: true, identityKey, authorityKey: "viewer", filter: {}, gateway: restartGateway,
       });
+      open = late.open;
+      loadLate = late.loadMore;
+      loadRestart = restarted.loadMore;
+      paints.push(late, restarted);
+      if (identityKey === "bob" && !settledOnReplacement) {
+        settledOnReplacement = true;
+        openResult = resolution.settle(authorized);
+        lateContinuation.settle(guardedContinuation);
+        restart.settle(guardedRestart);
+      }
       return null;
     }
     const view = render(<Probe identityKey="alice" />);
-    await waitFor(() => expect(listActivity).toHaveBeenCalled());
-    const pendingOpen = open(item("a").locator);
-    await waitFor(() => expect(sharedGateway.resolve).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(paints.some((paint) => paint.activity.status === "ready")).toBe(true));
+    await waitFor(() => expect(paints.filter((paint) => paint.activity.status === "ready").length).toBeGreaterThanOrEqual(2));
+    loadLate();
+    void open(item("a").locator);
+    expect(lateGateway.resolve).toHaveBeenCalledTimes(1);
+    loadRestart();
+    staleContinuation.settle({ ok: false, error: { kind: "stale_cursor" } });
+    expect(restartList.mock.calls.filter((call) => call[0].cursor === undefined).length).toBe(2);
     view.rerender(<Probe identityKey="bob" />);
-    await expect(pendingOpen).resolves.toBeNull();
+    expect(openResult).toBeNull();
+    expect(continuationReads).toBe(0);
+    expect(restartReads).toBe(0);
     expect(paints.at(-1)?.openFailure).toBeNull();
+    expect(paints.at(-2)?.openFailure).toBeNull();
   });
 
   it.each([
