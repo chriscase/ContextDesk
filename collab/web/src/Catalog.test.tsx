@@ -309,7 +309,7 @@ describe("Source Catalog Console", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add label" }));
 
     let alert = await screen.findByRole("alert");
-    expect(document.activeElement).toBe(alert);
+    await waitFor(() => expect(document.activeElement).toBe(alert));
     fireEvent.click(within(alert).getByRole("button", { name: "Retry the same request" }));
     alert = await screen.findByRole("alert");
     await waitFor(() => expect(document.activeElement).toBe(alert));
