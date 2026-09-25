@@ -1,7 +1,7 @@
 # Activity Center scope-safety receipt
 
 Base: `c83e21fc545991f44db95cdb79942b6ce7827a02`, tree `d6003582f73330d61b0e5b988f83116d5a9392e5`.
-Merge base with that main: the same commit. Goal freeze: `2815f019554a94afe62a3cd8f75875d140fcfd89`.
+Merge base with that main: the same commit. The first freeze commit `2815f019554a94afe62a3cd8f75875d140fcfd89` stored a shortened contract. The goal file now contains the complete objective verbatim. SHA-256: `1db37b46d37627b677ad1ea55b189772d95f25f515cd200a36184d883ce03914`.
 Controller implementation: `a8dd2410453a3759fb1562433024feac510f6f75`.
 Historical sources, inspected and not merged: #1165 `c5029e888b273b0b1cb9bf2436c888ae0e9300ac`, #1167 `a2c5d4c5c55064c0a664e2bbdb10af654c17c435`.
 
