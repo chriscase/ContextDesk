@@ -12,6 +12,7 @@ import type { InvestigationStrategyShellProps } from "../contract.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import { RuntimeCoordinationControl } from "../runtime-coordination.js";
 import { EvidenceAnnotationWorkspace } from "../shared/index.js";
+import { EvidenceUploadReconciliationForm } from "../shared/EvidenceUploadReconciliationForm.js";
 import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
 import {
   CollectionDiscoveryFilters,
@@ -44,12 +45,6 @@ const CONTEXT_FIELDS: readonly [keyof InvestigationContext, string][] = [
   ["productName", "Product or software"], ["version", "Version"], ["build", "Build"],
   ["component", "Component"], ["environment", "Environment"], ["organization", "Customer, team, or organization"],
 ];
-const UPLOAD_KINDS = ["attachment", "log", "email"] as const;
-const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
-const SHARE_SAFE_PRIVACY_CLASSES = ["share_safe"] as const;
-type UploadKind = (typeof UPLOAD_KINDS)[number];
-type UploadPrivacyClass = (typeof PRIVACY_CLASSES)[number];
-
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function display(value: unknown): string { return text(value) || "Not recorded"; }
 function compactByteLabel(value: number | null | undefined): string | null {
@@ -252,9 +247,6 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const [severity, setSeverity] = useState<CaseV1["severity"]>("medium");
   const [situation, setSituation] = useState<SituationDraft>(EMPTY_SITUATION);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [privacyClass, setPrivacyClass] = useState<UploadPrivacyClass>(
-    runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe",
-  );
   const [annotationMutationArtifactId, setAnnotationMutationArtifactId] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -393,29 +385,6 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     if (command === null || runtime.mutations.create.status === "running") return;
     const result = await command({ title, severity, problemStatement: situation.problemStatement, affectedParties: situation.affectedParties, impact: situation.impact, scope: situation.scope, openQuestions: listQuestions(situation.openQuestions), investigationContext: contextPayload(situation.investigationContext), ...(situation.occurredAt.trim() ? { occurredAt: situation.occurredAt.trim() } : {}) });
     if (result.status === "succeeded") { setTitle(""); setSeverity("medium"); setSituation(EMPTY_SITUATION); setAdvancedOpen(false); }
-  }
-  async function uploadEvidence(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const command = runtime.commands.uploadEvidence;
-    if (command === null || runtime.mutations.uploadEvidence.status === "running") return;
-    const form = event.currentTarget;
-    const file = (form.elements.namedItem("file") as HTMLInputElement | null)?.files?.[0] ?? null;
-    const summary = (form.elements.namedItem("summary") as HTMLInputElement | null)?.value ?? "";
-    const requestedKind = (form.elements.namedItem("kind") as HTMLSelectElement | null)?.value ?? "attachment";
-    const kind: UploadKind = requestedKind === "log" || requestedKind === "email" || requestedKind === "attachment"
-      ? requestedKind
-      : "attachment";
-    const requestedPrivacy = (form.elements.namedItem("privacyClass") as HTMLSelectElement | null)?.value
-      ?? privacyClass;
-    const submittedPrivacy: UploadPrivacyClass = runtime.capabilities.canReadPrivate
-      && requestedPrivacy === "owner_only"
-      ? "owner_only"
-      : "share_safe";
-    const result = await command({ file, summary, kind, privacyClass: submittedPrivacy });
-    if (result.status === "succeeded") {
-      form.reset();
-      setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
-    }
   }
 
   async function createArtifactAnnotation(draft: ArtifactAnnotationDraft): Promise<unknown> {
@@ -629,8 +598,8 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         onClearSelection={() => setSelectedEvidence([])}
         trashDescriptionId="investigation-first-trash-description"
       />
-      {upload.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
-      {uploadCommand !== null ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment">{UPLOAD_KINDS.map((option) => <option key={option} value={option}>{option === "attachment" ? "Attachment" : option === "log" ? "Log" : "Email"}</option>)}</select></label><label>Privacy<select name="privacyClass" value={privacyClass} onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe")}>{(runtime.capabilities.canReadPrivate ? PRIVACY_CLASSES : SHARE_SAFE_PRIVACY_CLASSES).map((option) => <option key={option} value={option}>{option === "owner_only" ? "Owner only" : "Share safe"}</option>)}</select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={upload.status === "running"}>{upload.status === "running" ? "Adding…" : "Add to evidence inventory"}</button></form> : null}
+      {upload.status === "failed" && !("reason" in upload.error && upload.error.reason === "commit_outcome_unknown") ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
+      {uploadCommand !== null ? <EvidenceUploadReconciliationForm variant="investigation-first" /> : null}
     </section>;
   }
 

@@ -142,14 +142,29 @@ export function createTrackedAbortUploadClient(
   };
 }
 
+const CANONICAL_COMMIT_OPERATIONS = new Set(["commit", "promote"]);
+
 export class S3EvidenceError extends Error {
   readonly operation: string;
+  readonly commitOutcomeUnknown: boolean;
 
-  constructor(operation: string, reason: string) {
+  constructor(
+    operation: string,
+    reason: string,
+    options?: { readonly commitOutcomeUnknown?: boolean },
+  ) {
     super(`s3 evidence ${operation} failed: ${reason}`);
     this.name = "S3EvidenceError";
     this.operation = operation;
+    this.commitOutcomeUnknown = options?.commitOutcomeUnknown === true;
   }
+}
+
+/** Canonical promote/commit uncertainty only. A stray flag on put/head is ordinary unavailability. */
+export function isS3CommitOutcomeUnknown(err: unknown): boolean {
+  return err instanceof S3EvidenceError
+    && err.commitOutcomeUnknown
+    && CANONICAL_COMMIT_OPERATIONS.has(err.operation);
 }
 
 const FILE_REF_ID_RE =
@@ -412,7 +427,10 @@ export class S3EvidenceStore implements EvidenceStore {
             await this.deleteObjectBestEffort("commit", stagingObjectKey);
             return;
           }
-          if (outcome === "unknown") ownershipUnknown = true;
+          if (outcome === "unknown") {
+            ownershipUnknown = true;
+            throw new S3EvidenceError("commit", "unavailable", { commitOutcomeUnknown: true });
+          }
           throw new S3EvidenceError("commit", "unavailable");
         });
       },
@@ -614,7 +632,12 @@ export class S3EvidenceStore implements EvidenceStore {
           retainWriteLock = true;
           return;
         }
-        if (outcome === "unknown") ownershipUnknown = true;
+        if (outcome === "unknown") {
+          ownershipUnknown = true;
+          releaseLifecycleLock = releaseWrite;
+          retainWriteLock = true;
+          throw new S3EvidenceError("promote", "unavailable", { commitOutcomeUnknown: true });
+        }
         releaseLifecycleLock = releaseWrite;
         retainWriteLock = true;
         throw new S3EvidenceError("promote", "unavailable");
@@ -1155,21 +1178,40 @@ export class S3EvidenceStore implements EvidenceStore {
     }
   }
 
-  async copyObject(fromKey: string, toKey: string, operation: string): Promise<void> {
+  /**
+   * Canonical CopyObject must not inherit the read client's retry middleware.
+   * A lost or retryable response may already have applied the copy.
+   */
+  private canonicalCopyClient(): S3EvidenceClient {
+    const sdkClient = this.client as S3Client & {
+      middlewareStack?: { resolve?: unknown };
+      config?: unknown;
+    };
+    if (typeof sdkClient.middlewareStack?.resolve !== "function" || sdkClient.config === undefined) {
+      return this.client;
+    }
+    return createNonRetryingS3UploadClient(sdkClient) as unknown as S3EvidenceClient;
+  }
+
+  private async sendCanonicalCopy(operation: string, command: unknown): Promise<unknown> {
     try {
-      await this.send(
-        operation,
-        new CopyObjectCommand({
-          Bucket: this.bucket,
-          Key: toKey,
-          CopySource: encodeCopySource(this.bucket, fromKey),
-          MetadataDirective: "COPY",
-        }),
-      );
+      return await this.canonicalCopyClient().send(command);
     } catch (error) {
       if (error instanceof S3EvidenceError) throw error;
-      throw new S3EvidenceError(operation, "unavailable");
+      throw new S3EvidenceError(operation, "unavailable", { commitOutcomeUnknown: true });
     }
+  }
+
+  async copyObject(fromKey: string, toKey: string, operation: string): Promise<void> {
+    await this.sendCanonicalCopy(
+      operation,
+      new CopyObjectCommand({
+        Bucket: this.bucket,
+        Key: toKey,
+        CopySource: encodeCopySource(this.bucket, fromKey),
+        MetadataDirective: "COPY",
+      }),
+    );
   }
 
   async copyCanonicalObject(
@@ -1215,7 +1257,7 @@ export class S3EvidenceStore implements EvidenceStore {
     if (meta.contentType !== null) input.ContentType = meta.contentType;
     this.invalidateVerifiedGeneration(toKey);
     try {
-      await this.send(operation, new CopyObjectCommand(input));
+      await this.sendCanonicalCopy(operation, new CopyObjectCommand(input));
     } catch {
       // Destination is still inspected below. A thrown CopyObject may have
       // applied bytes; absent vs unknown is decided from Head/Get, not the throw.
@@ -2172,7 +2214,10 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
         }
         continue;
       }
-      if (outcome === "unknown") this.ownershipUnknown = true;
+      if (outcome === "unknown") {
+        this.ownershipUnknown = true;
+        throw new S3EvidenceError("promote", "unavailable", { commitOutcomeUnknown: true });
+      }
       throw new S3EvidenceError("promote", "unavailable");
     }
     this.ownershipUnknown = false;
