@@ -25,6 +25,7 @@ import {
 } from "./s3-settings.js";
 import {
   createS3ClientConfig,
+  sendSingleCanonicalCopy,
   createNonRetryingS3UploadClient,
   createTrackedAbortUploadClient,
   S3EvidenceStore,
@@ -270,9 +271,12 @@ function rethrowSanitized(error: unknown): never {
 class OpaqueS3EvidenceClient implements S3EvidenceClient {
   readonly #send: S3EvidenceClient["send"];
   readonly #streamClient: S3Client | null;
+  readonly #copy: S3EvidenceClient["copyCanonical"];
 
   constructor(inner: S3EvidenceClient) {
     this.#send = inner.send.bind(inner);
+    this.#copy = inner instanceof S3Client ? (command, operation) => sendSingleCanonicalCopy(inner, command, operation)
+      : inner.copyCanonical?.bind(inner);
     this.#streamClient = inner instanceof S3Client
       ? createNonRetryingS3UploadClient(inner)
       : null;
@@ -281,6 +285,8 @@ class OpaqueS3EvidenceClient implements S3EvidenceClient {
   send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
     return this.#send(command, options);
   }
+
+  get copyCanonical(): S3EvidenceClient["copyCanonical"] { return this.#copy; }
 
   async uploadStream(
     input: {
