@@ -722,6 +722,55 @@ legal hold, backup restore, migration, multi-provider failover,
 multi-replica locking, source deletion, or presigned browser access. An
 object-store CLI put is not a substitute.
 
+## When an upload result is unconfirmed
+
+The upload API distinguishes `503 {"error":"commit_outcome_unknown"}` from
+ordinary `503 {"error":"storage_unavailable"}` for JSON and multipart uploads.
+Both errors are sanitized. An ordinary unavailable result is **not** proof
+that no bytes exist. The unknown marker applies to unresolved canonical S3
+promotion or an existing unknown database commit, not every failed S3 request.
+
+In Investigation First and Beacon, the original File and metadata remain
+locked after an unknown result. Runtime refreshes the authorized evidence
+inventory. A cached inventory, an earlier read, or retained rows after a failed
+refresh cannot enable retry. Use **Refresh inventory** if that read fails.
+After a successful read, inspect the inventory, filename, content and privacy
+before choosing **Retry original upload** or **Finish without another write**.
+Retry uses the original bytes, filename, media type, kind, summary and privacy,
+including any supplied source/client-time fields; it ignores later control
+edits. Finish clears local intent and sends no compensating deletion.
+
+A successful inventory read reports authorized records. It does not prove
+storage rollback or global absence, and finding a filename does not establish
+that this write committed. Content-addressed bytes do not make artifact and
+summary writes globally exactly-once. Inspect before retrying to avoid duplicate
+records. Only a validated upload success permits the normal success path.
+
+Changing case, identity, authority, read/upload access or relevant lifecycle
+state drops the draft and fences old actions and results. Losing private-read
+access never converts an owner-only frozen draft to share-safe. Select a new
+file and review its disclosure under the new scope. Blob intent is held only
+in memory; navigating away or reloading does not preserve it. War Room/CaseBoard
+and Keystone retain their existing upload workflows; this recovery interaction
+is limited to Investigation First and Beacon.
+
+Canonical CopyObject uses one SDK transport attempt, including retryable
+service errors, while reads retain their bounded retry policy. A lost,
+truncated or malformed response may be uncertain even when HTTP status is 200.
+The server verifies canonical content where possible; verified bytes allow the
+normal metadata transaction to proceed and do not themselves prove its commit.
+Unsettled promotion retains the pending journal and potentially applied bytes.
+Existing startup recovery reloads authoritative references under write
+coordination: adopted valid bytes survive, and only proven unreferenced
+residue may be reclaimed. Missing references or unhealthy storage fail closed
+under readiness rules. Do not manually erase pending records or objects to
+make an uncertain upload look settled.
+
+The draft implementation and qualification limits are recorded in
+[Goal 05 receipt](../../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md).
+The disposable SDK-handler fault harness qualifies the installed SDK and real
+application wiring; it is not live AWS or Garage vendor certification.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | What to check |

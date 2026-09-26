@@ -1,0 +1,373 @@
+{
+  "head": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+  "mutations": [
+    {
+      "name": "unknown-as-ordinary",
+      "source": "collab/server/src/evidence/s3-store.ts",
+      "original_sha256": "a07188012a96466eabaafee9df3b7f6399f56a3cd14c66cea17705e19c786888",
+      "negative": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "-t",
+          "maps JSON and multipart promote ambiguity",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+        ],
+        "exit": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 17,
+        "failures": [
+          {
+            "test": "POST /api/cases/:id/evidence/stream maps JSON and multipart promote ambiguity separately from ordinary S3 failure",
+            "reason": "AssertionError: expected { error: 'storage_unavailable' } to deeply equal { error: 'commit_outcome_unknown' }"
+          }
+        ]
+      },
+      "restored": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "-t",
+          "maps JSON and multipart promote ambiguity",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+        ],
+        "exit": 0,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 17,
+        "failures": []
+      }
+    },
+    {
+      "name": "sdk-copy-replay",
+      "source": "collab/server/src/evidence/s3-store.ts",
+      "original_sha256": "a07188012a96466eabaafee9df3b7f6399f56a3cd14c66cea17705e19c786888",
+      "negative": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "-t",
+          "one wire attempt through opaque production adapter for rejected",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+        ],
+        "exit": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 11,
+        "failures": [
+          {
+            "test": "canonical CopyObject retry policy below SDK middleware one wire attempt through opaque production adapter for rejected",
+            "reason": "AssertionError: expected 3 to be 1 // Object.is equality"
+          }
+        ]
+      },
+      "restored": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "-t",
+          "one wire attempt through opaque production adapter for rejected",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+        ],
+        "exit": 0,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 11,
+        "failures": []
+      }
+    },
+    {
+      "name": "erase-uncertain-journal",
+      "source": "collab/server/src/evidence/s3-store.ts",
+      "original_sha256": "a07188012a96466eabaafee9df3b7f6399f56a3cd14c66cea17705e19c786888",
+      "negative": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "-t",
+          "durable reopened objects and SQLite references",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+        ],
+        "exit": 1,
+        "passed": 0,
+        "failed": 2,
+        "skipped": 10,
+        "failures": [
+          {
+            "test": "canonical CopyObject retry policy below SDK middleware durable reopened objects and SQLite references recover unresolved writer; adopted=false",
+            "reason": "AssertionError: expected [] to have a length of 1 but got +0"
+          },
+          {
+            "test": "canonical CopyObject retry policy below SDK middleware durable reopened objects and SQLite references recover unresolved writer; adopted=true",
+            "reason": "AssertionError: expected [] to have a length of 1 but got +0"
+          }
+        ]
+      },
+      "restored": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "-t",
+          "durable reopened objects and SQLite references",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+        ],
+        "exit": 0,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 10,
+        "failures": []
+      }
+    },
+    {
+      "name": "live-retry-intent",
+      "source": "collab/web/src/investigations/strategies/shared/evidence-upload-reconciliation.ts",
+      "original_sha256": "aaa6f6654b203fe9982ebbefd7a230f9cb25033e8a3e061982c620e23094d104",
+      "negative": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "-t",
+          "freezes caller metadata",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+        ],
+        "exit": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 14,
+        "failures": [
+          {
+            "test": "useEvidenceUploadReconciliation freezes caller metadata and original File while a new causal read unlocks retry",
+            "reason": "AssertionError: expected { file: File{ \u2026(1) }, \u2026(5) } to deeply equal { file: File{ \u2026(1) }, \u2026(5) }"
+          }
+        ]
+      },
+      "restored": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "-t",
+          "freezes caller metadata",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+        ],
+        "exit": 0,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 14,
+        "failures": []
+      }
+    },
+    {
+      "name": "stale-read-unlock",
+      "source": "collab/web/src/investigations/strategies/shared/evidence-upload-reconciliation.ts",
+      "original_sha256": "aaa6f6654b203fe9982ebbefd7a230f9cb25033e8a3e061982c620e23094d104",
+      "negative": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "-t",
+          "never unlocks from a pre-failure",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+        ],
+        "exit": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 14,
+        "failures": [
+          {
+            "test": "useEvidenceUploadReconciliation never unlocks from a pre-failure completion or another allocated ready snapshot",
+            "reason": "AssertionError: expected 'review' to be 'refreshing' // Object.is equality"
+          }
+        ]
+      },
+      "restored": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "-t",
+          "never unlocks from a pre-failure",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+        ],
+        "exit": 0,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 14,
+        "failures": []
+      }
+    },
+    {
+      "name": "obsolete-scope-callback",
+      "source": "collab/web/src/investigations/strategies/shared/evidence-upload-reconciliation.ts",
+      "original_sha256": "aaa6f6654b203fe9982ebbefd7a230f9cb25033e8a3e061982c620e23094d104",
+      "negative": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "-t",
+          "drops obsolete callbacks on B and A-B-A",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+        ],
+        "exit": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 14,
+        "failures": [
+          {
+            "test": "useEvidenceUploadReconciliation drops obsolete callbacks on B and A-B-A reuse",
+            "reason": "AssertionError: expected \"spy\" to be called 1 times, but got 2 times"
+          }
+        ]
+      },
+      "restored": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "-t",
+          "drops obsolete callbacks on B and A-B-A",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+        ],
+        "exit": 0,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 14,
+        "failures": []
+      }
+    },
+    {
+      "name": "double-upload",
+      "source": "collab/web/src/investigations/strategies/shared/evidence-upload-reconciliation.ts",
+      "original_sha256": "aaa6f6654b203fe9982ebbefd7a230f9cb25033e8a3e061982c620e23094d104",
+      "negative": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "-t",
+          "direct submits cannot bypass recovery",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+        ],
+        "exit": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 2,
+        "failures": [
+          {
+            "test": "evidence recovery form handlers direct submits cannot bypass recovery and retry ignores programmatically changed disabled controls",
+            "reason": "AssertionError: expected \"spy\" to be called 1 times, but got 2 times"
+          }
+        ]
+      },
+      "restored": {
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "-t",
+          "direct submits cannot bypass recovery",
+          "--reporter=json",
+          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+        ],
+        "exit": 0,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 2,
+        "failures": []
+      }
+    }
+  ]
+}

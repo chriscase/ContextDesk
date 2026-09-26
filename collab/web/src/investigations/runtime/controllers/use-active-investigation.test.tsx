@@ -102,6 +102,23 @@ function useController(
 }
 
 describe("useActiveInvestigation", () => {
+  it("fences stale evidence reads synchronously and records only the qualifying refresh completion", async () => {
+    const { gateway, requests } = deferredReadGateway();
+    const { result } = renderHook(() => useController(gateway, { investigationId: "case-a", active: true, identityKey: "alice", authorityKey: "lead" }));
+    await waitFor(() => expect(requests.evidence).toHaveLength(1));
+    let generation = -1;
+    act(() => { generation = result.current.refreshEvidence() as number; });
+    await waitFor(() => expect(requests.evidence).toHaveLength(2));
+    await act(async () => requests.evidence[0]!.deferred.resolve({ ok: true, value: makeEvidenceList().artifacts }));
+    expect(result.current.evidenceReadCompletion.succeeded).toBeLessThan(generation);
+    await act(async () => requests.evidence[1]!.deferred.resolve({ ok: false, error: { kind: "unavailable", status: 503 } }));
+    expect(result.current.evidenceReadCompletion.failed).toBe(generation);
+    expect(result.current.evidenceReadCompletion.succeeded).toBeLessThan(generation);
+    act(() => { generation = result.current.refreshEvidence() as number; });
+    await waitFor(() => expect(requests.evidence).toHaveLength(3));
+    await act(async () => requests.evidence[2]!.deferred.resolve({ ok: true, value: [] }));
+    expect(result.current.evidenceReadCompletion.succeeded).toBe(generation);
+  });
   it("publishes authoritative case, upload members, and lifecycle into current resources", async () => {
     const originalEvidence = makeEvidenceList().artifacts;
     const originalContributions = makeContributionList().contributions;

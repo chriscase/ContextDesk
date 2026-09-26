@@ -12,7 +12,7 @@ import type { InvestigationStrategyShellProps } from "../contract.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import { RuntimeCoordinationControl } from "../runtime-coordination.js";
 import { EvidenceAnnotationWorkspace } from "../shared/index.js";
-import { EvidenceUploadReconciliationForm } from "../shared/EvidenceUploadReconciliationForm.js";
+import { EvidenceUploadReconciliationForm } from "../shared/index.js";
 import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
 import {
   CollectionDiscoveryFilters,
@@ -343,9 +343,6 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     setSituation(EMPTY_SITUATION);
     setAdvancedOpen(false);
   }, [draftOwnerKey]);
-  useLayoutEffect(() => {
-    setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
-  }, [runtime.capabilities.canReadPrivate]);
   useEffect(() => setSelectedEvidence([]), [props.focusCaseId]);
   useEffect(() => setPreviewArtifactId(null), [props.focusCaseId]);
   useEffect(() => setAnnotationArtifactId(null), [props.focusCaseId]);
@@ -599,7 +596,11 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         trashDescriptionId="investigation-first-trash-description"
       />
       {upload.status === "failed" && !("reason" in upload.error && upload.error.reason === "commit_outcome_unknown") ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
-      {uploadCommand !== null ? <EvidenceUploadReconciliationForm variant="investigation-first" /> : null}
+      {uploadCommand !== null ? <EvidenceUploadReconciliationForm variant="investigation-first"
+        scopeKey={[runtime.presentationScopeKey, runtime.resources.investigation.status === "ready" ? runtime.resources.investigation.value.id : "unavailable", runtime.capabilities.canRead, runtime.capabilities.canUpload, runtime.capabilities.canReadPrivate, runtime.resources.lifecycle.status === "ready" ? JSON.stringify(runtime.resources.lifecycle.value) : runtime.resources.lifecycle.status].join("\0")}
+        canRead={runtime.capabilities.canRead} canUpload={runtime.capabilities.canUpload} canReadPrivate={runtime.capabilities.canReadPrivate}
+        readCompletion={runtime.resources.evidenceReadCompletion ?? { requested: 0, succeeded: -1, failed: -1 }}
+        refreshEvidence={runtime.refresh.evidence} upload={runtime.commands.uploadEvidence} /> : null}
     </section>;
   }
 

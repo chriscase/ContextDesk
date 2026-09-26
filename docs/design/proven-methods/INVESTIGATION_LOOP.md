@@ -767,6 +767,27 @@ Reimplementations that add a purge should expect to revisit legal hold,
 audit retention, and the portable archive together; none of the three assumes
 an investigation can stop existing.
 
+## 15a. Uncertain S3 evidence uploads — unmerged Goal 05
+
+Draft [#1184](https://github.com/chriscase/ContextDesk/pull/1184) adds an explicit
+review step in Investigation First and Beacon. Runtime identifies successful
+inventory reads by generation; presentations freeze one File plus metadata,
+block direct/automatic replay and retain the same scope's intent through read
+failure. Retry is an explicit action after review. Local finish is not server
+rollback. Identity/authority/case/access/lifecycle changes release intent and
+fence obsolete callbacks, including A-to-B-to-A scope reuse.
+
+The byte store uses one canonical-copy attempt below the installed SDK retry
+middleware, preserves unresolved journals and protects subsequently referenced
+content. Metadata remains database-authoritative; object presence or a filename
+match is not a committed artifact. The
+[receipt](../../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md) separates provider
+doubles, actual SDK-handler tests, durable SQLite/object reopen, HTTP-injected
+browser proof and the joined synthetic application journey. No live AWS fault,
+global metadata exactly-once, durable browser intent or new retention policy is
+claimed. Accepted discovery and Activity Center work remains shipped; this
+unmerged recovery goal does not reopen it.
+
 ## 16. Open residuals
 
 - #656: complete native proof across corpus sizes, restart, stale references,

@@ -2,11 +2,9 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "
 import {
   selectResourceView,
   useInvestigationRuntime,
-  type ArtifactKind,
   type CaseV1,
   type CommandOutcome,
   type ContributionV1,
-  type PrivacyClass,
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
@@ -18,7 +16,7 @@ import {
   type InvestigationCollectionQueryPresentation,
 } from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
-import { EvidenceUploadReconciliationForm } from "../shared/EvidenceUploadReconciliationForm.js";
+import { EvidenceUploadReconciliationForm } from "../shared/index.js";
 import {
   StrategyActionRow,
   StrategyBadge,
@@ -283,7 +281,11 @@ function EvidenceCard() {
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Evidence refresh failed" action={<button type="button" onClick={runtime.refresh.evidence}>Retry</button>}>The previously loaded inventory remains visible.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length === 0 ? <StrategyStateNotice>No supporting material has been recorded yet.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length > 0 ? <ul className="beacon__evidence-list">{view.value.map((item) => <li key={item.id}><span><strong>{item.filename || item.uri || "Unnamed evidence"}</strong><small>{item.kind} · {item.mediaType || "media type not recorded"} · {item.privacyClass === "owner_only" ? "owner only" : "share safe"}</small></span><StrategyBadge>{item.verificationStatus || "verification not recorded"}</StrategyBadge></li>)}</ul> : null}
-      <EvidenceUploadReconciliationForm variant="beacon" />
+      <EvidenceUploadReconciliationForm variant="beacon"
+        scopeKey={[runtime.presentationScopeKey, runtime.resources.investigation.status === "ready" ? runtime.resources.investigation.value.id : "unavailable", runtime.capabilities.canRead, runtime.capabilities.canUpload, runtime.capabilities.canReadPrivate, runtime.resources.lifecycle.status === "ready" ? JSON.stringify(runtime.resources.lifecycle.value) : runtime.resources.lifecycle.status].join("\0")}
+        canRead={runtime.capabilities.canRead} canUpload={runtime.capabilities.canUpload} canReadPrivate={runtime.capabilities.canReadPrivate}
+        readCompletion={runtime.resources.evidenceReadCompletion ?? { requested: 0, succeeded: -1, failed: -1 }}
+        refreshEvidence={runtime.refresh.evidence} upload={runtime.commands.uploadEvidence} />
     </StrategyPanel>
   );
 }

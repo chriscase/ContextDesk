@@ -8,8 +8,9 @@ ready slice, freezes its exact base, and starts that slice when it does not
 conflict with protected work.
 
 Baseline for this reconciliation: `main`
-`c83e21fc545991f44db95cdb79942b6ce7827a02` (Goal 1 and the desktop save-status
-repair are on main).
+`c5de75d1e40a3de8ddfceda2ce3d216a5e19644d` (Goal 1 through #1181, desktop
+synchronization through #1182, and Activity Center scope safety through #1183
+are on main).
 
 ## Delivery loop
 
@@ -43,7 +44,7 @@ planning pause.
 Old design documents and open branches may predate these foundations. Their
 “missing” lists are evidence to recheck, not current backlog truth.
 
-## Active slice — Investigation Activity Center
+## Shipped foundation — Investigation Activity Center
 
 **Outcome:** make `/` a useful cross-investigation command surface rather than
 a second rendering of the selected Investigations experience.
@@ -79,14 +80,24 @@ The browser contract exports activity DTOs and parsers without Node crypto or
 cursor decoding. Cursor generation, fingerprinting, and request validation
 remain server-only.
 
-## Provisional successor queue
+## Active unmerged slice — trustworthy S3 evidence upload recovery
+
+Goal 05 is in draft [PR #1184](https://github.com/chriscase/ContextDesk/pull/1184),
+not shipped on main. It preserves uncertain S3 promotion, suppresses hidden
+copy replay, and adds frozen-intent reconciliation in Investigation First and
+Beacon. The [frozen contract](../goals/05-S3-EVIDENCE-RECONCILIATION.md) and
+[receipt](../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md) own acceptance and
+qualification limits. Activity Center implementation remains accepted. No
+successor is launched by this draft checkpoint.
+
+## Deferred successor queue
 
 Trusted Investigation Discovery shipped through merged PR #1181. The desktop
 investigation-team save-status synchronization shipped through merged PR #1182.
-The current integration goal is Activity Center first-frame scope safety.
-Unmerged historical branches, including #1165 and #1167, are source material,
-not shipped behavior. S3 ambiguous-upload reconciliation is the preferred
-successor. #1158 remains useful, lower-priority test qualification.
+Activity Center first-frame scope safety shipped through #1183. Unmerged
+historical branches, including #1165 and #1167, remain source material. S3
+reconciliation is the active unmerged Goal 05 above. The candidates below and
+#1158 remain deferred; this checkpoint does not authorize their implementation.
 
 1. **Evidence annotation workspace and safe bulk metadata.** Build on the
    shipped append-only annotation contract: compact review, structured tags or

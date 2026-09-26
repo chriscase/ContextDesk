@@ -56,3 +56,6 @@ export type { EvidenceAnnotationWorkspaceProps } from "./EvidenceAnnotationWorks
 
 export { CollectionPagination } from "./CollectionPagination.js";
 export type { CollectionPageView, CollectionPaginationProps } from "./CollectionPagination.js";
+
+export { EvidenceUploadReconciliationForm } from "./EvidenceUploadReconciliationForm.js";
+export type { EvidenceUploadReconciliationFormProps } from "./EvidenceUploadReconciliationForm.js";

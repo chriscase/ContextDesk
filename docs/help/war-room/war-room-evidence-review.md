@@ -83,3 +83,20 @@ evidence.
 
 For the complete stage sequence, open help://war-room-workflow. For deployment
 and ContextDesk handoff boundaries, open help://war-room-deployment.
+
+## Review an unconfirmed upload
+
+Investigation First and Beacon freeze the original upload after an unconfirmed
+result. Wait for a successful authorized inventory refresh, inspect what was
+recorded, then choose **Retry original upload** or **Finish without another
+write**. A failed refresh retains visibly stale rows and keeps retry blocked.
+Refreshing never sends another upload; finish never deletes server evidence.
+
+A matching filename is not a commit receipt. Review the recorded evidence and
+its privacy before retrying: identical bytes may still produce another artifact
+and summary. Scope or private-access changes discard the old draft rather than
+broaden disclosure. The in-memory intent does not survive reloads. See
+[the S3 operator guide](war-room-s3-evidence-store.md#when-an-upload-result-is-unconfirmed)
+for uncertainty and authoritative recovery boundaries. This interaction is a
+Goal 05 draft change; its evidence is in the
+[receipt](../../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md).

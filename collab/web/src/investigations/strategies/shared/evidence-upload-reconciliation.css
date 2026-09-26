@@ -1,0 +1,9 @@
+.evidence-reconciliation { min-width: 0; max-width: 100%; }
+.evidence-reconciliation label { min-width: 0; max-width: 100%; }
+.evidence-reconciliation input, .evidence-reconciliation select { min-width: 0; max-width: 100%; }
+.evidence-reconciliation p { overflow-wrap: anywhere; }
+.evidence-reconciliation button { white-space: normal; }
+.evidence-reconciliation button:focus-visible, .evidence-reconciliation p:focus { outline: 2px solid var(--accent, currentColor); outline-offset: 2px; }
+@media (forced-colors: active) {
+  .evidence-reconciliation button:focus-visible, .evidence-reconciliation p:focus { outline: 2px solid Highlight; }
+}
