@@ -16,8 +16,8 @@ describe.each([["Investigation First", InvestigationFirstStrategy], ["Beacon", B
     await waitFor(() => expect(latest.resources.lifecycle.status).toBe("ready"));
     const form = document.querySelector<HTMLFormElement>(".evidence-reconciliation")!;
     const file = new File(["synthetic unchanged evidence"], "unchanged.log", { type: "text/plain" });
-    fireEvent.change(form.elements.namedItem("file")!, { target: { files: [file] } });
-    fireEvent.change(form.elements.namedItem("summary")!, { target: { value: "unchanged summary" } });
+    fireEvent.change(form.elements.namedItem("file") as HTMLInputElement, { target: { files: [file] } });
+    fireEvent.change(form.elements.namedItem("summary") as HTMLInputElement, { target: { value: "unchanged summary" } });
     await act(async () => fireEvent.submit(form));
     await screen.findByRole("button", { name: "Retry original upload" });
     const caseRead = createDeferred<Awaited<ReturnType<typeof gateway.getInvestigation>>>();
