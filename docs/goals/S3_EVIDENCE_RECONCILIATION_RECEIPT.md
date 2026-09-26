@@ -1,9 +1,10 @@
 # Goal 05 — S3 evidence reconciliation receipt
 
-Status: implementation candidate for draft PR [#1184](https://github.com/chriscase/ContextDesk/pull/1184).
+Status: locally qualified implementation; final publication is approval-blocked. Existing recovery draft PR [#1184](https://github.com/chriscase/ContextDesk/pull/1184).
 This receipt does not claim a merge, GitHub approval, live AWS fault proof, or
-completion of an external gate. Final exact-revision results are recorded in
-`S3_QUALIFICATION_EVIDENCE.md` and PR metadata after candidate publication.
+completion of an external gate. Final exact-revision local results are recorded in
+`S3_QUALIFICATION_EVIDENCE.md` and `S3_GATE_EVIDENCE.json`. Draft #1184 currently
+contains only the recovery checkpoint; the final candidate/evidence are local.
 
 ## Recovery and identity
 
@@ -84,7 +85,7 @@ counts, repetitions, failures, skips and external limits are in
 | SER-09 | Provider/store, actual SDK-handler, real HTTP, Runtime/consumer, both HTTP-injected browser presentations, and one joined built-web/source-server/Runtime/service/store/SDK journey execute. Durable recovery pairing: SQLite plus on-disk synthetic object records. Joined domain metadata is disposable in-memory fixture. Garage/live AWS remain separate external qualifications. |
 | SER-10 | New spec 39, one worker/no retries; delayed/failed reads, original draft, explicit refresh/retry, repeated unknown, ordinary 503, success, local finish/scope/privacy; keyboard/focus/status, 320px, forced colors and reduced motion. Existing 37/38 unchanged. Strategy policy restored; personal preference independently asserted unchanged. |
 | SER-11 | Seven named mutations actually fail, source restored byte-for-byte, each named test passes. Reproducer `scripts/check_s3_reconciliation_mutations.py`; sanitized evidence `S3_MUTATION_EVIDENCE.json`. Final gates and timing repetition results are separately revision-bound. Missing Windows/Garage/root-hosted outcomes must remain explicit. |
-| SER-12 | Operator Help, evidence review, handbook row/chapter, backlog and this receipt distinguish draft from shipped discovery/Activity Center. Committed qualification evidence and independent review are remotely reviewable. No successor launched. |
+| SER-12 | Operator Help, evidence review, handbook row/chapter, backlog and this receipt distinguish draft from shipped discovery/Activity Center. Committed final qualification evidence and independent review are locally reviewable; final remote publication is blocked pending explicit public-transfer approval. No successor launched. |
 
 ## Joined journey and narrow test-harness expansion
 
@@ -134,3 +135,18 @@ ready marking, historical closure or successor implementation is claimed.
 The branch remains one draft for independent oversight. External pending or
 missing gates are reported in the evidence record and handoff, not replaced
 with inferred success or repeated unrelated work.
+
+
+## Final ledger state
+
+SER-01 through SER-08 and SER-10 are implemented and proven locally at functional
+C `0959e1e3eab8a933ba80d9cc2c8a8b2af022267a` / tree
+`07e03204db9702683708f8f5ce3b279faef4e050`, using the exact source/evidence paths
+in the ledger above. SER-09 has the joined real-route/installed-SDK proof and
+durable reopen proof; external live Garage/provider qualification is missing.
+SER-11 has complete exact-C local gates, mutations and repetitions; fresh
+final-head hosted/root/Windows evidence is missing. SER-12 documentation and
+review are complete locally; final remote accessibility is blocked by automatic
+approval review pending explicit publication approval. The current overall
+handoff is PARTIAL solely as to that publication requirement and the named
+external gates. Historical PRs and the frozen goal remain unchanged.

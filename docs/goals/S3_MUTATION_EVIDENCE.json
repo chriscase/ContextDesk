@@ -1,10 +1,10 @@
 {
-  "head": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+  "head": "0959e1e3eab8a933ba80d9cc2c8a8b2af022267a",
   "mutations": [
     {
       "name": "unknown-as-ordinary",
       "source": "collab/server/src/evidence/s3-store.ts",
-      "original_sha256": "a07188012a96466eabaafee9df3b7f6399f56a3cd14c66cea17705e19c786888",
+      "original_sha256": "492f47ac9fa5a08525c4528cf7e6fbfaf20c5426a0882f60e0b7340b40b10cc7",
       "negative": {
         "command": [
           "npm",
@@ -18,7 +18,7 @@
           "-t",
           "maps JSON and multipart promote ambiguity",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 1,
         "passed": 0,
@@ -44,7 +44,7 @@
           "-t",
           "maps JSON and multipart promote ambiguity",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 0,
         "passed": 1,
@@ -56,7 +56,7 @@
     {
       "name": "sdk-copy-replay",
       "source": "collab/server/src/evidence/s3-store.ts",
-      "original_sha256": "a07188012a96466eabaafee9df3b7f6399f56a3cd14c66cea17705e19c786888",
+      "original_sha256": "492f47ac9fa5a08525c4528cf7e6fbfaf20c5426a0882f60e0b7340b40b10cc7",
       "negative": {
         "command": [
           "npm",
@@ -70,12 +70,12 @@
           "-t",
           "one wire attempt through opaque production adapter for rejected",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 1,
         "passed": 0,
         "failed": 1,
-        "skipped": 11,
+        "skipped": 12,
         "failures": [
           {
             "test": "canonical CopyObject retry policy below SDK middleware one wire attempt through opaque production adapter for rejected",
@@ -96,19 +96,19 @@
           "-t",
           "one wire attempt through opaque production adapter for rejected",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 0,
         "passed": 1,
         "failed": 0,
-        "skipped": 11,
+        "skipped": 12,
         "failures": []
       }
     },
     {
       "name": "erase-uncertain-journal",
       "source": "collab/server/src/evidence/s3-store.ts",
-      "original_sha256": "a07188012a96466eabaafee9df3b7f6399f56a3cd14c66cea17705e19c786888",
+      "original_sha256": "492f47ac9fa5a08525c4528cf7e6fbfaf20c5426a0882f60e0b7340b40b10cc7",
       "negative": {
         "command": [
           "npm",
@@ -122,12 +122,12 @@
           "-t",
           "durable reopened objects and SQLite references",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 1,
         "passed": 0,
         "failed": 2,
-        "skipped": 10,
+        "skipped": 11,
         "failures": [
           {
             "test": "canonical CopyObject retry policy below SDK middleware durable reopened objects and SQLite references recover unresolved writer; adopted=false",
@@ -152,19 +152,19 @@
           "-t",
           "durable reopened objects and SQLite references",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 0,
         "passed": 2,
         "failed": 0,
-        "skipped": 10,
+        "skipped": 11,
         "failures": []
       }
     },
     {
       "name": "live-retry-intent",
       "source": "collab/web/src/investigations/strategies/shared/evidence-upload-reconciliation.ts",
-      "original_sha256": "aaa6f6654b203fe9982ebbefd7a230f9cb25033e8a3e061982c620e23094d104",
+      "original_sha256": "60eb8911ed6931dec347eb44d0c01891e9f4be8eda658da0e4aafa7b31d44996",
       "negative": {
         "command": [
           "npm",
@@ -178,12 +178,12 @@
           "-t",
           "freezes caller metadata",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 1,
         "passed": 0,
         "failed": 1,
-        "skipped": 14,
+        "skipped": 15,
         "failures": [
           {
             "test": "useEvidenceUploadReconciliation freezes caller metadata and original File while a new causal read unlocks retry",
@@ -204,19 +204,19 @@
           "-t",
           "freezes caller metadata",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 0,
         "passed": 1,
         "failed": 0,
-        "skipped": 14,
+        "skipped": 15,
         "failures": []
       }
     },
     {
       "name": "stale-read-unlock",
       "source": "collab/web/src/investigations/strategies/shared/evidence-upload-reconciliation.ts",
-      "original_sha256": "aaa6f6654b203fe9982ebbefd7a230f9cb25033e8a3e061982c620e23094d104",
+      "original_sha256": "60eb8911ed6931dec347eb44d0c01891e9f4be8eda658da0e4aafa7b31d44996",
       "negative": {
         "command": [
           "npm",
@@ -230,12 +230,12 @@
           "-t",
           "never unlocks from a pre-failure",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 1,
         "passed": 0,
         "failed": 1,
-        "skipped": 14,
+        "skipped": 15,
         "failures": [
           {
             "test": "useEvidenceUploadReconciliation never unlocks from a pre-failure completion or another allocated ready snapshot",
@@ -256,19 +256,19 @@
           "-t",
           "never unlocks from a pre-failure",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 0,
         "passed": 1,
         "failed": 0,
-        "skipped": 14,
+        "skipped": 15,
         "failures": []
       }
     },
     {
       "name": "obsolete-scope-callback",
       "source": "collab/web/src/investigations/strategies/shared/evidence-upload-reconciliation.ts",
-      "original_sha256": "aaa6f6654b203fe9982ebbefd7a230f9cb25033e8a3e061982c620e23094d104",
+      "original_sha256": "60eb8911ed6931dec347eb44d0c01891e9f4be8eda658da0e4aafa7b31d44996",
       "negative": {
         "command": [
           "npm",
@@ -282,12 +282,12 @@
           "-t",
           "drops obsolete callbacks on B and A-B-A",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 1,
         "passed": 0,
         "failed": 1,
-        "skipped": 14,
+        "skipped": 15,
         "failures": [
           {
             "test": "useEvidenceUploadReconciliation drops obsolete callbacks on B and A-B-A reuse",
@@ -308,19 +308,19 @@
           "-t",
           "drops obsolete callbacks on B and A-B-A",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 0,
         "passed": 1,
         "failed": 0,
-        "skipped": 14,
+        "skipped": 15,
         "failures": []
       }
     },
     {
       "name": "double-upload",
       "source": "collab/web/src/investigations/strategies/shared/evidence-upload-reconciliation.ts",
-      "original_sha256": "aaa6f6654b203fe9982ebbefd7a230f9cb25033e8a3e061982c620e23094d104",
+      "original_sha256": "60eb8911ed6931dec347eb44d0c01891e9f4be8eda658da0e4aafa7b31d44996",
       "negative": {
         "command": [
           "npm",
@@ -334,12 +334,12 @@
           "-t",
           "direct submits cannot bypass recovery",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/negative.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 1,
         "passed": 0,
         "failed": 1,
-        "skipped": 2,
+        "skipped": 3,
         "failures": [
           {
             "test": "evidence recovery form handlers direct submits cannot bypass recovery and retry ignores programmatically changed disabled controls",
@@ -360,12 +360,12 @@
           "-t",
           "direct submits cannot bypass recovery",
           "--reporter=json",
-          "--outputFile=/var/folders/g9/6_vmtkmx60lghgjjrm_lqcrw0000gn/T/cd-s3-mutants-5wqeo5iv/positive.json"
+          "--outputFile=<temporary-json>"
         ],
         "exit": 0,
         "passed": 1,
         "failed": 0,
-        "skipped": 2,
+        "skipped": 3,
         "failures": []
       }
     }

@@ -36,3 +36,18 @@ inspection (avoiding concurrent mutations); no GitHub approval submitted.
 The reviewer confirmed prior server findings were repaired at that inspected
 candidate, subject to fixture/provider limits. Final revised candidate review
 and exact local qualification identity are recorded in the evidence-only follow-up.
+
+## Repaired candidate closure
+
+The separate same-model reviewer inspected final C
+`0959e1e3eab8a933ba80d9cc2c8a8b2af022267a`, tree
+`07e03204db9702683708f8f5ce3b279faef4e050`. It verified the repaired scope,
+causal-read and success-notice behavior and the complete four-file compatibility
+delta restoring Investigation First Annotation/grid, Beacon field styles and
+capitalized kind labels. Updated test locators match those restored contracts;
+existing spec 27 remains unchanged. Recovery, retry readiness and server behavior
+were unchanged by the compatibility repair. No new blocking findings; prior
+closures remain valid, subject to stated provider/fixture limits. Inspection
+was read-only: the reviewer executed no tests and submitted no GitHub approval.
+It is not cross-model review. Exact-C execution was performed separately by
+Codex and is recorded in `S3_GATE_EVIDENCE.json`.
