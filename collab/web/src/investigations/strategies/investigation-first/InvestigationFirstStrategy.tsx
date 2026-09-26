@@ -220,6 +220,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   );
   const collectionView = collection.view;
   const investigation = selectResourceView(runtime.resources.investigation);
+  const uploadLifecycle = selectResourceView(runtime.resources.lifecycle);
   const evidenceInventory = selectEvidenceInventory(runtime.resources.evidence, runtime.resources.contributions);
   const artifactAnnotationView = selectResourceView(runtime.resources.artifactAnnotations);
   const artifactAnnotations = artifactAnnotationView.availability === "available"
@@ -472,7 +473,6 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     const inventory = evidenceInventory.inventory;
     const summaryAnnotations = evidenceInventory.annotations;
     const upload = runtime.mutations.uploadEvidence;
-    const uploadCommand = runtime.commands.uploadEvidence;
     const previewState = runtime.evidencePreview.state;
     const busy = inventory.availability === "loading"
       || (inventory.availability === "available" && inventory.refresh === "loading")
@@ -596,8 +596,8 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         trashDescriptionId="investigation-first-trash-description"
       />
       {upload.status === "failed" && !("reason" in upload.error && upload.error.reason === "commit_outcome_unknown") ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
-      {uploadCommand !== null ? <EvidenceUploadReconciliationForm variant="investigation-first"
-        scopeKey={[runtime.presentationScopeKey, runtime.resources.investigation.status === "ready" ? runtime.resources.investigation.value.id : "unavailable", runtime.capabilities.canRead, runtime.capabilities.canUpload, runtime.capabilities.canReadPrivate, runtime.resources.lifecycle.status === "ready" ? JSON.stringify(runtime.resources.lifecycle.value) : runtime.resources.lifecycle.status].join("\0")}
+      {runtime.capabilities.canUpload && investigation.availability === "available" && investigation.value.status !== "archived" ? <EvidenceUploadReconciliationForm variant="investigation-first"
+        scopeKey={[runtime.presentationScopeKey, investigation.availability === "available" ? investigation.value.id : "unavailable", runtime.capabilities.canRead, runtime.capabilities.canUpload, runtime.capabilities.canReadPrivate, uploadLifecycle.availability === "available" ? JSON.stringify(uploadLifecycle.value) : uploadLifecycle.availability].join("\0")}
         canRead={runtime.capabilities.canRead} canUpload={runtime.capabilities.canUpload} canReadPrivate={runtime.capabilities.canReadPrivate}
         readCompletion={runtime.resources.evidenceReadCompletion ?? { requested: 0, succeeded: -1, failed: -1 }}
         refreshEvidence={runtime.refresh.evidence} upload={runtime.commands.uploadEvidence} /> : null}

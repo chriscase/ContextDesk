@@ -82,6 +82,7 @@ function ScopedEvidenceUploadForm(props: EvidenceUploadReconciliationFormProps &
   return (
     <form ref={formRef} className={`${className} evidence-reconciliation`} onSubmit={(event) => void onSubmit(event)} aria-busy={reconciliation.submitting}>
       <h4>{props.variant === "beacon" ? "Attach evidence" : "Add evidence"}</h4>
+      {reconciliation.phase === "succeeded" ? <p id={noticeId} ref={noticeRef} tabIndex={-1} role="status">Evidence added to the inventory.</p> : null}
       {reconciliation.phase === "refreshing" ? (
         <p id={noticeId} ref={noticeRef} tabIndex={-1} role="status">The upload result is unconfirmed. The original file and privacy choice stay locked while the inventory refreshes.</p>
       ) : null}

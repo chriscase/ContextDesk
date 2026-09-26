@@ -96,7 +96,7 @@ A matching filename is not a commit receipt. Review the recorded evidence and
 its privacy before retrying: identical bytes may still produce another artifact
 and summary. Scope or private-access changes discard the old draft rather than
 broaden disclosure. The in-memory intent does not survive reloads. See
-[the S3 operator guide](war-room-s3-evidence-store.md#when-an-upload-result-is-unconfirmed)
+help://war-room-s3-evidence-store
 for uncertainty and authoritative recovery boundaries. This interaction is a
 Goal 05 draft change; its evidence is in the
-[receipt](../../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md).
+repository receipt `docs/goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md`.

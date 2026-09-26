@@ -47,6 +47,18 @@ describe("useEvidenceUploadReconciliation", () => {
     expect(view.result.current.phase).toBe("review");
     expect(view.upload).toHaveBeenCalledTimes(1);
   });
+  it("a newer external evidence refresh or failed read blocks a previously reviewed retry", async () => {
+    const view = setup(); await submit(view);
+    view.rerender({ ...view.initialProps, readCompletion: { requested: 1, succeeded: 1, failed: -1 } });
+    expect(view.result.current.readyToRetry).toBe(true);
+    view.rerender({ ...view.initialProps, readCompletion: { requested: 2, succeeded: 1, failed: -1 } });
+    expect(view.result.current.phase).toBe("refreshing");
+    await submit(view, intent, "retry"); expect(view.upload).toHaveBeenCalledTimes(1);
+    view.rerender({ ...view.initialProps, readCompletion: { requested: 2, succeeded: 1, failed: 2 } });
+    expect(view.result.current.phase).toBe("refresh_failed"); expect(view.result.current.readyToRetry).toBe(false);
+    view.rerender({ ...view.initialProps, readCompletion: { requested: 3, succeeded: 3, failed: 2 } });
+    expect(view.result.current.readyToRetry).toBe(true);
+  });
   it("accepts a qualifying read that finishes immediately before upload outcome publication", async () => {
     const view = setup();
     view.rerender({ ...view.initialProps, readCompletion: { requested: 1, succeeded: 1, failed: -1 } });

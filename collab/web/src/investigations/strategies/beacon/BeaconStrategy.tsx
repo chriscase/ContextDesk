@@ -272,6 +272,8 @@ function EntryComposer({ investigation }: { readonly investigation: CaseV1 }) {
 
 function EvidenceCard() {
   const runtime = useInvestigationRuntime();
+  const uploadInvestigation = selectResourceView(runtime.resources.investigation);
+  const uploadLifecycle = selectResourceView(runtime.resources.lifecycle);
   const view = selectResourceView(runtime.resources.evidence);
   const busy = runtime.mutations.uploadEvidence.status === "running";
   return (
@@ -282,7 +284,7 @@ function EvidenceCard() {
       {view.availability === "available" && view.value.length === 0 ? <StrategyStateNotice>No supporting material has been recorded yet.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length > 0 ? <ul className="beacon__evidence-list">{view.value.map((item) => <li key={item.id}><span><strong>{item.filename || item.uri || "Unnamed evidence"}</strong><small>{item.kind} · {item.mediaType || "media type not recorded"} · {item.privacyClass === "owner_only" ? "owner only" : "share safe"}</small></span><StrategyBadge>{item.verificationStatus || "verification not recorded"}</StrategyBadge></li>)}</ul> : null}
       <EvidenceUploadReconciliationForm variant="beacon"
-        scopeKey={[runtime.presentationScopeKey, runtime.resources.investigation.status === "ready" ? runtime.resources.investigation.value.id : "unavailable", runtime.capabilities.canRead, runtime.capabilities.canUpload, runtime.capabilities.canReadPrivate, runtime.resources.lifecycle.status === "ready" ? JSON.stringify(runtime.resources.lifecycle.value) : runtime.resources.lifecycle.status].join("\0")}
+        scopeKey={[runtime.presentationScopeKey, uploadInvestigation.availability === "available" ? uploadInvestigation.value.id : "unavailable", runtime.capabilities.canRead, runtime.capabilities.canUpload, runtime.capabilities.canReadPrivate, uploadLifecycle.availability === "available" ? JSON.stringify(uploadLifecycle.value) : uploadLifecycle.availability].join("\0")}
         canRead={runtime.capabilities.canRead} canUpload={runtime.capabilities.canUpload} canReadPrivate={runtime.capabilities.canReadPrivate}
         readCompletion={runtime.resources.evidenceReadCompletion ?? { requested: 0, succeeded: -1, failed: -1 }}
         refreshEvidence={runtime.refresh.evidence} upload={runtime.commands.uploadEvidence} />

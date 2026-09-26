@@ -22,6 +22,17 @@ SDK test SHA-256:
 
 ## Final candidate review
 
-Requested after publication of functional candidate C. Exact revision/tree,
-execution status, findings and residuals will be recorded here in an evidence-only
-follow-up, and remain distinct from GitHub review approval.
+Fresh separate same-model read-only review inspected candidate
+`b38e5973b74ae5a884a6957d801c184bbd050440`, tree
+`69940c298b113b7b4c531da7bbd62bf81ad64bb0`. No tests executed during that
+inspection (avoiding concurrent mutations); no GitHub approval submitted.
+
+| Finding | Repair and named regression |
+|---|---|
+| P1 unchanged case/lifecycle refresh could remount and erase frozen intent | Scope derives from retained authoritative ResourceView values. Investigation First keeps the form mounted while Runtime temporarily withholds its upload command. Both real Runtime/strategy tests retain the identical frozen form through delayed/failed/unchanged case and lifecycle reads. |
+| P2 newer external inventory refresh/failure could leave stale retry enabled | Review requires success at or beyond both original barrier and latest requested generation; external pending/failed read blocks retry. Named hook test covers readiness → newer loading → failure → new successful read. |
+| P2 validated success had no distinct announced confirmation | Scoped semantic success notice and focus after first upload/retry, with form, strategy and browser assertions. |
+
+The reviewer confirmed prior server findings were repaired at that inspected
+candidate, subject to fixture/provider limits. Final revised candidate review
+and exact local qualification identity are recorded in the evidence-only follow-up.

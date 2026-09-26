@@ -44,3 +44,23 @@ retries unless explicitly stated. Hosted CI is separate.
 No raw recovery archive, private database, credentials, signed URL or production
 endpoint is published. Failure summaries above are sanitized. The initial
 review is in [S3_INDEPENDENT_REVIEW.md](S3_INDEPENDENT_REVIEW.md).
+
+## First committed candidate review checkpoint
+
+Candidate `b38e5973b74ae5a884a6957d801c184bbd050440` / tree
+`69940c298b113b7b4c531da7bbd62bf81ad64bb0` passed collaboration typecheck,
+lint, contract/server/web tests (web 1651), production build, E2E typecheck,
+dependency boundary, fixture privacy, Help drift, claims regression tests,
+scenario matrix and diff. `check_claims.sh` failed because new Help prose used
+ordinary Markdown links that HelpMarkdown renders literally; corrected to
+supported Help locators/plain repository references. The independent review
+found three client issues recorded in `S3_INDEPENDENT_REVIEW.md`; all required
+functional repairs and additional regressions are committed before the final
+qualification candidate. Final exact-revision gates are rerun on that candidate.
+
+Publication was automatically rejected: reviewer considered the visible user
+request authorization to read the objective, not public transfer of code/docs.
+Read-only checks confirmed public `chriscase/ContextDesk`, signed-in ADMIN access,
+and owner-authored draft #1184 on the exact branch. A proof-backed retry was
+still rejected. Explicit publication approval was requested while local work
+continued. No alternate transfer route or indirect bypass was used.

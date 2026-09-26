@@ -10,7 +10,7 @@ export interface FrozenUploadIntent {
   readonly clientTime?: string;
   readonly sourceId?: string;
 }
-export type ReconciliationPhase = "editing" | "submitting" | "refreshing" | "refresh_failed" | "review" | "ordinary_failure";
+export type ReconciliationPhase = "editing" | "submitting" | "refreshing" | "refresh_failed" | "review" | "ordinary_failure" | "succeeded";
 export interface ReconciliationUploadResult {
   readonly status: "succeeded" | "failed" | "ignored";
   readonly error?: { readonly kind?: string; readonly reason?: string };
@@ -55,10 +55,11 @@ export function useEvidenceUploadReconciliation(options: {
   }, []);
   const allowed = () => isCurrent() && latest.current.canSubmit !== false
     && !(active.intent?.privacyClass === "owner_only" && !latest.current.canReadPrivate);
+  const requiredRead = () => Math.max(active.barrier ?? Infinity, latest.current.readCompletion.requested);
   const reviewed = () => active.barrier !== null
-    && latest.current.readCompletion.succeeded >= active.barrier;
-  const phase = active.phase === "refreshing" || active.phase === "refresh_failed"
-    ? reviewed() ? "review" : active.barrier !== null && options.readCompletion.failed >= active.barrier ? "refresh_failed" : "refreshing"
+    && latest.current.readCompletion.succeeded >= requiredRead();
+  const phase = active.phase === "refreshing" || active.phase === "refresh_failed" || active.phase === "review"
+    ? reviewed() ? "review" : active.barrier !== null && options.readCompletion.failed >= requiredRead() ? "refresh_failed" : "refreshing"
     : active.phase;
   async function submit(next: FrozenUploadIntent, source: "form" | "retry"): Promise<ReconciliationUploadResult | undefined> {
     if (!allowed() || active.busy) return;
@@ -80,7 +81,7 @@ export function useEvidenceUploadReconciliation(options: {
     if (result.status === "succeeded") {
       active.intent = null;
       active.barrier = null;
-      active.phase = "editing";
+      active.phase = "succeeded";
     } else if (result.status === "failed" && result.error?.kind === "unavailable" && result.error.reason === "commit_outcome_unknown") {
       // The Runtime triggered this generation synchronously on the exact marker.
       // A legacy injected Runtime without provenance fails closed until explicit refresh.

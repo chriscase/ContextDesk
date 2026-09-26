@@ -767,7 +767,7 @@ under readiness rules. Do not manually erase pending records or objects to
 make an uncertain upload look settled.
 
 The draft implementation and qualification limits are recorded in
-[Goal 05 receipt](../../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md).
+repository file `docs/goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md`.
 The disposable SDK-handler fault harness qualifies the installed SDK and real
 application wiring; it is not live AWS or Garage vendor certification.
 

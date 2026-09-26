@@ -33,6 +33,16 @@ describe("evidence recovery form handlers", () => {
     expect(calls).toHaveLength(2); expect(calls[1]![0]).toEqual(calls[0]![0]);
     expect(calls[1]![0]).toMatchObject({ file: original, summary: "  original summary  ", kind: "log", privacyClass: "owner_only" });
   });
+  it("announces validated first-upload success and resets the original file and summary", async () => {
+    const initial = { ...props(), upload: vi.fn(async () => ({ status: "succeeded" as const })) };
+    render(<EvidenceUploadReconciliationForm {...initial} />); fill();
+    await act(async () => fireEvent.submit(screen.getByLabelText("File").closest("form")!));
+    expect(screen.getByText("Evidence added to the inventory.").getAttribute("role")).toBe("status");
+    expect(document.activeElement).toBe(screen.getByText("Evidence added to the inventory."));
+    expect((screen.getByLabelText("Summary") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("File") as HTMLInputElement).value).toBe("");
+    expect(initial.upload).toHaveBeenCalledTimes(1);
+  });
   it("scope replacement drops controls synchronously and a detached captured form cannot write into A-B-A", async () => {
     const initial = props(); const view = render(<EvidenceUploadReconciliationForm {...initial} />); fill();
     const oldForm = screen.getByLabelText("File").closest("form")!;

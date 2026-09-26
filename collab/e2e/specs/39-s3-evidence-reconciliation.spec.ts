@@ -440,6 +440,7 @@ for (const surface of SURFACES) {
           expect(canonicalUpload(posts[2]!)).toEqual(canonicalUpload(posts[0]!));
           expect(canonicalUpload(posts[0]!).idempotency).toEqual({ headers: {}, field: null });
           await expect(surface.file(page)).toBeEnabled();
+          await expect(page.locator(".evidence-reconciliation").getByRole("status")).toHaveText("Evidence added to the inventory.");
           await expect(surface.summary(page)).toHaveValue("");
           const inventory = await page.request.get(`/api/cases/${caseId}/evidence`);
           expect((await inventory.json() as { artifacts: unknown[] }).artifacts).toHaveLength(1);
