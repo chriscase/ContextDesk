@@ -10,7 +10,7 @@ function props(): EvidenceUploadReconciliationFormProps {
 }
 function fill() {
   fireEvent.change(screen.getByLabelText("File"), { target: { files: [original] } });
-  fireEvent.change(screen.getByLabelText("Summary"), { target: { value: "  original summary  " } });
+  fireEvent.change(screen.getByLabelText("Annotation"), { target: { value: "  original summary  " } });
   fireEvent.change(screen.getByRole("combobox", { name: "Kind" }), { target: { value: "log" } });
 }
 describe("evidence recovery form handlers", () => {
@@ -39,7 +39,7 @@ describe("evidence recovery form handlers", () => {
     await act(async () => fireEvent.submit(screen.getByLabelText("File").closest("form")!));
     expect(screen.getByText("Evidence added to the inventory.").getAttribute("role")).toBe("status");
     expect(document.activeElement).toBe(screen.getByText("Evidence added to the inventory."));
-    expect((screen.getByLabelText("Summary") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Annotation") as HTMLInputElement).value).toBe("");
     expect((screen.getByLabelText("File") as HTMLInputElement).value).toBe("");
     expect(initial.upload).toHaveBeenCalledTimes(1);
   });
@@ -48,7 +48,7 @@ describe("evidence recovery form handlers", () => {
     const oldForm = screen.getByLabelText("File").closest("form")!;
     await act(async () => fireEvent.submit(oldForm));
     view.rerender(<EvidenceUploadReconciliationForm {...initial} scopeKey="B" />);
-    expect((screen.getByLabelText("Summary") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Annotation") as HTMLInputElement).value).toBe("");
     view.rerender(<EvidenceUploadReconciliationForm {...initial} />);
     await act(async () => fireEvent.submit(oldForm));
     expect(initial.upload).toHaveBeenCalledTimes(1);

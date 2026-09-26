@@ -93,21 +93,23 @@ function ScopedEvidenceUploadForm(props: EvidenceUploadReconciliationFormProps &
         <p id={noticeId} ref={noticeRef} tabIndex={-1} role="status">Review the refreshed inventory for {reconciliation.intent.file.name} ({reconciliation.intent.privacyClass === "owner_only" ? "owner only" : "share safe"}). Then retry that original upload or finish without another write.</p>
       ) : null}
       {reconciliation.ordinaryMessage ? <p id={noticeId} ref={noticeRef} tabIndex={-1} role="alert">{reconciliation.ordinaryMessage}</p> : null}
-      <label>{props.variant === "beacon" ? "File (server-configured limit)" : "File"}<input name="file" type="file" aria-describedby={locked ? noticeId : undefined} disabled={locked || reconciliation.submitting} /></label>
-      <label>Kind
+      {privacyNotice ? <p role="alert">Private evidence access changed. Choose a privacy level again and select a new file.</p> : null}
+      <div className={props.variant === "beacon" ? "beacon__upload-grid" : "investigation-first__upload-grid"}>
+      <label className={props.variant === "beacon" ? "beacon__field" : undefined}>{props.variant === "beacon" ? "File (server-configured limit)" : "File"}<input name="file" type="file" aria-describedby={locked ? noticeId : undefined} disabled={locked || reconciliation.submitting} /></label>
+      <label className={props.variant === "beacon" ? "beacon__field" : undefined}>Kind
         <select name="kind" value={locked && reconciliation.intent ? reconciliation.intent.kind : kind} disabled={locked || reconciliation.submitting} onChange={(event) => setKind(event.target.value as (typeof KINDS)[number])}>
-          {KINDS.map((option) => <option key={option} value={option}>{option}</option>)}
+          {KINDS.map((option) => <option key={option} value={option}>{option === "attachment" ? "Attachment" : option === "log" ? "Log" : "Email"}</option>)}
         </select>
       </label>
-      <label>Privacy
+      <label className={props.variant === "beacon" ? "beacon__field" : undefined}>Privacy
         <select name="privacyClass" value={locked && reconciliation.intent ? reconciliation.intent.privacyClass : privacyClass} disabled={locked || reconciliation.submitting} onChange={(event) => { setPrivacyClass(event.target.value === "owner_only" && props.canReadPrivate ? "owner_only" : "share_safe"); setPrivacyNotice(false); }}>
           {privacyNotice ? <option value="">Choose privacy</option> : null}
           {props.canReadPrivate ? <option value="owner_only">Owner only</option> : null}
           <option value="share_safe">Share safe</option>
         </select>
       </label>
-      {privacyNotice ? <p role="alert">Private evidence access changed. Choose a privacy level again and select a new file.</p> : null}
-      <label>{props.variant === "beacon" ? "Why does this matter?" : "Summary"}<input name="summary" placeholder="What is this file and why does it matter?" aria-describedby={locked ? noticeId : undefined} value={locked && reconciliation.intent ? reconciliation.intent.summary : summary} disabled={locked || reconciliation.submitting} onChange={(event) => setSummary(event.target.value)} /></label>
+      <label className={props.variant === "beacon" ? "beacon__field beacon__field--wide" : "investigation-first__field--wide"}>{props.variant === "beacon" ? "Why does this matter?" : "Annotation"}<input name="summary" placeholder="What is this file and why does it matter?" aria-describedby={locked ? noticeId : undefined} value={locked && reconciliation.intent ? reconciliation.intent.summary : summary} disabled={locked || reconciliation.submitting} onChange={(event) => setSummary(event.target.value)} /></label>
+      </div>
       {reconciliation.phase === "review" ? (
         <div>
           <button type="button" disabled={!reconciliation.readyToRetry} onClick={() => void retry()}>Retry original upload</button>

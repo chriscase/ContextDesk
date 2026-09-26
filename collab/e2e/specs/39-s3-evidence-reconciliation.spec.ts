@@ -60,7 +60,7 @@ const SURFACES: readonly Surface[] = [
   { id: "beacon", name: "Beacon" },
 ].map((surface) => ({ ...surface,
   file: (page: Page) => page.locator(".evidence-reconciliation").getByLabel(surface.id === "beacon" ? "File (server-configured limit)" : "File", { exact: true }),
-  summary: (page: Page) => page.locator(".evidence-reconciliation").getByLabel(surface.id === "beacon" ? "Why does this matter?" : "Summary", { exact: true }),
+  summary: (page: Page) => page.locator(".evidence-reconciliation").getByLabel(surface.id === "beacon" ? "Why does this matter?" : "Annotation", { exact: true }),
   kind: (page: Page) => page.locator(".evidence-reconciliation").getByRole("combobox", { name: "Kind", exact: true }),
   privacy: (page: Page) => page.locator(".evidence-reconciliation").getByRole("combobox", { name: "Privacy", exact: true }),
   submit: (page: Page) => page.locator(".evidence-reconciliation").getByRole("button", { name: surface.id === "beacon" ? "Attach evidence" : "Add to evidence inventory" }),

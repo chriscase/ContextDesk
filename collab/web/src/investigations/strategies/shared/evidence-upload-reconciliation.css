@@ -7,3 +7,5 @@
 @media (forced-colors: active) {
   .evidence-reconciliation button:focus-visible, .evidence-reconciliation p:focus { outline: 2px solid Highlight; }
 }
+
+.beacon__upload-grid { display: contents; }
