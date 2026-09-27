@@ -40,6 +40,8 @@ import {
 
 export interface S3EvidenceClient {
   send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown>;
+  /** Private provider capability: one canonical copy with failure-stage evidence. */
+  copyCanonical?: ((command: unknown, operation: string) => Promise<unknown>) | undefined;
   /**
    * Optional opaque stream-upload capability supplied by the provider
    * adapter. It keeps the concrete SDK client and credentials behind the
@@ -142,14 +144,80 @@ export function createTrackedAbortUploadClient(
   };
 }
 
+/** Installed SDK/transport boundary; credentials and response bytes never escape. */
+export async function sendSingleCanonicalCopy(
+  client: S3Client,
+  command: unknown,
+  operation: string,
+  idleTimeoutMs = 15_000,
+): Promise<unknown> {
+  let dispatched = false;
+  let completeServiceError = false;
+  const underlying = client.config.requestHandler;
+  const requestHandler: typeof underlying = {
+    handle: async (request, options) => {
+      dispatched = true;
+      const handled = await underlying.handle(request, options);
+      const response = handled.response;
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      for await (const chunk of iterateObjectBody(response.body ?? new Uint8Array(), operation, undefined, idleTimeoutMs)) {
+        size += chunk.byteLength;
+        if (size > 65_536) throw new S3EvidenceError(operation, "unavailable", { commitOutcomeUnknown: true });
+        chunks.push(Uint8Array.from(chunk));
+      }
+      const bytes = concatBytes(chunks, size);
+      const body = new TextDecoder().decode(bytes);
+      // A closed Error envelope plus the SDK's parsed service exception differs
+      // from its synthesized InternalError for an empty or incomplete 200 body.
+      completeServiceError = /<Error(?:\s[^>]*)?>[\s\S]*<Code>[^<]+<\/Code>[\s\S]*<\/Error>\s*$/.test(body);
+      if (response.statusCode >= 200 && response.statusCode < 300 && !completeServiceError
+        && !/<CopyObjectResult(?:\s[^>]*)?>[\s\S]*<\/CopyObjectResult>\s*$/.test(body)) {
+        throw new S3EvidenceError(operation, "unavailable", { commitOutcomeUnknown: true });
+      }
+      return { ...handled, response: { ...response, body: bytes } };
+    },
+  };
+  const scoped = new S3Client({
+    ...client.config,
+    requestHandler,
+    maxAttempts: 1,
+    retryStrategy: new ConfiguredRetryStrategy(1, 0),
+  } as unknown as S3ClientConfig);
+  try { return await scoped.send(command as never); }
+  catch (error) {
+    if (error instanceof S3EvidenceError && error.commitOutcomeUnknown) throw error;
+    const parsedServiceError = error !== null && typeof error === "object" && "$fault" in error;
+    const uncertain = dispatched && !(completeServiceError && parsedServiceError);
+    throw new S3EvidenceError(operation, "unavailable", { commitOutcomeUnknown: uncertain, retainPendingJournal: uncertain });
+  }
+}
+
+const CANONICAL_COMMIT_OPERATIONS = new Set(["commit", "promote"]);
+
 export class S3EvidenceError extends Error {
   readonly operation: string;
+  readonly commitOutcomeUnknown: boolean;
+  readonly retainPendingJournal: boolean;
 
-  constructor(operation: string, reason: string) {
+  constructor(
+    operation: string,
+    reason: string,
+    options?: { readonly commitOutcomeUnknown?: boolean; readonly retainPendingJournal?: boolean },
+  ) {
     super(`s3 evidence ${operation} failed: ${reason}`);
     this.name = "S3EvidenceError";
     this.operation = operation;
+    this.commitOutcomeUnknown = options?.commitOutcomeUnknown === true;
+    this.retainPendingJournal = this.commitOutcomeUnknown || options?.retainPendingJournal === true;
   }
+}
+
+/** Canonical promote/commit uncertainty only. A stray flag on put/head is ordinary unavailability. */
+export function isS3CommitOutcomeUnknown(err: unknown): boolean {
+  return err instanceof S3EvidenceError
+    && err.commitOutcomeUnknown
+    && CANONICAL_COMMIT_OPERATIONS.has(err.operation);
 }
 
 const FILE_REF_ID_RE =
@@ -371,6 +439,7 @@ export class S3EvidenceStore implements EvidenceStore {
     let released = false;
     let rolledBack = false;
     let ownershipUnknown = false;
+    let publicOutcomeUnknown = false;
     let journalId: string | null = null;
     const withWriteLock = async (fn: () => Promise<void>): Promise<void> => {
       const releaseWrite = await this.acquireWriteLock();
@@ -389,6 +458,14 @@ export class S3EvidenceStore implements EvidenceStore {
       commit: async () => {
         await withWriteLock(async () => {
           if (committed) return;
+          if (rolledBack || released) throw new S3EvidenceError("commit", "unavailable");
+          if (ownershipUnknown) {
+            if (await this.inspectCanonical(hash, bytes.byteLength) !== "match") {
+              throw new S3EvidenceError("commit", "unavailable", { commitOutcomeUnknown: publicOutcomeUnknown, retainPendingJournal: true });
+            }
+            committed = true;
+            return;
+          }
           if (rolledBack || released) throw new S3EvidenceError("commit", "unavailable");
           if (!stagingObjectKey) throw new S3EvidenceError("commit", "unavailable");
           const already = await this.head(hash);
@@ -412,7 +489,11 @@ export class S3EvidenceStore implements EvidenceStore {
             await this.deleteObjectBestEffort("commit", stagingObjectKey);
             return;
           }
-          if (outcome === "unknown") ownershipUnknown = true;
+          if (outcome === "unknown" || outcome === "unavailable") {
+            ownershipUnknown = true;
+            publicOutcomeUnknown = outcome === "unknown";
+            throw new S3EvidenceError("commit", "unavailable", { commitOutcomeUnknown: outcome === "unknown", retainPendingJournal: true });
+          }
           throw new S3EvidenceError("commit", "unavailable");
         });
       },
@@ -614,7 +695,12 @@ export class S3EvidenceStore implements EvidenceStore {
           retainWriteLock = true;
           return;
         }
-        if (outcome === "unknown") ownershipUnknown = true;
+        if (outcome === "unknown" || outcome === "unavailable") {
+          ownershipUnknown = true;
+          releaseLifecycleLock = releaseWrite;
+          retainWriteLock = true;
+          throw new S3EvidenceError("promote", "unavailable", { commitOutcomeUnknown: outcome === "unknown", retainPendingJournal: true });
+        }
         releaseLifecycleLock = releaseWrite;
         retainWriteLock = true;
         throw new S3EvidenceError("promote", "unavailable");
@@ -1155,21 +1241,37 @@ export class S3EvidenceStore implements EvidenceStore {
     }
   }
 
-  async copyObject(fromKey: string, toKey: string, operation: string): Promise<void> {
-    try {
-      await this.send(
-        operation,
-        new CopyObjectCommand({
-          Bucket: this.bucket,
-          Key: toKey,
-          CopySource: encodeCopySource(this.bucket, fromKey),
-          MetadataDirective: "COPY",
-        }),
-      );
-    } catch (error) {
+  private async sendCanonicalCopy(operation: string, command: unknown): Promise<unknown> {
+    if (this.client.copyCanonical) return this.client.copyCanonical(command, operation);
+    if (this.client instanceof S3Client) return sendSingleCanonicalCopy(this.client, command, operation, this.responseBodyIdleTimeoutMs);
+    try { return await this.client.send(command); }
+    catch (error) {
       if (error instanceof S3EvidenceError) throw error;
-      throw new S3EvidenceError(operation, "unavailable");
+      // Provider doubles have no wire witness. Named transport failures are
+      // uncertain; unclassified failures retain ownership without a public marker.
+      const record = error !== null && typeof error === "object" ? error as Record<string, unknown> : {};
+      const code = record.code ?? record.name;
+      const transport = ["ECONNRESET", "ETIMEDOUT", "EPIPE", "TimeoutError", "RequestTimeout"].includes(String(code));
+      const metadata = record.$metadata as { httpStatusCode?: number } | undefined;
+      const rejected = typeof metadata?.httpStatusCode === "number" && metadata.httpStatusCode >= 400
+        && (typeof record.Code === "string" || record.$fault !== undefined);
+      throw new S3EvidenceError(operation, "unavailable", {
+        commitOutcomeUnknown: transport,
+        retainPendingJournal: !rejected,
+      });
     }
+  }
+
+  async copyObject(fromKey: string, toKey: string, operation: string): Promise<void> {
+    await this.sendCanonicalCopy(
+      operation,
+      new CopyObjectCommand({
+        Bucket: this.bucket,
+        Key: toKey,
+        CopySource: encodeCopySource(this.bucket, fromKey),
+        MetadataDirective: "COPY",
+      }),
+    );
   }
 
   async copyCanonicalObject(
@@ -1177,17 +1279,21 @@ export class S3EvidenceStore implements EvidenceStore {
     hash: ContentHash,
     byteLength: number,
     operation: string,
-  ): Promise<"applied" | "absent" | "unknown"> {
+  ): Promise<"applied" | "absent" | "unknown" | "unavailable"> {
     const toKey = this.blobKey(hash);
     this.invalidateVerifiedGeneration(toKey);
+    let failure: S3EvidenceError | null = null;
     try {
       await this.copyObject(fromKey, toKey, operation);
-    } catch {
-      // Destination is still inspected below. A thrown CopyObject may have
-      // applied bytes; absent vs unknown is decided from Head/Get, not the throw.
+    } catch (error) {
+      failure = error instanceof S3EvidenceError ? error : new S3EvidenceError(operation, "unavailable", { retainPendingJournal: true });
     }
     this.invalidateVerifiedGeneration(toKey);
-    return this.probeCanonicalCopy(hash, byteLength, operation);
+    const observed = await this.probeCanonicalCopy(hash, byteLength, operation);
+    if (observed === "applied") return "applied";
+    if (failure === null || failure.commitOutcomeUnknown) return "unknown";
+    if (failure?.retainPendingJournal || observed === "unknown") return "unavailable";
+    return observed;
   }
 
   async copyCanonicalObjectReplace(
@@ -1195,7 +1301,7 @@ export class S3EvidenceStore implements EvidenceStore {
     hash: ContentHash,
     meta: BlobMetaV1,
     operation: string,
-  ): Promise<"applied" | "absent" | "unknown"> {
+  ): Promise<"applied" | "absent" | "unknown" | "unavailable"> {
     const toKey = this.blobKey(hash);
     if (meta.contentType !== null) assertMetadataValue(meta.contentType, operation);
     const input: {
@@ -1214,21 +1320,25 @@ export class S3EvidenceStore implements EvidenceStore {
     };
     if (meta.contentType !== null) input.ContentType = meta.contentType;
     this.invalidateVerifiedGeneration(toKey);
+    let failure: S3EvidenceError | null = null;
     try {
-      await this.send(operation, new CopyObjectCommand(input));
-    } catch {
-      // Destination is still inspected below. A thrown CopyObject may have
-      // applied bytes; absent vs unknown is decided from Head/Get, not the throw.
+      await this.sendCanonicalCopy(operation, new CopyObjectCommand(input));
+    } catch (error) {
+      failure = error instanceof S3EvidenceError ? error : new S3EvidenceError(operation, "unavailable", { retainPendingJournal: true });
     }
     this.invalidateVerifiedGeneration(toKey);
-    return this.probeCanonicalCopy(hash, meta.byteLength, operation);
+    const observed = await this.probeCanonicalCopy(hash, meta.byteLength, operation);
+    if (observed === "applied") return "applied";
+    if (failure === null || failure.commitOutcomeUnknown) return "unknown";
+    if (failure?.retainPendingJournal || observed === "unknown") return "unavailable";
+    return observed;
   }
 
   private async probeCanonicalCopy(
     hash: ContentHash,
     byteLength: number,
     operation: string,
-  ): Promise<"applied" | "absent" | "unknown"> {
+  ): Promise<"applied" | "absent" | "unknown" | "unavailable"> {
     let present: boolean;
     try {
       present = await this.objectExists(this.blobKey(hash), operation);
@@ -1491,7 +1601,7 @@ export class S3EvidenceStore implements EvidenceStore {
     }
   }
 
-  private async loadBoundReferencedHashes(): Promise<Set<string>> {
+  async loadBoundReferencedHashes(): Promise<Set<string>> {
     const hashes = new Set<string>();
     for (const loader of this.referencedSources) {
       for (const hash of await loader()) {
@@ -2030,6 +2140,7 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
   private cleanupComplete = false;
   private promoted = false;
   private ownershipUnknown = false;
+  private publicOutcomeUnknown = false;
   private journalId: string | null = null;
   private plannedHashes: ContentHash[] | null = null;
 
@@ -2132,6 +2243,18 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
 
   async promote(): Promise<void> {
     if (this.promoted) return;
+    if (this.ownershipUnknown) {
+      for (const hash of this.plannedHashes ?? []) {
+        const staged = this.staged.get(hash);
+        if (!staged || await this.owner.inspectCanonical(hash, staged.meta.byteLength) !== "match") {
+          throw new S3EvidenceError("promote", "unavailable", { commitOutcomeUnknown: this.publicOutcomeUnknown, retainPendingJournal: true });
+        }
+      }
+      for (const hash of this.plannedHashes ?? []) if (!this.created.includes(hash)) this.created.push(hash);
+      this.ownershipUnknown = false;
+      this.promoted = true;
+      return;
+    }
     if (this.plannedHashes === null) {
       const planned: ContentHash[] = [];
       for (const [hash, staged] of this.staged) {
@@ -2172,7 +2295,11 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
         }
         continue;
       }
-      if (outcome === "unknown") this.ownershipUnknown = true;
+      if (outcome === "unknown" || outcome === "unavailable") {
+        this.ownershipUnknown = true;
+        this.publicOutcomeUnknown = outcome === "unknown";
+        throw new S3EvidenceError("promote", "unavailable", { commitOutcomeUnknown: outcome === "unknown", retainPendingJournal: true });
+      }
       throw new S3EvidenceError("promote", "unavailable");
     }
     this.ownershipUnknown = false;
@@ -2195,8 +2322,9 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
         this.ownershipUnknown
         || inspections.some((entry) => entry.inspection === "unknown" || entry.inspection === "mismatch");
       if (!retainJournal) {
+        const references = await this.owner.loadBoundReferencedHashes();
         for (const entry of [...inspections].reverse()) {
-          if (entry.inspection === "match") {
+          if (entry.inspection === "match" && !references.has(entry.hash)) {
             await this.owner.deleteObject("rollback", this.owner.blobKey(entry.hash));
           }
         }
@@ -2213,7 +2341,7 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
     if (this.cleanupComplete) return;
     await this.runExclusiveCleanup(async () => {
       await this.deleteStagingResidue("finalize");
-      if (!options?.retainPendingJournal && this.journalId) {
+      if (!options?.retainPendingJournal && !this.ownershipUnknown && this.journalId) {
         await this.owner.deletePendingJournal(this.journalId, "finalize");
         this.journalId = null;
       }

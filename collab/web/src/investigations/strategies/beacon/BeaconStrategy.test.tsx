@@ -350,14 +350,17 @@ describe("Beacon rapid-intake strategy", () => {
       capabilities: ["investigation:read", "investigation:write", "evidence:private:read"],
       shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
     });
-    const privacy = await screen.findByRole("combobox", { name: "Privacy" }) as HTMLSelectElement;
+    let privacy = await screen.findByRole("combobox", { name: "Privacy" }) as HTMLSelectElement;
     expect(privacy.value).toBe("owner_only");
-    const fileInput = screen.getByLabelText(/File \(server-configured limit\)/u) as HTMLInputElement;
+    let fileInput = screen.getByLabelText(/File \(server-configured limit\)/u) as HTMLInputElement;
     const privateFile = new File(["private draft"], "authority-change.log", { type: "text/plain" });
     Object.defineProperty(fileInput, "files", { configurable: true, value: [privateFile] });
     Object.defineProperty(fileInput, "value", { configurable: true, writable: true, value: "C:\\fakepath\\authority-change.log" });
     rerenderCapabilities(["investigation:read", "investigation:write"]);
-    await waitFor(() => expect(privacy.value).toBe(""));
+    await waitFor(() => expect((screen.getByRole("combobox", { name: "Privacy" }) as HTMLSelectElement).value).toBe(""));
+    expect(fileInput.isConnected).toBe(false);
+    privacy = screen.getByRole("combobox", { name: "Privacy" }) as HTMLSelectElement;
+    fileInput = screen.getByLabelText(/File \(server-configured limit\)/u) as HTMLInputElement;
     expect(fileInput.value).toBe("");
     expect(screen.queryByRole("option", { name: "Owner only" })).toBeNull();
     expect(screen.getByRole("alert").textContent).toMatch(/Choose a privacy level again/u);

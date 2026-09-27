@@ -109,6 +109,8 @@ export interface InvestigationRuntimeResources {
   readonly operationsQueueRequestGeneration: number;
   readonly investigation: ResourceState<CaseV1>;
   readonly evidence: ResourceState<readonly ArtifactV1[]>;
+  /** Read provenance; absent in legacy injected Runtime snapshots. */
+  readonly evidenceReadCompletion?: { readonly requested: number; readonly succeeded: number; readonly failed: number };
   readonly contributions: ResourceState<readonly ContributionV1[]>;
   readonly lifecycle: ResourceState<InvestigationLifecycleV1>;
   readonly coordination: ResourceState<InvestigationCoordinationV1>;
@@ -133,7 +135,7 @@ export interface InvestigationRuntimeRefresh {
   readonly investigationCollection: () => void;
   readonly operationsQueue: () => void;
   readonly investigation: () => void;
-  readonly evidence: () => void;
+  readonly evidence: () => number | void;
   readonly contributions: () => void;
   readonly lifecycle: () => void;
   readonly coordination: () => void;
@@ -537,8 +539,9 @@ export function InvestigationRuntimeProvider({
 
   const refreshEvidenceFor = useCallback((investigationId: string) => {
     if (activeCaseId === investigationId) {
-      activeInvestigation.refreshEvidence();
+      const generation = activeInvestigation.refreshEvidence();
       activeInvestigation.refreshContributions();
+      return generation;
     }
   }, [
     activeCaseId,
@@ -763,6 +766,9 @@ export function InvestigationRuntimeProvider({
       evidence: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : activeInvestigation.evidence,
+      evidenceReadCompletion: activeScopeUnavailable
+        ? { requested: activeInvestigation.evidenceReadCompletion.requested, succeeded: -1, failed: -1 }
+        : activeInvestigation.evidenceReadCompletion,
       contributions: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : activeInvestigation.contributions,
@@ -870,6 +876,7 @@ export function InvestigationRuntimeProvider({
     activeReadyCaseId,
     activeInvestigation.contributions,
     activeInvestigation.evidence,
+    activeInvestigation.evidenceReadCompletion,
     activeInvestigation.investigation,
     activeInvestigation.lifecycle,
     activeInvestigation.refreshAll,

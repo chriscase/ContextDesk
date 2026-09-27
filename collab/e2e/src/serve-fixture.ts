@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildApp } from "../../server/src/app.js";
 import { testConfig } from "../../server/src/config.js";
-import { FilesystemEvidenceStore } from "../../server/src/evidence/store.js";
+import { FilesystemEvidenceStore, type EvidenceStore } from "../../server/src/evidence/store.js";
 import { MemoryAuditStore } from "../../server/src/modules/audit/index.js";
 import {
   MapAuthAdapter,
@@ -100,7 +100,10 @@ function parsePort(raw: string | undefined): number {
   return port;
 }
 
-async function main(): Promise<void> {
+export async function serveFixture(options: {
+  readonly createStore?: (root: string) => Promise<EvidenceStore>;
+  readonly onCasesReady?: (cases: MemoryCaseStore) => void;
+} = {}): Promise<void> {
   if (!existsSync(join(webDist, "index.html"))) {
     throw new Error(
       `missing collab web build at ${webDist}; run: npm run build -w @cd-collab/web`,
@@ -111,10 +114,11 @@ async function main(): Promise<void> {
   // synthetic and disposable, but its installation key remains durable for
   // this server process instead of relying on NODE_ENV-based test fallback.
   const publicIdentities = await loadPublicIdentityCodec(root);
-  const store = new FilesystemEvidenceStore({ rootDir: root });
+  const store = options.createStore ? await options.createStore(root) : new FilesystemEvidenceStore({ rootDir: root });
   await store.ping();
   const audit = new MemoryAuditStore();
   const caseStore = new MemoryCaseStore();
+  options.onCasesReady?.(caseStore);
   const catalogStore = new MemoryCatalogStore();
   const runStore = new MemoryRunStore();
   const experimentStore = new MemoryExperimentStore();
@@ -391,7 +395,7 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((err: unknown) => {
+if (process.argv[1] === fileURLToPath(import.meta.url)) serveFixture().catch((err: unknown) => {
   const message = err instanceof Error ? err.stack ?? err.message : String(err);
   process.stderr.write(`${message}\n`);
   process.exitCode = 1;

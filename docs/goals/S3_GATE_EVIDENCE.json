@@ -1,0 +1,1750 @@
+{
+  "functional_candidate": {
+    "sha": "0959e1e3eab8a933ba80d9cc2c8a8b2af022267a",
+    "tree": "07e03204db9702683708f8f5ce3b279faef4e050"
+  },
+  "environment": {
+    "platform": "macOS arm64",
+    "node": "25.2.1",
+    "npm": "11.6.2",
+    "vitest": "3.2.7",
+    "browser": "installed Playwright Chromium",
+    "fixtures": "synthetic disposable only",
+    "test_retries": 0
+  },
+  "gates": [
+    {
+      "name": "production-build",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "cwd": "collab",
+      "exit": 0,
+      "elapsed_seconds": 7.97
+    },
+    {
+      "name": "collab-typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "cwd": "collab",
+      "exit": 0,
+      "elapsed_seconds": 7.29
+    },
+    {
+      "name": "collab-lint",
+      "command": [
+        "npm",
+        "run",
+        "lint"
+      ],
+      "cwd": "collab",
+      "exit": 0,
+      "elapsed_seconds": 7.09
+    },
+    {
+      "name": "collab-tests",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "cwd": "collab",
+      "exit": 0,
+      "elapsed_seconds": 40.29
+    },
+    {
+      "name": "e2e-typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck",
+        "-w",
+        "@cd-collab/e2e"
+      ],
+      "cwd": "collab",
+      "exit": 0,
+      "elapsed_seconds": 0.84
+    },
+    {
+      "name": "dependency-boundary",
+      "command": [
+        "npm",
+        "exec",
+        "-w",
+        "@cd-collab/web",
+        "--",
+        "vitest",
+        "run",
+        "src/investigations/dependency-boundary.test.ts"
+      ],
+      "cwd": "collab",
+      "exit": 0,
+      "elapsed_seconds": 1.49
+    },
+    {
+      "name": "fixture-privacy",
+      "command": [
+        "node",
+        "scripts/check_war_room_fixtures.mjs"
+      ],
+      "cwd": "repository root",
+      "exit": 0,
+      "elapsed_seconds": 0.05
+    },
+    {
+      "name": "help-drift",
+      "command": [
+        "node",
+        "scripts/check_war_room_help_drift.mjs"
+      ],
+      "cwd": "repository root",
+      "exit": 0,
+      "elapsed_seconds": 0.09
+    },
+    {
+      "name": "claims-tests",
+      "command": [
+        "sh",
+        "scripts/check_claims_test.sh"
+      ],
+      "cwd": "repository root",
+      "exit": 0,
+      "elapsed_seconds": 0.27
+    },
+    {
+      "name": "claims",
+      "command": [
+        "sh",
+        "scripts/check_claims.sh"
+      ],
+      "cwd": "repository root",
+      "exit": 0,
+      "elapsed_seconds": 10.15
+    },
+    {
+      "name": "scenario-matrix",
+      "command": [
+        "npm",
+        "run",
+        "scenarios:check",
+        "-w",
+        "@cd-collab/e2e"
+      ],
+      "cwd": "collab",
+      "exit": 0,
+      "elapsed_seconds": 0.19
+    },
+    {
+      "name": "candidate-diff",
+      "command": [
+        "git",
+        "diff",
+        "c5de75d1e40a3de8ddfceda2ce3d216a5e19644d",
+        "HEAD",
+        "--check"
+      ],
+      "cwd": "repository root",
+      "exit": 0,
+      "elapsed_seconds": 0.04
+    }
+  ],
+  "unit_counts": {
+    "contracts": {
+      "passed": 872,
+      "skipped": 0,
+      "files_passed": 65
+    },
+    "server": {
+      "passed": 1302,
+      "skipped": 115,
+      "files_passed": 139,
+      "files_skipped": 11
+    },
+    "web": {
+      "passed": 1655,
+      "skipped": 0,
+      "files_passed": 104
+    }
+  },
+  "full_browser": {
+    "head": "0959e1e3eab8a933ba80d9cc2c8a8b2af022267a",
+    "mode": "full",
+    "runs": [
+      {
+        "label": "full-e2e",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=json",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 291.46,
+        "counts": {
+          "passed": 151,
+          "failed": 0,
+          "skipped": 9,
+          "flaky": 0
+        }
+      }
+    ]
+  },
+  "browser_skips": [
+    {
+      "file": "07-persistence.spec.ts",
+      "line": 17,
+      "test": "process restart is a documented checkpoint unless a durable server is provided",
+      "annotations": [
+        {
+          "type": "skip",
+          "description": "Manual checkpoint: fixture MapAuthAdapter + memory stores do not survive process restart. Postgres-backed `npm start` is required; /ready is 503 on the fixture server.",
+          "location": {
+            "file": "collab/e2e/specs/07-persistence.spec.ts",
+            "line": 21,
+            "column": 10
+          }
+        }
+      ],
+      "expectedStatus": "skipped"
+    },
+    {
+      "file": "09-live-profile.spec.ts",
+      "line": 5,
+      "test": "logs into a deployed server without echoing secrets",
+      "annotations": [
+        {
+          "type": "skip",
+          "description": "COLLAB_E2E_LIVE_PROFILE is unset",
+          "location": {
+            "file": "collab/e2e/specs/09-live-profile.spec.ts",
+            "line": 7,
+            "column": 10
+          }
+        }
+      ],
+      "expectedStatus": "skipped"
+    },
+    {
+      "file": "10-bridge-comparison.spec.ts",
+      "line": 20,
+      "test": "launches gateway lanes, records progress, and hands off a pasted chat",
+      "annotations": [
+        {
+          "type": "skip",
+          "description": "set COLLAB_E2E_BRIDGE=1 to run the bridge fixture",
+          "location": {
+            "file": "collab/e2e/specs/10-bridge-comparison.spec.ts",
+            "line": 18,
+            "column": 8
+          }
+        }
+      ],
+      "expectedStatus": "skipped"
+    },
+    {
+      "file": "10-bridge-comparison.spec.ts",
+      "line": 76,
+      "test": "launches one configured gateway lane as a focused triage",
+      "annotations": [
+        {
+          "type": "skip",
+          "description": "set COLLAB_E2E_BRIDGE=1 to run the bridge fixture",
+          "location": {
+            "file": "collab/e2e/specs/10-bridge-comparison.spec.ts",
+            "line": 18,
+            "column": 8
+          }
+        }
+      ],
+      "expectedStatus": "skipped"
+    },
+    {
+      "file": "21-war-room-lanes-and-deployment.spec.ts",
+      "line": 38,
+      "test": "partial and failed lanes: One lane failed and one came back partial. Is what is left still usable, and can I see what I am missing?",
+      "annotations": [
+        {
+          "type": "skip",
+          "description": "set COLLAB_E2E_BRIDGE=degraded to run the mixed-outcome bridge fixture",
+          "location": {
+            "file": "collab/e2e/specs/21-war-room-lanes-and-deployment.spec.ts",
+            "line": 39,
+            "column": 10
+          }
+        }
+      ],
+      "expectedStatus": "skipped"
+    },
+    {
+      "file": "24-log-time-review.spec.ts",
+      "line": 46,
+      "test": "declares a timezone for an ambiguous log, seeing the DST gap first",
+      "annotations": [
+        {
+          "type": "skip",
+          "description": "set COLLAB_E2E_LOG_TIME_BIN to the contextdesk binary to run log-time review",
+          "location": {
+            "file": "collab/e2e/specs/24-log-time-review.spec.ts",
+            "line": 41,
+            "column": 8
+          }
+        }
+      ],
+      "expectedStatus": "skipped"
+    },
+    {
+      "file": "24-log-time-review.spec.ts",
+      "line": 161,
+      "test": "refuses a viewer's attempt to change how time is read",
+      "annotations": [
+        {
+          "type": "skip",
+          "description": "set COLLAB_E2E_LOG_TIME_BIN to the contextdesk binary to run log-time review",
+          "location": {
+            "file": "collab/e2e/specs/24-log-time-review.spec.ts",
+            "line": 41,
+            "column": 8
+          }
+        }
+      ],
+      "expectedStatus": "skipped"
+    },
+    {
+      "file": "26-log-workbench.spec.ts",
+      "line": 348,
+      "test": "timezone apply changes workbench UTC then freeze binds that revision",
+      "annotations": [
+        {
+          "type": "skip",
+          "description": "set COLLAB_E2E_LOG_TIME_BIN to the contextdesk binary to prove timezone apply changes workbench UTC",
+          "location": {
+            "file": "collab/e2e/specs/26-log-workbench.spec.ts",
+            "line": 343,
+            "column": 8
+          }
+        }
+      ],
+      "expectedStatus": "skipped"
+    },
+    {
+      "file": "39-s3-evidence-reconciliation.spec.ts",
+      "line": 502,
+      "test": "@joined built client and Runtime through real app/store/installed-SDK response-loss fixture",
+      "annotations": [
+        {
+          "type": "skip",
+          "description": "Run with s3-joined.playwright.config.ts and a disposable control directory",
+          "location": {
+            "file": "collab/e2e/specs/39-s3-evidence-reconciliation.spec.ts",
+            "line": 503,
+            "column": 8
+          }
+        }
+      ],
+      "expectedStatus": "skipped"
+    }
+  ],
+  "repetitions": {
+    "head": "0959e1e3eab8a933ba80d9cc2c8a8b2af022267a",
+    "mode": "repetitions",
+    "runs": [
+      {
+        "label": "repeat-1-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.19,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-1-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.31,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-2-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.15,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-2-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.42,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-3-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.2,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-3-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.42,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-4-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 1.99,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-4-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.23,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-5-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 1.99,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-5-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.32,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-6-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.03,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-6-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.3,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-7-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.2,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-7-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.45,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-8-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.06,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-8-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.33,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-9-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.05,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-9-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.36,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-10-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.36,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-10-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.5,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-11-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.04,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-11-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.51,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-12-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.19,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-12-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.69,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-13-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.49,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-13-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.33,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-14-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.18,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-14-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.59,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-15-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 3.02,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-15-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.57,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-16-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.33,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-16-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.35,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-17-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.03,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-17-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.27,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-18-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.46,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-18-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.36,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-19-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.1,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-19-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.4,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-20-server",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/server",
+          "--",
+          "vitest",
+          "run",
+          "src/evidence/s3-copy-retry.test.ts",
+          "src/modules/cases/evidence-stream.http.test.ts",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 2.32,
+        "counts": {},
+        "tests": {
+          "passed": 31,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "repeat-20-web",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/web",
+          "--",
+          "vitest",
+          "run",
+          "src/investigations/strategies/shared/evidence-upload-reconciliation.test.tsx",
+          "src/investigations/runtime/controllers/use-active-investigation.test.tsx",
+          "src/investigations/strategies/shared/EvidenceUploadReconciliationForm.test.tsx",
+          "src/investigations/strategies/evidence-recovery-refresh.test.tsx",
+          "src/investigations/runtime/InvestigationRuntimeProvider.test.tsx",
+          "--reporter=json",
+          "--outputFile=<temporary-json>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.4,
+        "counts": {},
+        "tests": {
+          "passed": 96,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "label": "chromium-new-1",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 10.89,
+        "counts": {
+          "skipped": 1,
+          "passed": 6
+        }
+      },
+      {
+        "label": "joined-1",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "--config",
+          "s3-joined.playwright.config.ts",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.23,
+        "counts": {
+          "passed": 1
+        }
+      },
+      {
+        "label": "chromium-new-2",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 9.81,
+        "counts": {
+          "skipped": 1,
+          "passed": 6
+        }
+      },
+      {
+        "label": "joined-2",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "--config",
+          "s3-joined.playwright.config.ts",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.02,
+        "counts": {
+          "passed": 1
+        }
+      },
+      {
+        "label": "chromium-new-3",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 10.97,
+        "counts": {
+          "skipped": 1,
+          "passed": 6
+        }
+      },
+      {
+        "label": "joined-3",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "--config",
+          "s3-joined.playwright.config.ts",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.22,
+        "counts": {
+          "passed": 1
+        }
+      },
+      {
+        "label": "chromium-new-4",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 11.13,
+        "counts": {
+          "skipped": 1,
+          "passed": 6
+        }
+      },
+      {
+        "label": "joined-4",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "--config",
+          "s3-joined.playwright.config.ts",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.05,
+        "counts": {
+          "passed": 1
+        }
+      },
+      {
+        "label": "chromium-new-5",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 9.96,
+        "counts": {
+          "skipped": 1,
+          "passed": 6
+        }
+      },
+      {
+        "label": "joined-5",
+        "command": [
+          "npm",
+          "exec",
+          "-w",
+          "@cd-collab/e2e",
+          "--",
+          "playwright",
+          "test",
+          "--config",
+          "s3-joined.playwright.config.ts",
+          "specs/39-s3-evidence-reconciliation.spec.ts",
+          "--workers=1",
+          "--retries=0",
+          "--reporter=line",
+          "--output=<temporary-browser-results>"
+        ],
+        "exit": 0,
+        "elapsed_seconds": 4.02,
+        "counts": {
+          "passed": 1
+        }
+      }
+    ]
+  },
+  "self_check": {
+    "command": [
+      "node",
+      "collab/scripts/qualify-s3-evidence.mjs",
+      "--self-check"
+    ],
+    "cwd": "repository root",
+    "exit": 0,
+    "passed": 14,
+    "skipped": 15,
+    "scope": "compose/toml/gates only; not live Garage qualification"
+  },
+  "hosted_checkpoint": {
+    "sha": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+    "tree": "765eaf20b173a770fbb9b433d9ad4c2bc7e62155",
+    "workflows": [
+      {
+        "conclusion": "success",
+        "event": "pull_request",
+        "head_sha": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+        "html_url": "https://github.com/chriscase/ContextDesk/actions/runs/36259719169",
+        "id": 36259719169,
+        "name": "Triage adapter fast",
+        "run_attempt": 1,
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "event": "pull_request",
+        "head_sha": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+        "html_url": "https://github.com/chriscase/ContextDesk/actions/runs/36259719111",
+        "id": 36259719111,
+        "name": "Triage adapter CLI fast",
+        "run_attempt": 1,
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "event": "pull_request",
+        "head_sha": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+        "html_url": "https://github.com/chriscase/ContextDesk/actions/runs/36259719278",
+        "id": 36259719278,
+        "name": "Triage fast lane",
+        "run_attempt": 1,
+        "status": "completed"
+      },
+      {
+        "conclusion": "failure",
+        "event": "pull_request",
+        "head_sha": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+        "html_url": "https://github.com/chriscase/ContextDesk/actions/runs/36259719144",
+        "id": 36259719144,
+        "name": "collab-qualify",
+        "run_attempt": 1,
+        "status": "completed"
+      },
+      {
+        "conclusion": "failure",
+        "event": "pull_request",
+        "head_sha": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+        "html_url": "https://github.com/chriscase/ContextDesk/actions/runs/36259719211",
+        "id": 36259719211,
+        "name": "collab",
+        "run_attempt": 1,
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "event": "pull_request",
+        "head_sha": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+        "html_url": "https://github.com/chriscase/ContextDesk/actions/runs/36259719056",
+        "id": 36259719056,
+        "name": "CI",
+        "run_attempt": 1,
+        "status": "completed"
+      },
+      {
+        "conclusion": "failure",
+        "event": "push",
+        "head_sha": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+        "html_url": "https://github.com/chriscase/ContextDesk/actions/runs/36259630906",
+        "id": 36259630906,
+        "name": "collab-qualify",
+        "run_attempt": 1,
+        "status": "completed"
+      },
+      {
+        "conclusion": "failure",
+        "event": "push",
+        "head_sha": "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f",
+        "html_url": "https://github.com/chriscase/ContextDesk/actions/runs/36259630872",
+        "id": 36259630872,
+        "name": "collab",
+        "run_attempt": 1,
+        "status": "completed"
+      }
+    ],
+    "actual_test_merge": [
+      {
+        "sha": "583544f0a8accbbf10c54ced72dedc775157f80b",
+        "tree": "765eaf20b173a770fbb9b433d9ad4c2bc7e62155",
+        "parents": [
+          "c5de75d1e40a3de8ddfceda2ce3d216a5e19644d",
+          "c70bb9e3f6c2ed583e79528ba347ae8d402dd89f"
+        ]
+      }
+    ],
+    "scope": "older recovery checkpoint only, not final C or subsequent evidence E"
+  },
+  "independent_review": {
+    "candidate": "0959e1e3eab8a933ba80d9cc2c8a8b2af022267a",
+    "tree": "07e03204db9702683708f8f5ce3b279faef4e050",
+    "kind": "fresh separate same-model read-only",
+    "tests_executed": false,
+    "github_approval": false,
+    "new_blocking_findings": 0
+  },
+  "publication": "Final C and evidence E are local; public push requires pending explicit approval after automatic-review rejection.",
+  "external_missing": [
+    "fresh final-head hosted CI",
+    "Windows evidence-stream qualification",
+    "live disposable Garage qualification",
+    "live AWS fault qualification (not claimed)"
+  ],
+  "evidence_only_delta_from_C": [
+    "docs/goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md",
+    "docs/goals/S3_GATE_EVIDENCE.json",
+    "docs/goals/S3_INDEPENDENT_REVIEW.md",
+    "docs/goals/S3_MUTATION_EVIDENCE.json",
+    "docs/goals/S3_QUALIFICATION_EVIDENCE.md"
+  ]
+}

@@ -8,6 +8,7 @@ import { parseArtifact, parseEvidenceUploadSuccess } from "@cd-collab/contracts"
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
+import { S3EvidenceError } from "../../evidence/s3-store.js";
 import { FilesystemEvidenceStore, sha256Hex } from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import {
@@ -883,9 +884,87 @@ describe("POST /api/cases/:id/evidence/stream", () => {
         }),
       ]);
       expect(Date.now() - started).toBeLessThan(750);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(await listScratch(root)).toEqual([]);
+      await vi.waitFor(async () => {
+        expect(await listScratch(root)).toEqual([]);
+      }, { timeout: 500 });
     }, { transferTimeoutMs: 25 });
+  });
+
+  it("maps JSON and multipart promote ambiguity separately from ordinary S3 failure", async () => {
+    await withApp(async ({ app, store }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "S3 promote outcome http");
+      const originalBegin = store.beginWriteBatch.bind(store);
+      const originalStageStream = store.stageStream.bind(store);
+      const jsonUpload = () => app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/evidence`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "log",
+          filename: "app.log",
+          mediaType: "text/plain",
+          contentBase64: Buffer.from(LOG).toString("base64"),
+          summary: "S3 JSON outcome",
+        },
+      });
+      const streamBody = encodeMultipart([
+        { kind: "field", name: "kind", value: "log" },
+        { kind: "field", name: "summary", value: "S3 stream outcome" },
+        { kind: "file", name: "file", filename: "app.log", mediaType: "text/plain", body: LOG },
+      ]);
+      const streamUpload = () => app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/evidence/stream`,
+        headers: { cookie: alice, "content-type": streamBody.contentType },
+        payload: streamBody.payload,
+      });
+      const spyBatch = (error: S3EvidenceError) => {
+        vi.spyOn(store, "beginWriteBatch").mockImplementation(async () => {
+          const batch = await originalBegin();
+          return new Proxy(batch, {
+            get(target, property, receiver) {
+              if (property === "promote") return async () => { throw error; };
+              return Reflect.get(target, property, receiver) as unknown;
+            },
+          });
+        });
+      };
+
+      spyBatch(new S3EvidenceError("promote", "unavailable", { commitOutcomeUnknown: true }));
+      const unknown = await jsonUpload();
+      expect(unknown.statusCode).toBe(503);
+      expect(JSON.parse(unknown.body)).toEqual({ error: "commit_outcome_unknown" });
+      expect(Object.keys(JSON.parse(unknown.body) as object)).toEqual(["error"]);
+
+      vi.mocked(store.beginWriteBatch).mockRestore();
+      spyBatch(new S3EvidenceError("promote", "unavailable"));
+      const unavailable = await jsonUpload();
+      expect(unavailable.statusCode).toBe(503);
+      expect(JSON.parse(unavailable.body)).toEqual({ error: "storage_unavailable" });
+
+      vi.mocked(store.beginWriteBatch).mockRestore();
+      spyBatch(new S3EvidenceError("put", "unavailable", { commitOutcomeUnknown: true }));
+      const stray = await jsonUpload();
+      expect(stray.statusCode).toBe(503);
+      expect(JSON.parse(stray.body)).toEqual({ error: "storage_unavailable" });
+      vi.mocked(store.beginWriteBatch).mockRestore();
+
+      vi.spyOn(store, "stageStream").mockImplementation(async () => {
+        throw new S3EvidenceError("promote", "unavailable", { commitOutcomeUnknown: true });
+      });
+      const streamUnknown = await streamUpload();
+      expect(streamUnknown.statusCode).toBe(503);
+      expect(JSON.parse(streamUnknown.body)).toEqual({ error: "commit_outcome_unknown" });
+      vi.mocked(store.stageStream).mockRestore();
+      vi.spyOn(store, "stageStream").mockImplementation(originalStageStream);
+      vi.spyOn(store, "stageStream").mockImplementation(async () => {
+        throw new S3EvidenceError("promote", "unavailable");
+      });
+      const streamUnavailable = await streamUpload();
+      expect(streamUnavailable.statusCode).toBe(503);
+      expect(JSON.parse(streamUnavailable.body)).toEqual({ error: "storage_unavailable" });
+    });
   });
 
   it("returns 413 for a live chunked over-limit upload and closes without consuming the tail", async () => {

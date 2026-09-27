@@ -1128,11 +1128,9 @@ describe("Investigation First Runtime V1 presentation", () => {
       target: { value: "Operator notes" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toMatch(/not confirmed/i);
-    expect(alert.textContent).toMatch(/being refreshed/i);
-    expect(alert.textContent).toMatch(/check it before uploading again/i);
-    expect(alert.textContent).not.toMatch(/try again/i);
+    await screen.findByText(/Review the refreshed inventory for notes.txt/i);
+    expect((screen.getByLabelText("File") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Retry original upload" })).toBeTruthy();
     await waitFor(() => expect(gateway.listEvidence).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(vi.mocked(gateway.listInvestigations).mock.calls.length).toBeGreaterThan(1));
   });
