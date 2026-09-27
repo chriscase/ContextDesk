@@ -150,3 +150,16 @@ review are complete locally; final remote accessibility is blocked by automatic
 approval review pending explicit publication approval. The current overall
 handoff is PARTIAL solely as to that publication requirement and the named
 external gates. Historical PRs and the frozen goal remain unchanged.
+
+
+## Bounded client review closure after published bc423f92
+
+This 2026-09-27 continuation supersedes the earlier local/publication-blocked ledger state for this correction without rewriting its historical evidence. Starting head `bc423f92a9a4fa95bc67bc0d6da6fd4276ac0e28` was published with explicit owner approval; the historical incidental temporary paths and that approval remain intact.
+
+S3-IR-01 and S3-IR-02 are closed at functional C `54d5dba03fd6d1483f4dd85514b170c0b52af174` / tree `79c0ac98d8e79372408d0e44360c56185ee95a3a`. Actual keyed-form replacement now revokes old actions during layout cleanup. A single phase-aware notice retains ordinary failure through pending, failed and successful inventory reads without duplicate IDs, altered frozen intent or automatic writes. See [S3_CLIENT_REVIEW_CLOSURE.md](S3_CLIENT_REVIEW_CLOSURE.md) and [revision-bound command/result/review evidence](S3_CLIENT_REVIEW_EVIDENCE.json).
+
+Exact-C local proof: twelve passing gates; 3865 unit tests passed with 115 existing environment skips; full Chromium 153 passed/9 configuration skips; twenty timing cycles 3260 passed; five normal Spec 39 runs 40 passed/5 joined-config skips; five joined runs passed. All eight named mutation families produce 38 intended failures with exact source restoration and passing selected positives. A separate same-model read-only review closes both findings; it ran no tests and submitted no GitHub approval.
+
+SER-05/06/07/08/10/11 receive this additional client regression proof. Existing server/SDK/durable recovery proof remains tied to its original revisions and unchanged file hashes; the complete suites and joined journeys also run at C. Starting published-head CI/collab/collab-qualify are successful at logged generated merge `42580bb3e9cfc0bb21e9b29c6eb30b2148b2bd59`; starting Windows evidence-stream 18 tests passed. Fresh final-head hosted state belongs in PR metadata, not another receipt-only CI commit. Garage/live AWS remain external nonclaims.
+
+One evidence-only follow-up publishes exactly this receipt append, closure Markdown and JSON. Final E identity is recorded in the existing draft PR and handoff. Frozen Goal 05 hash remains `e9594c2b95774834c280130126c207fb2cfff14de923cf29744368de823a87f2`. Private backups remain local; no merge, ready marking, closure or successor is authorized.
