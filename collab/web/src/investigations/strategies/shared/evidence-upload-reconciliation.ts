@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef } from "react";
+import { useLayoutEffect, useReducer, useRef } from "react";
 type ArtifactKind = "attachment" | "log" | "email";
 type PrivacyClass = "owner_only" | "share_safe";
 
@@ -49,7 +49,9 @@ export function useEvidenceUploadReconciliation(options: {
   }
   const active = current.current;
   const isCurrent = () => active.live && current.current === active;
-  useEffect(() => {
+  // Keyed consumers unmount rather than rerender this hook. Revoke during
+  // commit layout cleanup, before replacement layout actions can reach it.
+  useLayoutEffect(() => {
     current.current.live = true;
     return () => { current.current.live = false; current.current.intent = null; };
   }, []);

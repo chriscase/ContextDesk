@@ -447,6 +447,39 @@ for (const surface of SURFACES) {
         } finally { release.resolve(); }
       });
     });
+    test("ordinary failure after original retry has one focused notice and preserves retry identity", async ({ page }) => {
+      await withSurface(page, surface, async (caseId) => {
+        const posts: CapturedUpload[] = []; let deletes = 0;
+        page.on("request", (request) => { if (request.method() === "DELETE") deletes += 1; });
+        await page.route(evidenceRoute(caseId), async (route) => {
+          if (route.request().method() === "POST") {
+            posts.push(captureUpload(route.request()));
+            if (posts.length <= 2) {
+              await route.fulfill({ status: 503, contentType: "application/json", body: posts.length === 1 ? UNKNOWN_COMMIT_BODY : ORDINARY_503_BODY }); return;
+            }
+          }
+          await route.continue();
+        });
+        await fillUpload(surface, page, syntheticFile, "frozen ordinary-retry summary");
+        await surface.submit(page).click();
+        const form = page.locator(".evidence-reconciliation"); const retry = form.getByRole("button", { name: "Retry original upload" });
+        await expect(retry).toBeEnabled(); await retry.click();
+        const failure = form.getByRole("alert");
+        await expect(failure).toContainText("No success has been confirmed");
+        await expect(failure).toContainText("Review the refreshed inventory"); await expect(failure).toBeFocused();
+        const ids = await form.locator("[id]").evaluateAll((nodes) => nodes.map((node) => node.id));
+        expect(new Set(ids).size).toBe(ids.length); expect(ids).toHaveLength(1);
+        await expect(surface.file(page)).toHaveAttribute("aria-describedby", ids[0]!);
+        await expect(surface.summary(page)).toHaveAttribute("aria-describedby", ids[0]!);
+        await expectDraftPreserved(surface, page, syntheticFile, "frozen ordinary-retry summary");
+        await expect(surface.privacy(page)).toHaveValue("share_safe"); await expect(retry).toBeEnabled();
+        expect(posts).toHaveLength(2); expect(canonicalUpload(posts[1]!)).toEqual(canonicalUpload(posts[0]!)); expect(deletes).toBe(0);
+        await form.evaluate((node) => node.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+        await expect(failure).toBeVisible(); expect(posts).toHaveLength(2);
+        await retry.click(); await expect(form.getByRole("status")).toHaveText("Evidence added to the inventory.");
+        expect(posts).toHaveLength(3); expect(canonicalUpload(posts[2]!)).toEqual(canonicalUpload(posts[0]!)); expect(deletes).toBe(0);
+      });
+    });
     test("ordinary 503 remains editable and explicit retry succeeds", async ({ page }) => {
       await withSurface(page, surface, async (caseId) => {
         let posts = 0;

@@ -90,9 +90,9 @@ function ScopedEvidenceUploadForm(props: EvidenceUploadReconciliationFormProps &
         <p id={noticeId} ref={noticeRef} tabIndex={-1} role="alert">The inventory refresh failed. Previously loaded evidence remains visible. Retry stays unavailable until a successful refresh.</p>
       ) : null}
       {reconciliation.phase === "review" && reconciliation.intent ? (
-        <p id={noticeId} ref={noticeRef} tabIndex={-1} role="status">Review the refreshed inventory for {reconciliation.intent.file.name} ({reconciliation.intent.privacyClass === "owner_only" ? "owner only" : "share safe"}). Then retry that original upload or finish without another write.</p>
+        <p id={noticeId} ref={noticeRef} tabIndex={-1} role={reconciliation.ordinaryMessage ? "alert" : "status"}>{reconciliation.ordinaryMessage ? `${reconciliation.ordinaryMessage} ` : null}Review the refreshed inventory for {reconciliation.intent.file.name} ({reconciliation.intent.privacyClass === "owner_only" ? "owner only" : "share safe"}). Then retry that original upload or finish without another write.</p>
       ) : null}
-      {reconciliation.ordinaryMessage ? <p id={noticeId} ref={noticeRef} tabIndex={-1} role="alert">{reconciliation.ordinaryMessage}</p> : null}
+      {reconciliation.ordinaryMessage && reconciliation.phase !== "review" ? <p id={noticeId} ref={noticeRef} tabIndex={-1} role="alert">{reconciliation.ordinaryMessage}</p> : null}
       {privacyNotice ? <p role="alert">Private evidence access changed. Choose a privacy level again and select a new file.</p> : null}
       <div className={props.variant === "beacon" ? "beacon__upload-grid" : "investigation-first__upload-grid"}>
       <label className={props.variant === "beacon" ? "beacon__field" : undefined}>{props.variant === "beacon" ? "File (server-configured limit)" : "File"}<input name="file" type="file" aria-describedby={locked ? noticeId : undefined} disabled={locked || reconciliation.submitting} /></label>
