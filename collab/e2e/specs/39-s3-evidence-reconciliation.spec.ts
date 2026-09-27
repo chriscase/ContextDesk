@@ -449,7 +449,8 @@ for (const surface of SURFACES) {
     });
     test("ordinary failure after original retry has one focused notice and preserves retry identity", async ({ page }) => {
       await withSurface(page, surface, async (caseId) => {
-        const posts: CapturedUpload[] = []; let deletes = 0;
+        const posts: CapturedUpload[] = []; let deletes = 0; let holdRead = false;
+        const readStarted = deferred(); const releaseRead = deferred();
         page.on("request", (request) => { if (request.method() === "DELETE") deletes += 1; });
         await page.route(evidenceRoute(caseId), async (route) => {
           if (route.request().method() === "POST") {
@@ -457,6 +458,10 @@ for (const surface of SURFACES) {
             if (posts.length <= 2) {
               await route.fulfill({ status: 503, contentType: "application/json", body: posts.length === 1 ? UNKNOWN_COMMIT_BODY : ORDINARY_503_BODY }); return;
             }
+          }
+          if (route.request().method() === "GET" && holdRead) {
+            readStarted.resolve(); await releaseRead.promise;
+            await route.fulfill({ status: 503, contentType: "application/json", body: ORDINARY_503_BODY }); return;
           }
           await route.continue();
         });
@@ -476,6 +481,23 @@ for (const surface of SURFACES) {
         expect(posts).toHaveLength(2); expect(canonicalUpload(posts[1]!)).toEqual(canonicalUpload(posts[0]!)); expect(deletes).toBe(0);
         await form.evaluate((node) => node.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
         await expect(failure).toBeVisible(); expect(posts).toHaveLength(2);
+        async function assertNotice(phaseText: string) {
+          const notice = form.getByRole("alert"); await expect(notice).toContainText(phaseText); await expect(notice).toContainText("No success has been confirmed"); await expect(notice).toBeFocused();
+          const currentIds = await form.locator("[id]").evaluateAll((nodes) => nodes.map((node) => node.id));
+          expect(currentIds).toHaveLength(1); expect(new Set(currentIds).size).toBe(currentIds.length);
+          await expect(surface.file(page)).toHaveAttribute("aria-describedby", currentIds[0]!);
+          await expect(surface.summary(page)).toHaveAttribute("aria-describedby", currentIds[0]!);
+          await expectDraftPreserved(surface, page, syntheticFile, "frozen ordinary-retry summary");
+          await expect(surface.privacy(page)).toHaveValue("share_safe"); expect(posts).toHaveLength(2); expect(deletes).toBe(0);
+        }
+        holdRead = true;
+        try {
+          await form.getByRole("button", { name: "Refresh inventory" }).click(); await readStarted.promise;
+          await assertNotice("while the inventory refreshes"); await expect(retry).toHaveCount(0);
+          releaseRead.resolve(); await assertNotice("The inventory refresh failed");
+        } finally { holdRead = false; releaseRead.resolve(); }
+        await form.getByRole("button", { name: "Refresh inventory" }).click();
+        await assertNotice("Review the refreshed inventory"); await expect(retry).toBeEnabled();
         await retry.click(); await expect(form.getByRole("status")).toHaveText("Evidence added to the inventory.");
         expect(posts).toHaveLength(3); expect(canonicalUpload(posts[2]!)).toEqual(canonicalUpload(posts[0]!)); expect(deletes).toBe(0);
       });

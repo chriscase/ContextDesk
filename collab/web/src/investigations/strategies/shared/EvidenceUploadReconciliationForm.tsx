@@ -44,6 +44,13 @@ function ScopedEvidenceUploadForm(props: EvidenceUploadReconciliationFormProps &
   });
   const locked = reconciliation.intent !== null && reconciliation.phase !== "editing" && reconciliation.phase !== "ordinary_failure";
   const className = props.variant === "beacon" ? "beacon__upload" : "investigation-first__upload";
+  const phaseMessage = reconciliation.phase === "succeeded" ? "Evidence added to the inventory."
+    : reconciliation.phase === "refreshing" ? "The upload result is unconfirmed. The original file and privacy choice stay locked while the inventory refreshes."
+    : reconciliation.phase === "refresh_failed" ? "The inventory refresh failed. Previously loaded evidence remains visible. Retry stays unavailable until a successful refresh."
+    : reconciliation.phase === "review" && reconciliation.intent ? `Review the refreshed inventory for ${reconciliation.intent.file.name} (${reconciliation.intent.privacyClass === "owner_only" ? "owner only" : "share safe"}). Then retry that original upload or finish without another write.`
+    : null;
+  const noticeMessage = [reconciliation.ordinaryMessage, phaseMessage].filter(Boolean).join(" ");
+  const noticeRole = reconciliation.ordinaryMessage || reconciliation.phase === "refresh_failed" ? "alert" : "status";
 
   useLayoutEffect(() => {
     if (reconciliation.phase !== "editing" && reconciliation.phase !== "submitting") noticeRef.current?.focus();
@@ -82,17 +89,7 @@ function ScopedEvidenceUploadForm(props: EvidenceUploadReconciliationFormProps &
   return (
     <form ref={formRef} className={`${className} evidence-reconciliation`} onSubmit={(event) => void onSubmit(event)} aria-busy={reconciliation.submitting}>
       <h4>{props.variant === "beacon" ? "Attach evidence" : "Add evidence"}</h4>
-      {reconciliation.phase === "succeeded" ? <p id={noticeId} ref={noticeRef} tabIndex={-1} role="status">Evidence added to the inventory.</p> : null}
-      {reconciliation.phase === "refreshing" ? (
-        <p id={noticeId} ref={noticeRef} tabIndex={-1} role="status">The upload result is unconfirmed. The original file and privacy choice stay locked while the inventory refreshes.</p>
-      ) : null}
-      {reconciliation.phase === "refresh_failed" ? (
-        <p id={noticeId} ref={noticeRef} tabIndex={-1} role="alert">The inventory refresh failed. Previously loaded evidence remains visible. Retry stays unavailable until a successful refresh.</p>
-      ) : null}
-      {reconciliation.phase === "review" && reconciliation.intent ? (
-        <p id={noticeId} ref={noticeRef} tabIndex={-1} role={reconciliation.ordinaryMessage ? "alert" : "status"}>{reconciliation.ordinaryMessage ? `${reconciliation.ordinaryMessage} ` : null}Review the refreshed inventory for {reconciliation.intent.file.name} ({reconciliation.intent.privacyClass === "owner_only" ? "owner only" : "share safe"}). Then retry that original upload or finish without another write.</p>
-      ) : null}
-      {reconciliation.ordinaryMessage && reconciliation.phase !== "review" ? <p id={noticeId} ref={noticeRef} tabIndex={-1} role="alert">{reconciliation.ordinaryMessage}</p> : null}
+      {noticeMessage ? <p id={noticeId} ref={noticeRef} tabIndex={-1} role={noticeRole}>{noticeMessage}</p> : null}
       {privacyNotice ? <p role="alert">Private evidence access changed. Choose a privacy level again and select a new file.</p> : null}
       <div className={props.variant === "beacon" ? "beacon__upload-grid" : "investigation-first__upload-grid"}>
       <label className={props.variant === "beacon" ? "beacon__field" : undefined}>{props.variant === "beacon" ? "File (server-configured limit)" : "File"}<input name="file" type="file" aria-describedby={locked ? noticeId : undefined} disabled={locked || reconciliation.submitting} /></label>

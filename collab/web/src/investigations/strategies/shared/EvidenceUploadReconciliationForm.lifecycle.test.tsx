@@ -58,7 +58,7 @@ describe.each(["investigation-first", "beacon"] as const)("%s actual keyed recov
       expect(props.upload).toHaveBeenCalledTimes(1); expect(props.refreshEvidence).not.toHaveBeenCalled(); expect(observed.current?.intent).toBeNull();
     });
   });
-  it("announces one uniquely identified ordinary retry failure without changing frozen intent", async () => {
+  it.each(["explicit", "external"] as const)("announces one ordinary retry failure through %s inventory refresh without changing frozen intent", async (refreshSource) => {
     const props = initial(variant); const view = render(<Host props={props} />); await act(async () => fireEvent.submit(fill()));
     view.rerender(<Host props={{ ...props, readCompletion: { requested: 1, succeeded: 1, failed: -1 } }} />);
     vi.mocked(props.upload!).mockResolvedValueOnce({ status: "failed", error: { kind: "unavailable", reason: "storage_unavailable" } });
@@ -70,6 +70,25 @@ describe.each(["investigation-first", "beacon"] as const)("%s actual keyed recov
     expect((form.elements.namedItem("summary") as HTMLInputElement).getAttribute("aria-describedby")).toBe(failure.id);
     expect(observed.current?.intent).toMatchObject({ file: original, summary: "  original annotation  ", kind: "log", privacyClass: "owner_only" });
     const calls = vi.mocked(props.upload!).mock.calls; expect(calls).toHaveLength(2); expect(calls[1]?.[0]).toBe(calls[0]?.[0]); expect(props.refreshEvidence).not.toHaveBeenCalled();
+    const frozen = observed.current!.intent;
+    function assertNotice(phaseText: string) {
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[id]"));
+      expect(nodes).toHaveLength(1); expect(new Set(nodes.map((node) => node.id)).size).toBe(nodes.length);
+      const notice = screen.getByRole("alert"); expect(notice.textContent).toContain("No success has been confirmed");
+      expect(notice.textContent).toContain(phaseText); expect(document.activeElement).toBe(notice);
+      for (const name of ["file", "summary"]) expect((form.elements.namedItem(name) as HTMLInputElement).getAttribute("aria-describedby")).toBe(notice.id);
+      expect(observed.current!.intent).toBe(frozen); expect(frozen!.file).toBe(original); expect(calls).toHaveLength(2);
+    }
+    if (refreshSource === "explicit") fireEvent.click(screen.getByRole("button", { name: "Refresh inventory" }));
+    view.rerender(<Host props={{ ...props, readCompletion: { requested: 2, succeeded: 1, failed: -1 } }} />);
+    assertNotice("while the inventory refreshes"); expect(screen.queryByRole("button", { name: "Retry original upload" })).toBeNull();
+    view.rerender(<Host props={{ ...props, readCompletion: { requested: 2, succeeded: 1, failed: 2 } }} />);
+    assertNotice("The inventory refresh failed");
+    view.rerender(<Host props={{ ...props, readCompletion: { requested: 3, succeeded: 1, failed: 2 } }} />);
+    assertNotice("while the inventory refreshes");
+    view.rerender(<Host props={{ ...props, readCompletion: { requested: 3, succeeded: 3, failed: 2 } }} />);
+    assertNotice("Review the refreshed inventory"); expect(screen.getByRole("button", { name: "Retry original upload" }).hasAttribute("disabled")).toBe(false);
+    expect(props.refreshEvidence).toHaveBeenCalledTimes(refreshSource === "explicit" ? 1 : 0);
     vi.mocked(props.upload!).mockResolvedValueOnce({ status: "succeeded" }); await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry original upload" })));
     expect(calls).toHaveLength(3); expect(calls[2]?.[0]).toBe(calls[0]?.[0]); expect(screen.getByRole("status").textContent).toContain("Evidence added");
   });
