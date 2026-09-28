@@ -661,6 +661,39 @@ describe("portable investigation service", () => {
     });
   });
 
+  it("refuses export when a hidden stored run has judgments, without disclosing that run", async () => {
+    const row = await fixture();
+    const visible = (await row.imports.listRuns(row.caseId, ACTOR, false))[0];
+    if (!visible) throw new Error("synthetic portable fixture has no imported run");
+    const stored = await row.runStore.get(visible.id);
+    if (!stored) throw new Error("synthetic imported run is missing from storage");
+    const hiddenId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    await row.runStore.insert({
+      ...stored,
+      id: hiddenId,
+      importerId: "local:other",
+      importerUsername: "other",
+      privacyClass: "owner_only",
+    });
+    await row.runStore.appendJudgment({
+      caseId: row.caseId,
+      runId: hiddenId,
+      seq: 1,
+      judgment: "insufficient_evidence",
+      actorId: "local:other",
+      actorUsername: "other",
+      links: [],
+      rationale: null,
+      recordedAt: "2042-03-04T12:00:00.000Z",
+    });
+    expect((await row.imports.listRuns(row.caseId, ACTOR, false)).some((run) => run.id === hiddenId))
+      .toBe(false);
+    await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
+      code: "unsupported_state",
+      message: "external-run judgments are not exact-applyable",
+    });
+  });
+
   it("blocks an incoming archive that names a judgment without portable judgment rows", async () => {
     const row = await fixture();
     const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -691,6 +724,43 @@ describe("portable investigation service", () => {
       path: "$.investigation.timeline",
       detail: "external-run judgments are not exact-applyable",
     }));
+  });
+
+  it("preserves destination judgments when an older archive apply is replayed", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preflight = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(preflight.report.exactReconstruction).toBe(true);
+    const token = preflight.apply.confirmationToken;
+    if (!token) throw new Error("synthetic exact archive had no apply token");
+    const first = await row.portable.apply(archive, applyInput(token, identityMap), ACTOR, false);
+    const destinationRun = (await row.imports.listRuns(first.investigationId, ACTOR, false))[0];
+    if (!destinationRun) throw new Error("applied archive has no imported run");
+    await row.runStore.appendJudgment({
+      caseId: first.investigationId,
+      runId: destinationRun.id,
+      seq: 1,
+      judgment: "insufficient_evidence",
+      actorId: ACTOR.id,
+      actorUsername: ACTOR.username,
+      links: [],
+      rationale: "Later human review must survive an old archive replay.",
+      recordedAt: "2042-03-04T12:00:00.000Z",
+    });
+
+    const replay = await row.portable.apply(archive, applyInput(token, identityMap), ACTOR, false);
+    expect(replay.status).toBe("idempotent_replay");
+    expect(replay.investigationId).toBe(first.investigationId);
+    expect(await row.runStore.listJudgments(destinationRun.id)).toMatchObject([{
+      seq: 1,
+      rationale: "Later human review must survive an old archive replay.",
+    }]);
   });
 
   it("refuses export while any triage job or candidate remains nonterminal", async () => {

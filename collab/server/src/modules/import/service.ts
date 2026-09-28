@@ -638,6 +638,15 @@ export class ImportService {
     return out;
   }
 
+  /** Internal export guard: inspect stored rows, including runs hidden from the exporter. */
+  async caseHasStoredJudgments(caseId: string): Promise<boolean> {
+    const runs = await this.runs.listByCase(caseId);
+    for (const run of runs) {
+      if ((await this.runs.listJudgments(run.id)).length > 0) return true;
+    }
+    return false;
+  }
+
   async listRunJudgments(
     caseId: string,
     runId: string,

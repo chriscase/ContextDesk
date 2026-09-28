@@ -716,6 +716,9 @@ export class PortableInvestigationService {
   ): Promise<PortableArchiveV1> {
     const caseRow = await this.deps.cases.getCase(caseId, actor, isAdmin);
     if (!caseRow) throw new PortableServerError("not_found", "investigation not found");
+    if (await this.deps.imports.caseHasStoredJudgments(caseId)) {
+      throw new PortableServerError("unsupported_state", "external-run judgments are not exact-applyable");
+    }
 
     const [latestContributions, artifacts, snapshots, timeline, importedRuns, jobs, experiments] =
       await Promise.all([
@@ -1487,6 +1490,9 @@ export class PortableInvestigationService {
       const encodedBytes = Buffer.byteLength(JSON.stringify(archive), "utf8");
       if (encodedBytes > MAX_PORTABLE_ARCHIVE_BYTES) {
         throw new PortableServerError("archive_size_limit", "portable archive exceeds size limit");
+      }
+      if (await this.deps.imports.caseHasStoredJudgments(caseId)) {
+        throw new PortableServerError("unsupported_state", "external-run judgments are not exact-applyable");
       }
       return archive;
     } catch (error) {

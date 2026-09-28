@@ -13,7 +13,7 @@ Proposal ranking, supersede/resolve history surfacing, and walkthroughs remain
 unsupported-claim detection, HTML/PDF export, and an evidence appendix remain
 #532.
 
-### Trusted export and outside-response handoff (Goal 06 local draft)
+### Trusted export and outside-response handoff (Goal 06 shipped through #1185)
 
 The War Room's Decide export support prepares a versioned brief or selected-evidence
 prompt package through the existing server projection, capability checks and
@@ -30,10 +30,32 @@ Capture's existing manual import can record a synthetic outside response with
 its source, redaction confirmation, importer-described visibility and the
 package snapshot identity. That binding reports what the importer entered; it
 is not proof that an external model received the package, nor a correctness or
-corroboration judgment. The imported run stays unverified until a separate
-human assessment. A brief has no package snapshot. Neither file is a portable
-investigation archive; portable restore keeps its own dry-run and typed
-confirmation path. These Goal 06 changes remain unmerged until review.
+corroboration judgment. A human assessment does not change the legacy
+unverified banner; the separate Save review control does. A brief has no
+package snapshot. Neither file is a portable investigation archive; portable
+restore keeps its own dry-run and typed confirmation path.
+
+### Trusted human review of imported responses (Goal 07 local draft)
+
+War Room Capture places a focused, append-only Human assessments panel beside
+the exact imported run. The provenance inspector distinguishes recorded source,
+importer and operator, reported snapshot and visibility, and missing details;
+a package hash or trace claim is not proof of model exposure or correctness.
+Corroborates and Contradicts require an eligible recorded citation;
+Insufficient evidence may have none. The server records actor, time, sequence,
+original links and bounded rationale in the same transaction as timeline,
+audit and durable replay intent. A later disagreement is another attributed
+record, not an automatic vote, resolution, or replacement for Save review.
+
+After a conflict or unknown outcome, the browser freezes the draft and key,
+requires an explicit successful same-scope history read after that result, and
+offers a deliberate same-intent retry. The current sequence may change while
+the judgment, links, rationale and key remain fixed. A confirmed replay returns
+the original applied record without another row. Human assessment rows are not
+represented in the portable archive version: affected exact archive operations
+refuse rather than silently omitting history. Brief and prompt-package exports
+are partial handoffs and do not transfer assessments. This slice is a local
+draft, not a measured quality or verified-model-execution claim.
 
 The current local integration also adds a strategy-neutral evidence workspace:
 case-bound files remain owned by the evidence provider (filesystem or the

@@ -457,6 +457,46 @@ describe("shared human assessments panel", () => {
     expect(commandInput(createAssessment, 1)).toEqual(first);
   });
 
+  it("rejects a pre-failure read and a failed refresh before unlocking same-intent retry", async () => {
+    const createAssessment = vi.fn(async () => ({
+      status: "failed" as const, error: "commit_outcome_unknown" as const,
+    }));
+    const refresh = vi.fn(() => 2);
+    const view = mount({ createAssessment, refresh, readCompletion: 1 });
+    fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh recorded assessments" }));
+    const retry = screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement;
+    view.rerender(<HumanAssessmentsPanel
+      {...view.props} readCompletion={1} resource={{ status: "ready", value: [] }}
+    />);
+    expect(retry.disabled).toBe(true);
+    view.rerender(<HumanAssessmentsPanel
+      {...view.props} readCompletion={2}
+      resource={{ status: "failed", error: "unavailable", previous: [] }}
+    />);
+    expect(retry.disabled).toBe(true);
+    view.rerender(<HumanAssessmentsPanel
+      {...view.props} readCompletion={2} resource={{ status: "ready", value: [] }}
+    />);
+    await waitFor(() => expect(retry.disabled).toBe(false));
+    expect(createAssessment).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles an exact replay from its applied record even when history content is unchanged", async () => {
+    const applied = record({ seq: 1, rationale: "Earlier committed reading." });
+    const createAssessment = vi.fn(async () => ({
+      status: "succeeded" as const, applied, replayed: true,
+    }));
+    mount({ createAssessment, resource: { status: "ready", value: [applied] } });
+    fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
+    await waitFor(() => expect(screen.getByText(/confirmed by same-intent replay.*Sequence 1/)).toBeTruthy());
+    expect((screen.getByRole("radio", { name: "Insufficient evidence" }) as HTMLInputElement).disabled)
+      .toBe(false);
+  });
+
   it("does not auto-retry an unknown outcome", async () => {
     const createAssessment = vi.fn(async () => ({
       status: "failed" as const,

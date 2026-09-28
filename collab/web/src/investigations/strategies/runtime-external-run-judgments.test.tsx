@@ -206,6 +206,62 @@ afterEach(() => {
 });
 
 describe("runtime external run judgments adapter", () => {
+  it("opens only currently authorized citation targets and keeps unavailable links recorded", () => {
+    const navigate = vi.fn();
+    const judgment = list({
+      judgments: [{
+        schemaId: "cd-collab.external_run_judgment.v1",
+        caseId: CASE_ID,
+        runId: RUN_A,
+        seq: 1,
+        judgment: "corroborates",
+        actor: { id: "id-1", username: "alice" },
+        links: [
+          { kind: "artifact", id: ARTIFACT_ID },
+          { kind: "contribution", id: NOTE_ID },
+          { kind: "snapshot", id: "77777777-7777-4777-8777-777777777777" },
+        ],
+        rationale: null,
+        recordedAt: "2026-09-09T12:00:00.000Z",
+      }],
+    });
+    runtimeRef.current = makeRuntime({
+      runId: RUN_A,
+      judgments: { status: "ready", value: judgment },
+      evidence: { status: "ready", value: [artifact({ caseId: CASE_ID })] },
+      contributions: { status: "ready", value: [contribution({ caseId: CASE_ID })] },
+    });
+    const view = render(<RuntimeExternalRunJudgments
+      caseId={CASE_ID} runId={RUN_A} onDeepNavigate={navigate}
+    />);
+    const evidenceOpen = screen.getByRole("button", { name: "Open cited evidence" });
+    const reactKey = Object.keys(evidenceOpen).find((key) => key.startsWith("__reactProps$"));
+    if (!reactKey) throw new Error("React click handler is unavailable");
+    const retainedOpen = (evidenceOpen as unknown as Record<string, { onClick: () => void }>)[reactKey]!.onClick;
+    fireEvent.click(evidenceOpen);
+    expect(navigate).toHaveBeenCalledWith("analyze", expect.objectContaining({
+      item: ARTIFACT_ID, itemKind: "evidence",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Open cited contribution" }));
+    expect(navigate).toHaveBeenCalledWith("capture", expect.objectContaining({
+      item: NOTE_ID, itemKind: "contribution",
+    }));
+    expect(screen.getByText("77777777-7777-4777-8777-777777777777")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: /^Open cited/ })).toHaveLength(2);
+
+    runtimeRef.current = makeRuntime({
+      runId: RUN_A,
+      judgments: { status: "ready", value: judgment },
+      evidence: { status: "failed", error: { kind: "not_found", status: 404 } },
+      contributions: { status: "ready", value: [contribution({ caseId: CASE_ID, tombstoned: true })] },
+    });
+    view.rerender(<RuntimeExternalRunJudgments caseId={CASE_ID} runId={RUN_A} onDeepNavigate={navigate} />);
+    retainedOpen();
+    fireEvent.click(screen.getByRole("button", { name: "Open cited contribution" }));
+    expect(navigate).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(ARTIFACT_ID)).toBeTruthy();
+    expect(screen.getByText(NOTE_ID)).toBeTruthy();
+  });
   it("queries the current run exactly once when the command exists", () => {
     const query = vi.fn();
     renderFor(RUN_A, makeRuntime({ query, runId: null }));

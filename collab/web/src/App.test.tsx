@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createElement, StrictMode } from "react";
+import { createElement, StrictMode, useEffect, useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { USER_PROFILE_SCHEMA_ID, ADMIN_PEOPLE_LIST_SCHEMA_ID, DEFAULT_DIRECTORY_ATTRIBUTE_MAP, LDAP_PUBLIC_CONFIG_SCHEMA_ID } from "@cd-collab/contracts/admin";
 import { App } from "./App.js";
@@ -22,6 +22,7 @@ import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLoca
  * than a stand-in for it.
  */
 const runtimeMounts = vi.hoisted(() => [] as InvestigationRuntimeProviderProps[]);
+const assessmentRuntimeProbe = vi.hoisted(() => ({ enabled: false, creates: 0, refreshes: 0 }));
 vi.mock("./investigations/runtime/public.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./investigations/runtime/public.js")>();
   return {
@@ -30,11 +31,36 @@ vi.mock("./investigations/runtime/public.js", async (importOriginal) => {
       runtimeMounts.push(props);
       return createElement(actual.InvestigationRuntimeProvider, props);
     },
+    useInvestigationRuntime: () => {
+      const runtime = actual.useInvestigationRuntime();
+      if (!assessmentRuntimeProbe.enabled) return runtime;
+      const create = runtime.commands.createExternalRunJudgment;
+      return {
+        ...runtime,
+        commands: {
+          ...runtime.commands,
+          createExternalRunJudgment: create === null ? null : (command: Parameters<typeof create>[0]) => {
+            assessmentRuntimeProbe.creates += 1;
+            return create(command);
+          },
+        },
+        refresh: {
+          ...runtime.refresh,
+          externalRunJudgments: () => {
+            assessmentRuntimeProbe.refreshes += 1;
+            return runtime.refresh.externalRunJudgments();
+          },
+        },
+      };
+    },
   };
 });
 
 afterEach(() => {
   runtimeMounts.length = 0;
+  assessmentRuntimeProbe.enabled = false;
+  assessmentRuntimeProbe.creates = 0;
+  assessmentRuntimeProbe.refreshes = 0;
   cleanup();
   vi.unstubAllGlobals();
   delete window.__CONTEXTDESK_STATIC_READ_ONLY__;
@@ -2174,6 +2200,92 @@ describe("War Room human assessments mount", () => {
       return null;
     });
   }
+
+  it("rejects a captured assessment submit in the actual keyed App replacement before passive cleanup", async () => {
+    assessmentRuntimeProbe.enabled = true;
+    const pathForRun = (runId: string) =>
+      `/investigations/${uuid}/capture?section=triage-capture&item=${runId}&kind=imported-run`;
+    const stub = stubWarRoomCapture(pathForRun(run1), (url) => {
+      if (url === `/api/cases/${uuid}`) return Promise.resolve(jsonOk(focusedInvestigation));
+      return url === `/api/cases/${uuid}/runs/${run2}/judgments`
+        ? Promise.resolve(jsonOk({
+          schemaId: "cd-collab.external_run_judgment_list.v1",
+          caseId: uuid,
+          runId: run2,
+          judgments: [],
+        }))
+        : null;
+    });
+    const posted = () => stub.mock.calls.filter(([url, init]) =>
+      String(url).includes("/judgments") && (init as RequestInit | undefined)?.method === "POST").length;
+    let oldSubmit: ((event: { preventDefault(): void }) => void) | null = null;
+    const passiveCleanups: number[] = [];
+    const observed: Array<{
+      phase: number; beforePassive: boolean; invoked: number;
+      runtimeCreates: number; gatewayPosts: number; oldDraftVisible: boolean;
+    }> = [];
+    function PassiveWitness({ phase }: { phase: number }) {
+      useEffect(() => () => { passiveCleanups.push(phase); }, [phase]);
+      return null;
+    }
+    function ReplacementProbe({ phase }: { phase: number }) {
+      useLayoutEffect(() => {
+        if (phase === 0 || oldSubmit === null) return;
+        const beforePassive = !passiveCleanups.includes(phase - 1);
+        oldSubmit({ preventDefault() {} });
+        observed.push({
+          phase, beforePassive, invoked: 1,
+          runtimeCreates: assessmentRuntimeProbe.creates,
+          gatewayPosts: posted(),
+          oldDraftVisible: document.body.textContent?.includes("Private draft A must disappear.") ?? false,
+        });
+      }, [phase]);
+      return null;
+    }
+    function Host({ phase }: { phase: number }) {
+      return <>
+        <App key={`app-${phase}`} />
+        <PassiveWitness key={`passive-${phase}`} phase={phase} />
+        <ReplacementProbe key={`probe-${phase}`} phase={phase} />
+      </>;
+    }
+    const view = render(<Host phase={0} />);
+    await screen.findByText("No human assessment has been recorded yet.");
+    await screen.findByRole("heading", { name: "Record an assessment" });
+    fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+    fireEvent.click(screen.getByRole("checkbox", {
+      name: /I understand this assessment history cannot be carried/,
+    }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Rationale (optional)" }), {
+      target: { value: "Private draft A must disappear." },
+    });
+    const form = screen.getByRole("form", { name: "Record an assessment" });
+    const reactKey = Object.keys(form).find((key) => key.startsWith("__reactProps$"));
+    if (!reactKey) throw new Error("mounted assessment submit handler is unavailable");
+    oldSubmit = (form as unknown as Record<string, { onSubmit: typeof oldSubmit }>)[reactKey]!.onSubmit;
+    expect(oldSubmit).toBeTypeOf("function");
+    expect(posted()).toBe(0);
+
+    window.history.replaceState(null, "", pathForRun(run2));
+    view.rerender(<Host phase={1} />);
+    expect(observed[0]).toEqual({
+      phase: 1, beforePassive: true, invoked: 1,
+      runtimeCreates: 0, gatewayPosts: 0, oldDraftVisible: false,
+    });
+    expect(passiveCleanups).toContain(0);
+    await screen.findByRole("heading", { name: "Human assessments" });
+    expect(posted()).toBe(0);
+
+    window.history.replaceState(null, "", pathForRun(run1));
+    view.rerender(<Host phase={2} />);
+    expect(observed[1]).toEqual({
+      phase: 2, beforePassive: true, invoked: 1,
+      runtimeCreates: 0, gatewayPosts: 0, oldDraftVisible: false,
+    });
+    expect(passiveCleanups).toContain(1);
+    await screen.findByText("No human assessment has been recorded yet.");
+    expect(posted()).toBe(0);
+  });
 
   it("mounts human assessments only for War Room capture of the focused imported run", async () => {
     stubWarRoomCapture(

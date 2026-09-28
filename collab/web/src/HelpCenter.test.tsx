@@ -114,9 +114,8 @@ describe("help search", () => {
     expect(screen.getByRole("status").textContent).toMatch(/^\d+ results? for “import”$/);
     const results = within(resultsList()).getAllByRole("button");
     expect(results.length).toBeGreaterThan(1);
-    expect(results[0]?.querySelector(".help-result__title")?.textContent).toBe(
-      "Import output from an outside tool",
-    );
+    expect(results[0]?.querySelector(".help-result__title")?.textContent).toMatch(/imported|Import/);
+    expect(results.some((result) => result.textContent?.includes("Import output from an outside tool"))).toBe(true);
   });
 
   it("shows matched context with the term highlighted", () => {
@@ -175,8 +174,7 @@ describe("help search", () => {
   it("opens an article from a result and clears the query", () => {
     renderHelp();
     searchFor("import");
-    const results = within(resultsList()).getAllByRole("button");
-    fireEvent.click(results[0] as HTMLElement);
+    fireEvent.click(within(resultsList()).getByRole("button", { name: /Import output from an outside tool/ }));
     expect(
       screen.getByRole("heading", { name: "Import output from an outside tool" }),
     ).toBeTruthy();
@@ -231,10 +229,10 @@ describe("help search", () => {
     });
     fireEvent.click(result);
     expect(
-      screen.getByText(/current brief and selected-evidence package/, { exact: false }),
+      screen.getByText(/portable archive differs from a brief or prompt package/, { exact: false }),
     ).toBeTruthy();
     expect(
-      screen.getByText(/Only fields represented and supported exactly can be restored/, {
+      screen.getByText(/Human assessment history is not represented by this archive version/, {
         exact: false,
       }),
     ).toBeTruthy();
