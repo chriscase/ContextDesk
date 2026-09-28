@@ -15,7 +15,12 @@ interface MockResponse {
 }
 
 function jsonResponse(ok: boolean, body: unknown, status = ok ? 200 : 422): MockResponse {
-  return { ok, status, json: async () => body };
+  const record = typeof body === "object" && body !== null && !Array.isArray(body)
+    ? body as Record<string, unknown> : null;
+  const wire = ok && record && Array.isArray(record.items) && !record.schemaId
+    ? { schemaId: "cd-collab.export_inventory.v1", caseId: "c1", ...record }
+    : body;
+  return { ok, status, json: async () => wire };
 }
 
 function deferred<T>() {
@@ -68,11 +73,99 @@ const SYNTHETIC_ARCHIVE = {
   },
 };
 
+function briefEnvelope(
+  privacyClass: "owner_only" | "share_safe" = "owner_only",
+  caseId = "c1",
+) {
+  return {
+    schemaId: "cd-collab.export_envelope.v1",
+    kind: "brief",
+    privacyClass,
+    exportedAt: "2026-09-09T12:00:00.000Z",
+    payload: {
+      schemaId: "cd-collab.brief.v1",
+      privacyClass,
+      header: {
+        caseId,
+        title: "Synthetic investigation",
+        severity: "medium",
+        status: "open",
+        legalHold: false,
+        retentionClass: "standard",
+      },
+      timeline: [],
+      hypotheses: [],
+      actions: [],
+      evidence: [],
+      attributions: [],
+      importedRuns: [],
+    },
+    markdown: "# Triage brief\n",
+  } as const;
+}
+
+function packageEnvelope(
+  privacyClass: "owner_only" | "share_safe" = "owner_only",
+  caseId = "c1",
+  scaffold: string | null = null,
+) {
+  return {
+    schemaId: "cd-collab.export_envelope.v1",
+    kind: "package",
+    privacyClass,
+    exportedAt: "2026-09-09T12:00:00.000Z",
+    payload: {
+      schemaId: "cd-collab.prompt_package.v1",
+      privacyClass,
+      caseId,
+      snapshotIdentity: "f".repeat(64),
+      manifest: {
+        schemaId: "cd-collab.package_manifest.v1",
+        caseId,
+        variant: privacyClass,
+        items: [
+          {
+            kind: "artifact",
+            id: "a1",
+            contentHash: "h",
+            privacyClass,
+          },
+        ],
+        promptScaffoldHash: scaffold === null ? null : "e".repeat(64),
+        excludedByDefault: [],
+      },
+      excerpts: [
+        {
+          kind: "artifact",
+          id: "a1",
+          contentHash: "h",
+          sourceLabel: "Synthetic source",
+          privacyClass,
+          content: privacyClass === "owner_only" ? "Synthetic evidence" : null,
+          bodyIncluded: privacyClass === "owner_only",
+        },
+      ],
+      promptScaffold: scaffold,
+    },
+    markdown: "# Prompt package\n",
+  } as const;
+}
+
 function jsonFile(value: unknown, name = "investigation.json"): File {
   const contents = JSON.stringify(value);
   const file = new File([contents], name, { type: "application/json" });
   Object.defineProperty(file, "text", { value: async () => contents });
   return file;
+}
+
+async function blobText(blob: Blob): Promise<string> {
+  if (typeof blob.text === "function") return blob.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result ?? "")));
+    reader.addEventListener("error", () => reject(reader.error));
+    reader.readAsText(blob);
+  });
 }
 
 describe("export panel", () => {
@@ -94,7 +187,7 @@ describe("export panel", () => {
             ],
           });
         }
-        return jsonResponse(true, { markdown: "# Triage brief\n", payload: {} });
+        return jsonResponse(true, briefEnvelope());
       }
       return jsonResponse(false, {});
     });
@@ -103,15 +196,15 @@ describe("export panel", () => {
     expect(await screen.findByText(/app.log/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
     expect(await screen.findByText(/# Triage brief/)).toBeTruthy();
-    expect(screen.getByText(/Triage brief exported\./)).toBeTruthy();
+    expect(screen.getByText(/Triage brief prepared\./)).toBeTruthy();
     fireEvent.change(screen.getByDisplayValue("owner_only"), { target: { value: "share_safe" } });
     fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
     expect(await screen.findByText(/privacy_scan_failed/)).toBeTruthy();
     expect(screen.getByText(/credential · \$\.actions\[0\]\.body · \[redacted\]/)).toBeTruthy();
     expect(screen.queryByText(/aws_access_key: AKIA/)).toBeNull();
-    expect(screen.getByText(/privacy scan blocked this export/)).toBeTruthy();
+    expect(screen.getByText(/privacy scan blocked a downloadable result/i)).toBeTruthy();
     expect(screen.queryByText(/# Triage brief/)).toBeNull();
-    expect(screen.queryByText(/Triage brief exported\./)).toBeNull();
+    expect(screen.queryByText(/Triage brief prepared\./)).toBeNull();
     expect(briefBodies).toEqual([{ variant: "owner_only" }, { variant: "share_safe" }]);
   });
 
@@ -184,10 +277,7 @@ describe("export panel", () => {
       }
       if (url === "/api/cases/c1/export/package") {
         packageBodies.push(JSON.parse(String(init?.body ?? "{}")));
-        return jsonResponse(true, {
-          markdown: "# Prompt package\n",
-          payload: { snapshotIdentity: "f".repeat(64) },
-        });
+        return jsonResponse(true, packageEnvelope("owner_only", "c1", "Summarize the incident"));
       }
       return jsonResponse(false, {});
     });
@@ -218,7 +308,7 @@ describe("export panel", () => {
       target: { value: "Summarize the incident" },
     });
     fireEvent.click(packageButton);
-    expect(await screen.findByText(/Selected-evidence prompt package exported\./)).toBeTruthy();
+    expect(await screen.findByText(/Selected-evidence prompt package prepared\./)).toBeTruthy();
     expect(packageBodies).toEqual([
       {
         variant: "owner_only",
@@ -227,9 +317,174 @@ describe("export panel", () => {
       },
     ]);
     expect(screen.getByText("f".repeat(64))).toBeTruthy();
-    expect(screen.getByText(/content hash of this export's manifest/)).toBeTruthy();
+    expect(screen.getByText(/content hash of this package's manifest/)).toBeTruthy();
     const region = screen.getByRole("region", { name: "Exported markdown" });
     expect(region.textContent).toContain("# Prompt package");
+  });
+
+  it("downloads the validated package envelope and markdown with truthful names", async () => {
+    const envelope = packageEnvelope();
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/case:unsafe/export/inventory") {
+        return jsonResponse(true, { caseId: "case:unsafe", items: [APP_LOG_ITEM] });
+      }
+      if (url === "/api/cases/case:unsafe/export/package") {
+        return jsonResponse(true, packageEnvelope("owner_only", "case:unsafe"));
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const blobs: Blob[] = [];
+    const createObjectURL = vi.fn((blob: Blob) => {
+      blobs.push(blob);
+      return `blob:export-${blobs.length}`;
+    });
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const downloadNames: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      expect(this.isConnected).toBe(true);
+      downloadNames.push(this.download);
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    const view = render(<ExportPanel caseId="case:unsafe" canWrite canLead />);
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    await screen.findByText(/app.log/);
+    fireEvent.click(screen.getByRole("checkbox", { name: /app\.log/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Export selected-evidence prompt package" }),
+    );
+    expect(await screen.findByText("Prompt package")).toBeTruthy();
+    expect(screen.getAllByText("owner only").length).toBeGreaterThan(0);
+    expect(screen.getByText("f".repeat(64))).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Download JSON" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download Markdown" }));
+    expect(downloadNames).toEqual([
+      "contextdesk-case-unsafe-package-owner_only.json",
+      "contextdesk-case-unsafe-package-owner_only.md",
+    ]);
+    expect(blobs.map((blob) => blob.type)).toEqual([
+      "application/json;charset=utf-8",
+      "text/markdown;charset=utf-8",
+    ]);
+    expect(await blobText(blobs[0]!)).toBe(
+      `${JSON.stringify(packageEnvelope("owner_only", "case:unsafe"), null, 2)}\n`,
+    );
+    expect(await blobText(blobs[1]!)).toBe(envelope.markdown);
+
+    view.unmount();
+    expect(revokeObjectURL.mock.calls.map(([url]) => url)).toEqual([
+      "blob:export-1",
+      "blob:export-2",
+    ]);
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(revokeObjectURL).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("fails closed on a mismatched or malformed export and clears the previous result", async () => {
+    let calls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/export/inventory") {
+        return jsonResponse(true, { items: [APP_LOG_ITEM] });
+      }
+      if (url === "/api/cases/c1/export/brief") {
+        calls += 1;
+        if (calls === 1) return jsonResponse(true, briefEnvelope());
+        if (calls === 2) return jsonResponse(true, briefEnvelope("owner_only", "another-case"));
+        return jsonResponse(true, { markdown: "unvalidated" });
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    await screen.findByText(/app.log/);
+
+    const button = screen.getByRole("button", { name: "Export triage brief" });
+    fireEvent.click(button);
+    expect(await screen.findByRole("button", { name: "Download JSON" })).toBeTruthy();
+    fireEvent.click(button);
+    expect(await screen.findByText(/server returned an invalid export result/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Exported markdown" })).toBeNull();
+
+    fireEvent.click(button);
+    expect(await screen.findByText(/server returned an invalid export result/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Download Markdown" })).toBeNull();
+  });
+
+  it("conceals a prior case export immediately and ignores its late response after scope changes", async () => {
+    const secondExport = deferred<MockResponse>();
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/export/inventory")) {
+        return jsonResponse(true, { caseId: url.split("/")[3], items: [APP_LOG_ITEM] });
+      }
+      if (url === "/api/cases/c1/export/brief") {
+        return jsonResponse(true, briefEnvelope("owner_only", "c1"));
+      }
+      if (url === "/api/cases/c2/export/brief") {
+        return secondExport.promise;
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<ExportPanel caseId="c1" canWrite canLead />);
+    await screen.findByText(/app.log/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    expect(await screen.findByText("Triage brief prepared.", { exact: false })).toBeTruthy();
+
+    view.rerender(<ExportPanel caseId="c2" canWrite canLead />);
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Exported markdown" })).toBeNull();
+    await screen.findByText(/app.log/);
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    expect(await screen.findByText(/Exporting triage brief…/)).toBeTruthy();
+
+    view.rerender(<ExportPanel caseId="c3" canWrite canLead />);
+    await act(async () => {
+      secondExport.resolve(jsonResponse(true, briefEnvelope("owner_only", "c2")));
+      await secondExport.promise;
+    });
+    expect(screen.queryByText(/Triage brief prepared/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not offer a package download for an invalid snapshot identity", async () => {
+    const valid = packageEnvelope();
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/export/inventory") {
+        return jsonResponse(true, { items: [APP_LOG_ITEM] });
+      }
+      if (url === "/api/cases/c1/export/package") {
+        return jsonResponse(true, {
+          ...valid,
+          payload: { ...valid.payload, snapshotIdentity: "not-a-content-hash" },
+        });
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    await screen.findByText(/app.log/);
+    fireEvent.click(screen.getByRole("checkbox", { name: /app\.log/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Export selected-evidence prompt package" }),
+    );
+    expect(await screen.findByText(/server returned an invalid export result/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    expect(screen.queryByText("not-a-content-hash")).toBeNull();
   });
 
   it("disables both submits and shows progress while an export is in flight", async () => {
@@ -263,8 +518,8 @@ describe("export panel", () => {
     ).toBe(true);
     expect((screen.getByDisplayValue("owner_only") as HTMLSelectElement).disabled).toBe(true);
     fireEvent.submit(screen.getByRole("form", { name: "Export triage brief" }));
-    briefGate.resolve(jsonResponse(true, { markdown: "# Triage brief\n", payload: {} }));
-    expect(await screen.findByText(/Triage brief exported\./)).toBeTruthy();
+    briefGate.resolve(jsonResponse(true, briefEnvelope()));
+    expect(await screen.findByText(/Triage brief prepared\./)).toBeTruthy();
     expect(briefCalls).toBe(1);
     expect(briefButton.disabled).toBe(false);
     expect((screen.getByDisplayValue("owner_only") as HTMLSelectElement).disabled).toBe(false);
@@ -281,7 +536,7 @@ describe("export panel", () => {
       if (url === "/api/cases/c1/export/brief") {
         briefCalls += 1;
         if (briefCalls === 1) throw new TypeError("network down");
-        return jsonResponse(true, { markdown: "# Triage brief\n", payload: {} });
+        return jsonResponse(true, briefEnvelope());
       }
       return jsonResponse(false, {});
     });
@@ -291,8 +546,7 @@ describe("export panel", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /app\.log/ }));
     fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("did not complete");
-    expect(alert.textContent).toContain("selection are unchanged");
+    expect(alert.textContent).toContain("response was interrupted");
     expect((screen.getByRole("checkbox", { name: /app\.log/ }) as HTMLInputElement).checked).toBe(
       true,
     );
@@ -300,7 +554,7 @@ describe("export panel", () => {
       (screen.getByRole("button", { name: "Export triage brief" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
-    expect(await screen.findByText(/Triage brief exported\./)).toBeTruthy();
+    expect(await screen.findByText(/Triage brief prepared\./)).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(briefCalls).toBe(2);
   });
@@ -314,8 +568,7 @@ describe("export panel", () => {
     render(<ExportPanel caseId="c1" canWrite canLead={false} />);
     expect(await screen.findByText(/app.log/)).toBeTruthy();
     const option = screen.getByRole("option", { name: "share_safe" }) as HTMLOptionElement;
-    expect(option.disabled).toBe(true);
-    expect(screen.getByText("share_safe is available to case leads only.")).toBeTruthy();
+    expect(option.disabled).toBe(false);
     expect(
       (screen.getByRole("button", { name: "Export triage brief" }) as HTMLButtonElement).disabled,
     ).toBe(false);
@@ -328,7 +581,7 @@ describe("export panel", () => {
         return jsonResponse(true, { items: [APP_LOG_ITEM] });
       }
       if (url === "/api/cases/c1/export/brief") {
-        return jsonResponse(true, { markdown: "# Triage brief\n", payload: {} });
+        return jsonResponse(true, briefEnvelope());
       }
       return jsonResponse(false, {});
     });
@@ -351,7 +604,7 @@ describe("export panel", () => {
     const fetchMock = vi.fn(async (input: RequestInfo) => {
       const url = String(input);
       if (url === "/api/cases/case-safe/export/inventory") {
-        return jsonResponse(true, { items: [] });
+        return jsonResponse(true, { caseId: "case-safe", items: [] });
       }
       if (url === "/api/portable-investigations/capabilities") {
         return jsonResponse(true, PORTABLE_CAPABILITIES);
@@ -362,7 +615,10 @@ describe("export panel", () => {
       return jsonResponse(false, {});
     });
     vi.stubGlobal("fetch", fetchMock);
-    const createObjectURL = vi.fn(() => "blob:portable-archive");
+    const createObjectURL = vi
+      .fn()
+      .mockReturnValueOnce("blob:portable-archive-1")
+      .mockReturnValueOnce("blob:portable-archive-2");
     const revokeObjectURL = vi.fn();
     vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
     let downloadName = "";
@@ -375,14 +631,14 @@ describe("export panel", () => {
     });
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
-    render(<ExportPanel caseId="case-safe" canWrite canLead />);
+    const view = render(<ExportPanel caseId="case-safe" canWrite canLead />);
     const button = await screen.findByRole("button", {
       name: "Download portable investigation archive",
     });
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(button);
 
-    expect(await screen.findByText(/Portable investigation archive downloaded/)).toBeTruthy();
+    expect(await screen.findByText(/Portable archive download started/)).toBeTruthy();
     expect(downloadName).toBe("contextdesk-investigation-case-safe.json");
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     // The anchor must be in the document when it is clicked; a detached one is
@@ -395,11 +651,19 @@ describe("export panel", () => {
     await act(async () => {
       vi.advanceTimersByTime(5_000);
     });
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive-1");
     expect(screen.getByText(/Unlike the selected-evidence package above/)).toBeTruthy();
     expect(screen.getByText(/supported only by this single server instance/)).toBeTruthy();
     expect(screen.getByText(/Restore requires an exact reconstruction/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
+    fireEvent.click(button);
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(2));
+    view.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive-2");
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(revokeObjectURL).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 
@@ -408,7 +672,7 @@ describe("export panel", () => {
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/cases/c1/export/inventory") {
-        return jsonResponse(true, { items: [] });
+        return jsonResponse(true, { caseId: "c1", items: [] });
       }
       if (url === "/api/portable-investigations/capabilities") {
         return jsonResponse(true, PORTABLE_CAPABILITIES);
@@ -505,7 +769,7 @@ describe("export panel", () => {
     const fetchMock = vi.fn(async (input: RequestInfo) => {
       const url = String(input);
       if (url === "/api/cases/c1/export/inventory") {
-        return jsonResponse(true, { items: [] });
+        return jsonResponse(true, { caseId: "c1", items: [] });
       }
       if (url === "/api/portable-investigations/capabilities") {
         return jsonResponse(true, { ...PORTABLE_CAPABILITIES, maximumArchiveBytes: 24 });
@@ -534,7 +798,7 @@ describe("export panel", () => {
     const fetchMock = vi.fn(async (input: RequestInfo) => {
       const url = String(input);
       if (url === "/api/cases/c1/export/inventory") {
-        return jsonResponse(true, { items: [] });
+        return jsonResponse(true, { caseId: "c1", items: [] });
       }
       if (url === "/api/portable-investigations/capabilities") {
         return jsonResponse(true, PORTABLE_CAPABILITIES);
@@ -576,7 +840,7 @@ describe("export panel", () => {
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/cases/c1/export/inventory") {
-        return jsonResponse(true, { items: [] });
+        return jsonResponse(true, { caseId: "c1", items: [] });
       }
       if (url === "/api/portable-investigations/capabilities") {
         return jsonResponse(true, PORTABLE_CAPABILITIES);
@@ -687,4 +951,156 @@ describe("export panel", () => {
       true,
     );
   });
+  it("rejects a nested malformed brief and a mismatched inventory before any download", async () => {
+    let inventoryCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/export/inventory")) {
+        inventoryCalls += 1;
+        return jsonResponse(true, inventoryCalls === 1
+          ? { caseId: "other-case", items: [APP_LOG_ITEM] }
+          : { caseId: "c1", items: [APP_LOG_ITEM] });
+      }
+      if (url.endsWith("/export/brief")) {
+        const invalid = structuredClone(briefEnvelope()) as Record<string, unknown>;
+        (invalid.payload as { timeline: unknown[] }).timeline = [{ rawPrivate: "must-not-render" }];
+        return jsonResponse(true, invalid);
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("inventory could not be loaded"));
+    expect(screen.queryByText(/app.log/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading inventory" }));
+    await screen.findByText(/app.log/);
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    expect(await screen.findByText(/invalid export result/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    expect(screen.queryByText("must-not-render")).toBeNull();
+  });
+
+  it("revokes a prepared result on draft change and rejects a retained download callback", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/export/inventory")) return jsonResponse(true, { items: [APP_LOG_ITEM] });
+      if (url.endsWith("/export/brief")) return jsonResponse(true, briefEnvelope());
+      return jsonResponse(false, {});
+    }));
+    const createObjectURL = vi.fn(() => "blob:prepared");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    await screen.findByText(/app.log/);
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    const download = await screen.findByRole("button", { name: "Download JSON" });
+    const key = Object.keys(download).find((candidate) => candidate.startsWith("__reactProps$"))!;
+    const callback = (download as unknown as Record<string, { onClick: () => void }>)[key]!.onClick;
+    fireEvent.change(screen.getByLabelText(/Variant/), { target: { value: "share_safe" } });
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    await act(async () => callback());
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("does not publish a late A-to-B-to-A response or error", async () => {
+    const old = deferred<MockResponse>();
+    const fetchMock = vi.fn((input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/export/inventory")) return Promise.resolve(jsonResponse(true, { caseId: url.split("/")[3], items: [] }));
+      if (url === "/api/cases/A/export/brief") return old.promise;
+      return Promise.resolve(jsonResponse(false, { error: "private-token" }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<ExportPanel caseId="A" canWrite canLead identityKey="user" authorityKey="grant" />);
+    await screen.findByText(/no exportable evidence yet/);
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    view.rerender(<ExportPanel caseId="B" canWrite canLead identityKey="user" authorityKey="grant" />);
+    view.rerender(<ExportPanel caseId="A" canWrite canLead identityKey="user" authorityKey="grant" />);
+    await act(async () => { old.resolve(jsonResponse(true, briefEnvelope("owner_only", "A"))); await old.promise; });
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    expect(screen.queryByText(/private-token/)).toBeNull();
+  });
+
+  it("rejects a retained submit callback after a direct A-to-B-to-A scope visit", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/export/inventory")) {
+        return jsonResponse(true, {
+          schemaId: "cd-collab.export_inventory.v1",
+          caseId: url.split("/")[3],
+          items: [],
+        });
+      }
+      if (url === "/api/cases/A/export/brief") return jsonResponse(true, briefEnvelope("owner_only", "A"));
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<ExportPanel caseId="A" canWrite canLead identityKey="user" authorityKey="grant" />);
+    await screen.findByText(/no exportable evidence yet/);
+    const form = screen.getByRole("form", { name: "Export triage brief" });
+    const key = Object.keys(form).find((candidate) => candidate.startsWith("__reactProps$"))!;
+    const oldSubmit = (form as unknown as Record<string, { onSubmit: (event: { preventDefault: () => void }) => void }>)[key]!.onSubmit;
+    view.rerender(<ExportPanel caseId="B" canWrite canLead identityKey="user" authorityKey="grant" />);
+    view.rerender(<ExportPanel caseId="A" canWrite canLead identityKey="user" authorityKey="grant" />);
+    await act(async () => oldSubmit({ preventDefault: () => {} }));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/export/brief"))).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    await screen.findByRole("button", { name: "Download JSON" });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/export/brief"))).toHaveLength(1);
+  });
+
+  it("clears a scoped package scaffold before another case can see or submit it", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/export/inventory")) {
+        return jsonResponse(true, {
+          schemaId: "cd-collab.export_inventory.v1",
+          caseId: url.split("/")[3],
+          items: [],
+        });
+      }
+      return jsonResponse(false, {});
+    }));
+    const view = render(<ExportPanel caseId="A" canWrite canLead identityKey="user" authorityKey="grant" />);
+    await screen.findByText(/no exportable evidence yet/);
+    const scaffold = screen.getByLabelText(/Optional prompt scaffold/) as HTMLTextAreaElement;
+    fireEvent.change(scaffold, { target: { value: "synthetic A-only context" } });
+    expect(scaffold.value).toBe("synthetic A-only context");
+    view.rerender(<ExportPanel caseId="B" canWrite canLead identityKey="user" authorityKey="grant" />);
+    expect((screen.getByLabelText(/Optional prompt scaffold/) as HTMLTextAreaElement).value).toBe("");
+    view.rerender(<ExportPanel caseId="A" canWrite canLead identityKey="user" authorityKey="grant" />);
+    expect((screen.getByLabelText(/Optional prompt scaffold/) as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("releases repeated URL leases on replacement and on dispatch failure", async () => {
+    let responses = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/export/inventory")) return jsonResponse(true, { items: [] });
+      if (url.endsWith("/export/brief")) {
+        responses += 1;
+        return jsonResponse(true, briefEnvelope());
+      }
+      return jsonResponse(false, {});
+    }));
+    const createObjectURL = vi.fn().mockReturnValueOnce("blob:one").mockReturnValueOnce("blob:two").mockReturnValueOnce("blob:three");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    await screen.findByText(/no exportable evidence yet/);
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    await screen.findByRole("button", { name: "Download JSON" });
+    fireEvent.click(screen.getByRole("button", { name: "Download JSON" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download Markdown" }));
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
+    expect(revokeObjectURL.mock.calls.map(([url]) => url)).toEqual(["blob:one", "blob:two"]);
+    await screen.findByRole("button", { name: "Download JSON" });
+    click.mockImplementationOnce(() => { throw new Error("dispatch failure"); });
+    fireEvent.click(screen.getByRole("button", { name: "Download JSON" }));
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:three");
+    expect(screen.getByText(/browser could not start this download/)).toBeTruthy();
+    expect(responses).toBe(2);
+  });
+
 });

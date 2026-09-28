@@ -13,9 +13,15 @@ import {
   INVESTIGATION_PROVENANCE_CLASSES,
   type InvestigationProvenanceClassV1,
   type InvestigationResourceKindV1,
-} from "./investigation-activity.js";
-import { REFERENCE_STATES, type ReferenceState } from "./investigation-reference.js";
-import { RESOLUTION_BASES, type ResolutionBasis } from "./investigation-resolution.js";
+} from "./investigation-activity-browser.js";
+import {
+  REFERENCE_STATES,
+  type ReferenceState,
+} from "./investigation-reference-vocabulary.js";
+import {
+  RESOLUTION_BASES,
+  type ResolutionBasis,
+} from "./investigation-resolution-vocabulary.js";
 import {
   OCCURRED_AT_PRECISIONS,
   OCCURRED_AT_ZONES,
@@ -23,7 +29,7 @@ import {
   type OccurredAtZone,
 } from "./temporal.js";
 import { HYPOTHESIS_STATUSES } from "./contribution.js";
-import { CORROBORATION_STATES } from "./run.js";
+import { CORROBORATION_STATES } from "./corroboration.js";
 
 export const BRIEF_SCHEMA_ID = "cd-collab.brief.v1" as const;
 export const IMPORTED_RESPONSE_PRESENTATION = "imported_response" as const;
@@ -330,6 +336,28 @@ export const briefShape: ObjectShape = {
 export function parseBrief(raw: unknown): BriefV1 {
   checkObject("$", briefShape, raw);
   const parsed = raw as BriefV1;
+  parsed.evidence.forEach((row, index) => {
+    if (row.bytesIncluded !== (row.content !== null)) {
+      throw new ContractViolation(
+        `$.evidence[${index}].bytesIncluded`,
+        "included evidence bytes must match content presence",
+      );
+    }
+    if (parsed.privacyClass === "share_safe" && row.privacyClass === "owner_only" && row.content !== null) {
+      throw new ContractViolation(
+        `$.evidence[${index}].content`,
+        "owner-only evidence content cannot be included in a share-safe brief",
+      );
+    }
+  });
+  parsed.importedRuns.forEach((row, index) => {
+    if (row.outputIncluded !== (row.outputText !== null)) {
+      throw new ContractViolation(
+        `$.importedRuns[${index}].outputIncluded`,
+        "included imported response must match output presence",
+      );
+    }
+  });
   // Default-deny, checked rather than assumed: a share-safe brief must not
   // carry an undisclosed entity label, another investigation's title, or the
   // reasoning behind a conclusion.
@@ -357,6 +385,12 @@ export function parseBrief(raw: unknown): BriefV1 {
         "resolution reasoning is owner-only content",
       );
     }
+    if (parsed.resolution && parsed.resolution.unknowns !== null) {
+      throw new ContractViolation(
+        "$.resolution.unknowns",
+        "resolution unknowns are owner-only reasoning",
+      );
+    }
   }
   if (parsed.resolution) {
     const withheld = !parsed.resolution.rationaleIncluded;
@@ -370,6 +404,25 @@ export function parseBrief(raw: unknown): BriefV1 {
       throw new ContractViolation(
         "$.resolution.rationale",
         "an included rationale must carry the reasoning",
+      );
+    }
+    if (withheld && parsed.resolution.unknowns !== null) {
+      throw new ContractViolation(
+        "$.resolution.unknowns",
+        "withheld resolution reasoning must omit unknowns",
+      );
+    }
+    if (!withheld && parsed.resolution.unknowns === null) {
+      throw new ContractViolation(
+        "$.resolution.unknowns",
+        "included resolution reasoning must carry unknowns",
+      );
+    }
+    if (parsed.resolution.unknowns !== null &&
+        parsed.resolution.unknowns.length !== parsed.resolution.unknownCount) {
+      throw new ContractViolation(
+        "$.resolution.unknownCount",
+        "resolution unknown count must match included unknowns",
       );
     }
   }

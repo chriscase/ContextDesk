@@ -260,7 +260,11 @@ test.describe("Investigation First accessibility and browser conformance", () =>
 
     const search = page.getByRole("searchbox", { name: "Search investigations" });
     await search.focus();
-    await page.keyboard.type(title);
+    // Keep the keyboard path, while allowing the URL-backed controlled input
+    // to commit each key before the next arrives. Zero-delay synthetic typing
+    // can drop characters that no human keyboard cadence would overlap.
+    await page.keyboard.type(title, { delay: 10 });
+    await expect(search).toHaveValue(title);
     const result = page.locator(".investigation-first__list-button").filter({ hasText: title });
     await activate(result, page);
     await expect(page).toHaveURL(`/investigations/${caseId}/situation`);

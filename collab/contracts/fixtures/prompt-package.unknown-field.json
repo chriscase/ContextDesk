@@ -9,7 +9,7 @@
     "variant": "share_safe",
     "items": [],
     "promptScaffoldHash": null,
-    "excludedByDefault": ["corroboration", "resolution"]
+    "excludedByDefault": ["external_run", "corroboration", "resolution"]
   },
   "excerpts": [],
   "promptScaffold": null,

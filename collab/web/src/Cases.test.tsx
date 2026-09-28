@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useEffect, useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CaseDiscussion } from "./CaseDiscussion.js";
 import { Cases, activityLabel } from "./Cases.js";
@@ -14,6 +15,7 @@ import type { InvestigationCollectionPageV1, ResourceView } from "./investigatio
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -138,7 +140,9 @@ function stubCaseFetch(options?: {
       return { ok: true, json: async () => ({ contributions: [] }) };
     }
     if (url.endsWith("/experiments") || url.endsWith("/export/inventory")) {
-      return { ok: true, json: async () => ({ experiments: [], items: [] }) };
+      return { ok: true, json: async () => url.endsWith("/export/inventory")
+        ? { schemaId: "cd-collab.export_inventory.v1", caseId: url.split("/")[3], items: [] }
+        : { experiments: [], items: [] } };
     }
     if (url.includes("/workbench")) {
       return { ok: true, json: async () => ({ items: [], views: [], bookmarks: [], candidateCount: 0 }) };
@@ -3277,5 +3281,167 @@ describe("War Room collection-query browse", () => {
     expect(nextPage).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("eyJwYWdlIjoyfQ")).toBeNull();
     expect(stub).toHaveBeenCalled();
+  });
+});
+
+
+describe("mounted export handoff scope", () => {
+  it.each([
+    { name: "keyed identity and authority change, then A to B to A", replacement: "identity" },
+    { name: "private-evidence access revocation", replacement: "private" },
+    { name: "lifecycle removal of export tools", replacement: "lifecycle" },
+  ] as const)("rejects retained mounted actions before passive cleanup on $name", async ({ replacement }) => {
+    const envelope = {
+      schemaId: "cd-collab.export_envelope.v1", kind: "brief", privacyClass: "owner_only",
+      exportedAt: "2026-09-09T12:00:00.000Z", markdown: "# Synthetic brief\n",
+      payload: { schemaId: "cd-collab.brief.v1", privacyClass: "owner_only",
+        header: { caseId: "c1", title: "Synthetic", severity: "high", status: "open", legalHold: false, retentionClass: "standard" },
+        timeline: [], hypotheses: [], actions: [], evidence: [], attributions: [], importedRuns: [] },
+    };
+    const stub = stubCaseFetch({ onRequest: (url) => url === "/api/cases/c1/export/brief"
+      ? Promise.resolve({ ok: true, status: 200, json: async () => envelope }) : null });
+    const createObjectURL = vi.fn(() => "blob:stale");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const applyAction = vi.fn(async (action: LifecycleAction) => lifecycleSuccess(action));
+    const initialProps = {
+      roles: ["case-lead"], capabilities: ["investigation:read", "export:create", "evidence:private:read"],
+      identityKey: "A", authorityKey: "grant-A", view: "investigations" as const,
+      lifecycleBinding: lifecycleBinding("archive", applyAction),
+    };
+    const retained = (element: Element, handler: "onClick" | "onSubmit") => {
+      const key = Object.keys(element).find((candidate) => candidate.startsWith("__reactProps$"));
+      expect(key).toBeTruthy();
+      return (element as unknown as Record<string, Record<string, (event: { preventDefault: () => void }) => void>>)[key!]![handler]!;
+    };
+    const oldActions: Array<(event: { preventDefault: () => void }) => void> = [];
+    const passiveCleanups: number[] = [];
+    const observations: Array<{
+      phase: number; beforePassive: boolean; invoked: number; posts: number;
+      blobs: number; downloads: number; oldOutputVisible: boolean;
+    }> = [];
+    const briefPosts = () => stub.mock.calls.filter(([input]) => String(input) === "/api/cases/c1/export/brief").length;
+
+    function PassiveWitness({ phase }: { phase: number }) {
+      useEffect(() => () => { passiveCleanups.push(phase); }, [phase]);
+      return null;
+    }
+    function ReplacementLayoutProbe({ phase }: { phase: number }) {
+      useLayoutEffect(() => {
+        if (phase === 0) return;
+        // This runs in the replacement commit, before the independent old passive witness cleans up.
+        const beforePassive = !passiveCleanups.includes(phase - 1);
+        let invoked = 0;
+        for (const action of oldActions) {
+          action({ preventDefault() {} });
+          invoked += 1;
+        }
+        observations.push({
+          phase, beforePassive, invoked, posts: briefPosts(),
+          blobs: createObjectURL.mock.calls.length, downloads: anchorClick.mock.calls.length,
+          oldOutputVisible: document.body.textContent?.includes("# Synthetic brief") ?? false,
+        });
+      }, [phase]);
+      return null;
+    }
+    function Host({ phase, props }: { phase: number; props: typeof initialProps }) {
+      return <>
+        <Cases {...props} />
+        <PassiveWitness key={`passive-${phase}`} phase={phase} />
+        <ReplacementLayoutProbe key={`layout-${phase}`} phase={phase} />
+      </>;
+    }
+
+    const view = render(<Host phase={0} props={initialProps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    const stages = await screen.findByRole("navigation", { name: "Investigation stages" });
+    fireEvent.click(within(stages).getByRole("button", { name: /Decide/ }));
+    fireEvent.click(screen.getByText("Case export tools"));
+    const panel = document.querySelector("section.export") as HTMLElement;
+    fireEvent.click(within(panel).getByRole("button", { name: "Export triage brief" }));
+    const json = await within(panel).findByRole("button", { name: "Download JSON" });
+    const markdown = within(panel).getByRole("button", { name: "Download Markdown" });
+    const form = within(panel).getByRole("form", { name: "Export triage brief" });
+    expect(within(panel).getByRole("region", { name: "Exported markdown" }).textContent).toBe("# Synthetic brief\n");
+    oldActions.push(retained(form, "onSubmit"), retained(json, "onClick"), retained(markdown, "onClick"));
+    expect(briefPosts()).toBe(1);
+
+    const replacementProps = replacement === "identity"
+      ? { ...initialProps, identityKey: "B", authorityKey: "grant-B" }
+      : replacement === "private"
+        ? { ...initialProps, capabilities: ["investigation:read", "export:create"] }
+        : { ...initialProps, lifecycleBinding: lifecycleBinding("restore", applyAction) };
+    view.rerender(<Host phase={1} props={replacementProps} />);
+    const expectRevoked = (phase: number) => {
+      const observation = observations[phase - 1];
+      if (!observation) throw new Error(`missing layout observation for phase ${phase}`);
+      expect(observation.phase).toBe(phase);
+      expect(observation.beforePassive).toBe(true);
+      expect(observation.invoked).toBe(3);
+      expect(observation.posts).toBe(1);
+      expect(observation.blobs).toBe(0);
+      expect(observation.downloads).toBe(0);
+      expect(observation.oldOutputVisible).toBe(false);
+    };
+    expectRevoked(1);
+    expect(passiveCleanups).toContain(0);
+    expect(screen.queryByRole("region", { name: "Exported markdown" })).toBeNull();
+
+    if (replacement === "identity") {
+      view.rerender(<Host phase={2} props={initialProps} />);
+      expectRevoked(2);
+      expect(passiveCleanups).toContain(1);
+      expect(screen.queryByRole("region", { name: "Exported markdown" })).toBeNull();
+    }
+  });
+
+  it("revokes the old mounted result and callbacks across identity and lifecycle changes", async () => {
+    const envelope = {
+      schemaId: "cd-collab.export_envelope.v1", kind: "brief", privacyClass: "owner_only",
+      exportedAt: "2026-09-09T12:00:00.000Z", markdown: "# Synthetic brief\n",
+      payload: { schemaId: "cd-collab.brief.v1", privacyClass: "owner_only",
+        header: { caseId: "c1", title: "Synthetic", severity: "high", status: "open", legalHold: false, retentionClass: "standard" },
+        timeline: [], hypotheses: [], actions: [], evidence: [], attributions: [], importedRuns: [] },
+    };
+    const stub = stubCaseFetch({ onRequest: (url) => url === "/api/cases/c1/export/brief"
+      ? Promise.resolve({ ok: true, status: 200, json: async () => envelope }) : null });
+    const createObjectURL = vi.fn(() => "blob:stale");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    const applyAction = vi.fn(async (action: LifecycleAction) => lifecycleSuccess(action));
+    const props = {
+      roles: ["case-lead"], capabilities: ["investigation:read", "export:create", "evidence:private:read"],
+      identityKey: "A", authorityKey: "grant-A", view: "investigations" as const,
+      lifecycleBinding: lifecycleBinding("archive", applyAction),
+    };
+    const view = render(<Cases {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    const stages = await screen.findByRole("navigation", { name: "Investigation stages" });
+    fireEvent.click(within(stages).getByRole("button", { name: /Decide/ }));
+    fireEvent.click(screen.getByText("Case export tools"));
+    const panel = document.querySelector("section.export")!;
+    fireEvent.click(within(panel as HTMLElement).getByRole("button", { name: "Export triage brief" }));
+    const download = await within(panel as HTMLElement).findByRole("button", { name: "Download JSON" });
+    const form = within(panel as HTMLElement).getByRole("form", { name: "Export triage brief" });
+    const retained = (element: Element, handler: "onClick" | "onSubmit") => {
+      const key = Object.keys(element).find((candidate) => candidate.startsWith("__reactProps$"));
+      expect(key).toBeTruthy();
+      return (element as unknown as Record<string, Record<string, (event: { preventDefault: () => void }) => void>>)[key!]![handler]!;
+    };
+    const oldDownload = retained(download, "onClick");
+    const oldSubmit = retained(form, "onSubmit");
+    const briefPosts = () => stub.mock.calls.filter(([input]) => String(input) === "/api/cases/c1/export/brief").length;
+    expect(briefPosts()).toBe(1);
+
+    view.rerender(<Cases {...props} identityKey="B" authorityKey="grant-B" />);
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    await act(async () => { oldDownload({ preventDefault() {} }); oldSubmit({ preventDefault() {} }); });
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(briefPosts()).toBe(1);
+
+    view.rerender(<Cases {...props} />);
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    view.rerender(<Cases {...props} lifecycleBinding={lifecycleBinding("restore", applyAction)} />);
+    expect(document.querySelector("section.export")).toBeNull();
+    expect(briefPosts()).toBe(1);
   });
 });

@@ -47,17 +47,14 @@ import {
   type OccurredAtPrecision,
   type OccurredAtZone,
 } from "./temporal.js";
+import { RESOLUTION_BASES, type ResolutionBasis } from "./investigation-resolution-vocabulary.js";
+
+export { RESOLUTION_BASES } from "./investigation-resolution-vocabulary.js";
+export type { ResolutionBasis } from "./investigation-resolution-vocabulary.js";
 
 export const RESOLUTION_SCHEMA_ID = "cd-collab.investigation_resolution.v1" as const;
 export const RESOLUTION_LIST_SCHEMA_ID =
   "cd-collab.investigation_resolution_list.v1" as const;
-
-export const RESOLUTION_BASES = [
-  "human_only",
-  "experiment_decision",
-  "reasoned_exception",
-] as const;
-export type ResolutionBasis = (typeof RESOLUTION_BASES)[number];
 
 /**
  * Statuses that may not be entered without an active resolution record.

@@ -246,13 +246,10 @@ test.describe("War Room lane and deployment journeys", () => {
     expect(contributorNote.status).toBe(200);
 
     await record.check("deployment-role-gates-share-safe", async () => {
-      await openExportSupport(page);
-      const option = exportPanel(page).getByRole("option", { name: "share_safe" });
-      await expect(
-        option,
-        "a contributor-role account could select a share-safe export",
-      ).toHaveAttribute("disabled", "");
-      return `share-safe export is disabled for the ${contributor.expectedRoles.join("/")} role`;
+      await gotoStage(page, "Decide");
+      await expect(page.getByText("Export tools are unavailable for this account or lifecycle state.")).toBeVisible();
+      await expect(exportPanel(page)).toHaveCount(0);
+      return `export tools are unavailable for the ${contributor.expectedRoles.join("/")} role`;
     });
 
     // ————— Back to the lead: authorship and the gate they do hold —————

@@ -87,7 +87,7 @@ describe("imported run rendering", () => {
 
     const technical = container.querySelector("details.imported-run__technical") as HTMLDetailsElement;
     expect(technical.open).toBe(false);
-    expect(technical.textContent).toContain("tied to a frozen evidence set");
+    expect(technical.textContent).toContain("importer-reported package snapshot");
     expect(technical.textContent).toContain("9d063475-e154-44f1-84ef-acde6ebbbac2");
     expect(technical.textContent).toContain("snap-0123456789abcdef");
   });
