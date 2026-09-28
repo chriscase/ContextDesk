@@ -109,6 +109,17 @@ function sameIntent(left: CommandSnapshot, right: CommandSnapshot): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+/** A transport or response failure after dispatch cannot prove the write rolled back. */
+function unconfirmedWrite(error: RuntimeFailure): boolean {
+  return error.kind === "network"
+    || error.kind === "protocol"
+    || error.kind === "unexpected_response"
+    || error.kind === "server_failure"
+    || error.kind === "unexpected"
+    || error.kind === "aborted"
+    || error.kind === "unavailable";
+}
+
 function publishedList(
   state: ResourceState<ExternalRunJudgmentListV1>,
 ): ExternalRunJudgmentListV1 | undefined {
@@ -392,10 +403,7 @@ export function useExternalRunJudgments(
         if (result.error.kind === "auth_lost") {
           latestRef.current.onScopeDenied(scopeAtStart.investigationId, result.error);
         }
-        if (
-          result.error.kind === "unavailable"
-          && result.error.reason === "commit_outcome_unknown"
-        ) {
+        if (unconfirmedWrite(result.error)) {
           retainedRef.current = deepFreezeDto({
             scopeKey: scopeKeyAtStart,
             command: snapshot,
@@ -422,7 +430,11 @@ export function useExternalRunJudgments(
     } catch {
       if (!isCurrent()) return frozenOutcome({ status: "ignored", reason: "stale" });
       const error = deepFreezeDto({ kind: "unexpected" as const });
-      retainedRef.current = null;
+      retainedRef.current = deepFreezeDto({
+        scopeKey: scopeKeyAtStart,
+        command: snapshot,
+        request,
+      });
       setStoredMutation(scopedMutationState(scopeKeyAtStart, { status: "failed", error }));
       return frozenOutcome({ status: "failed", error });
     } finally {

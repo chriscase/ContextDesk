@@ -2068,6 +2068,9 @@ export const investigationGateway: InvestigationGatewayWithWrites
         && value.run.id === runId
         && value.applied.caseId === investigationId
         && value.applied.runId === runId
+        && value.applied.judgment === request.judgment
+        && JSON.stringify(value.applied.links) === JSON.stringify(request.links)
+        && value.applied.rationale === request.rationale
         && (value.replayed
           ? fetched.response.status === 200
           : fetched.response.status === 201

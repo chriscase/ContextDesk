@@ -160,6 +160,27 @@ describe("external run judgment transport", () => {
     )).resolves.toMatchObject({ ok: true, value: { replayed: true } });
   });
 
+  it("rejects a success body that acknowledges a different judgment intent", async () => {
+    const success = makeExternalRunJudgmentSuccess();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({
+        ...success,
+        applied: { ...success.applied, judgment: "corroborates", links: [
+          { kind: "artifact", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+        ] },
+      }, 201))
+      .mockResolvedValueOnce(jsonResponse({
+        ...success,
+        applied: { ...success.applied, rationale: "Different recorded rationale" },
+        replayed: true,
+      }, 200));
+    await expect(investigationGateway.createExternalRunJudgment(caseId, runId, input, options()))
+      .resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+    await expect(investigationGateway.createExternalRunJudgment(
+      caseId, runId, { ...input, expectedSequence: 8 }, options(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+  });
+
   it("fails closed on malformed, non-JSON, identity, or status/replay mismatches", async () => {
     const privateMarker = "private-server-detail";
     const success = makeExternalRunJudgmentSuccess();

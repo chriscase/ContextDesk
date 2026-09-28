@@ -1068,7 +1068,7 @@ export class ImportService {
       || success.applied.caseId !== request.caseId
       || success.applied.runId !== request.runId
       || success.applied.actor.id !== actor.id
-      || success.applied.actor.username !== actor.username
+      || (!replay && success.applied.actor.username !== actor.username)
       || success.applied.judgment !== request.judgment
       || JSON.stringify(success.applied.links) !== JSON.stringify(request.links)
       || success.applied.rationale !== request.rationale

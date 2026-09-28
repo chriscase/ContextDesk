@@ -503,6 +503,12 @@ describe("runtime external run judgments adapter", () => {
       true,
     ],
     [
+      "lost POST acknowledgment",
+      { status: "failed", error: { kind: "network" } },
+      /could not confirm the result/,
+      true,
+    ],
+    [
       "busy",
       { status: "ignored", reason: "busy" },
       /already being recorded/,

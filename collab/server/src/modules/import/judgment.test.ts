@@ -115,6 +115,7 @@ async function withApp(
     app: Awaited<ReturnType<typeof buildApp>>;
     audit: MemoryAuditStore;
     cases: CaseService;
+    imports: ImportService;
     caseStore: MemoryCaseStore;
     runs: MemoryRunStore;
     alice: string;
@@ -161,7 +162,7 @@ async function withApp(
     const viewer = await login(app, "viewer", "fixture-viewer-secret");
     const none = await login(app, "none", "fixture-none-secret");
     roles.delete("cn=temporary-viewers,ou=groups,dc=example,dc=test");
-    await fn({ app, audit, cases, caseStore, runs, alice, bob, viewer, none });
+    await fn({ app, audit, cases, imports, caseStore, runs, alice, bob, viewer, none });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -381,6 +382,30 @@ describe("external run human judgment HTTP and memory core", () => {
       expect((await context.audit.list({ action: "external_run_judgment_recorded" })).filter(
         (row) => row.outcome === "success",
       )).toHaveLength(2);
+    });
+  });
+
+  it("replays a committed assessment for the same actor ID after a username change", async () => {
+    await withApp(async (context) => {
+      const created = await seedCaseAndRun(context);
+      const payload = judgmentRequest(created.id);
+      const original = await context.imports.addRunJudgment(
+        created.id, RUN_ID, ALICE, payload, "test", false,
+      );
+      const renamedActor = { ...ALICE, username: "alice.renamed" };
+      const replay = await context.imports.addRunJudgment(
+        created.id, RUN_ID, renamedActor, { ...payload, expectedSequence: 7 }, "test", false,
+      );
+      expect(replay.replayed).toBe(true);
+      expect(replay.applied).toEqual(original.applied);
+      expect(replay.applied.actor.username).toBe(ALICE.username);
+      expect(await context.runs.listJudgments(RUN_ID)).toHaveLength(1);
+      expect((await context.caseStore.listTimeline(created.id)).filter(
+        (row) => row.kind === "external_run_judgment_recorded",
+      )).toHaveLength(1);
+      expect((await context.audit.list({ action: "external_run_judgment_recorded" })).filter(
+        (row) => row.outcome === "success",
+      )).toHaveLength(1);
     });
   });
 

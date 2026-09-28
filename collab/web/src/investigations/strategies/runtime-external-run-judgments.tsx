@@ -1,5 +1,4 @@
 import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import type { WorkFocus } from "../../app-location.js";
 import {
   useInvestigationRuntime,
   type ArtifactV1,
@@ -23,6 +22,14 @@ import {
 } from "./shared/index.js";
 
 const CONTRIBUTION_BODY_BOUND = 120;
+
+type CitationFocus = {
+  section: string;
+  item: string;
+  itemKind: "evidence" | "contribution";
+  lane: null;
+  experiment: null;
+};
 
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
 
@@ -55,7 +62,13 @@ function writeError(error: RuntimeFailure): HumanAssessmentsWriteError {
     case "judgment_refused":
       return error.reason;
     case "unavailable":
-      return error.reason === "commit_outcome_unknown" ? "commit_outcome_unknown" : "definitive";
+    case "network":
+    case "protocol":
+    case "unexpected_response":
+    case "server_failure":
+    case "unexpected":
+    case "aborted":
+      return "commit_outcome_unknown";
     case "auth_lost":
       return "auth_lost";
     case "not_found":
@@ -215,7 +228,7 @@ function commandLinks(
 export function RuntimeExternalRunJudgments({ caseId, runId, onDeepNavigate }: {
   readonly caseId: string;
   readonly runId: string;
-  readonly onDeepNavigate?: (stage: "capture" | "analyze", focus: WorkFocus) => void;
+  readonly onDeepNavigate?: (stage: "capture" | "analyze", focus: CitationFocus) => void;
 }) {
   const runtime = useInvestigationRuntime();
   const query = runtime.commands.queryExternalRunJudgments;

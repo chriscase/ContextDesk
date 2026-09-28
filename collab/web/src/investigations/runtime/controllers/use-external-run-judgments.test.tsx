@@ -241,6 +241,27 @@ describe("useExternalRunJudgments", () => {
     expect(create.mock.calls[1]?.[2]).toBe(frozenRequest);
   });
 
+  it("retains the same intent and key after a lost POST acknowledgment", async () => {
+    const create = vi.fn()
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } })
+      .mockResolvedValueOnce({ ok: true, value: makeExternalRunJudgmentSuccess({ replayed: true }) });
+    const gateway = transport({ createExternalRunJudgment: create });
+    const { result } = renderHook(() => useExternalRunJudgments(options(gateway)));
+    act(() => result.current.query(RUN_ID));
+    await waitFor(() => expect(result.current.judgments.status).toBe("ready"));
+    await act(async () => void await result.current.create(command()));
+    await act(async () => {
+      await expect(result.current.create(command({ rationale: "edited after lost response" })))
+        .resolves.toEqual({
+          status: "failed",
+          error: { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
+        });
+    });
+    expect(create).toHaveBeenCalledOnce();
+    await act(async () => void await result.current.create(command()));
+    expect(create.mock.calls[1]?.[2]).toBe(create.mock.calls[0]?.[2]);
+  });
+
   it("keeps the uncertain intent and key while refreshing only the CAS sequence", async () => {
     const original = makeExternalRunJudgmentSuccess();
     const list = vi.fn()
