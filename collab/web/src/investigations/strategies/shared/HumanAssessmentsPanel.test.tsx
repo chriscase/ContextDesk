@@ -50,6 +50,10 @@ function record(
   };
 }
 
+function success(seq = 1) {
+  return { status: "succeeded" as const, applied: record({ seq }), replayed: false };
+}
+
 const artifactChoice: HumanAssessmentCitationChoice = {
   kind: "artifact",
   id: "44444444-4444-4444-8444-444444444444",
@@ -61,21 +65,36 @@ const noteChoice: HumanAssessmentCitationChoice = {
   label: "note: Queue time rises immediately after the connection-pool rollout.",
 };
 
-function mount(overrides: Partial<HumanAssessmentsPanelProps> = {}) {
+function mount(overrides: Partial<HumanAssessmentsPanelProps> = {}, acknowledge = true) {
   const props: HumanAssessmentsPanelProps = {
     resource: { status: "ready", value: [] },
     citationChoices: [artifactChoice, noteChoice],
-    createAssessment: vi.fn(async () => ({ status: "succeeded" as const })),
+    createAssessment: vi.fn(async () => success()),
     refresh: vi.fn(),
     ...overrides,
   };
   const view = render(<HumanAssessmentsPanel {...props} />);
+  const disclosure = screen.queryByRole("checkbox", {
+    name: /I understand this assessment history cannot be carried/,
+  });
+  if (acknowledge && disclosure && !disclosure.hasAttribute("disabled")) fireEvent.click(disclosure);
   return { ...view, props };
 }
 
 afterEach(() => cleanup());
 
 describe("shared human assessments panel", () => {
+  it("requires local portability disclosure acknowledgment before a first write", () => {
+    const { props } = mount({}, false);
+    fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+    expect((screen.getByRole("button", { name: "Record assessment" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(screen.getByRole("form", { name: "Record an assessment" }));
+    expect(props.createAssessment).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("checkbox", {
+      name: /I understand this assessment history cannot be carried/,
+    }));
+    expect((screen.getByRole("button", { name: "Record assessment" }) as HTMLButtonElement).disabled).toBe(false);
+  });
   it("exposes no runtime, navigation, or imported-run authority props", () => {
     expect(noForbiddenProps).toBe(true);
   });
@@ -196,7 +215,10 @@ describe("shared human assessments panel", () => {
   });
 
   it("requires a citation for corroborates and contradicts and allows none for insufficient evidence", async () => {
-    const createAssessment = vi.fn(async () => ({ status: "succeeded" as const }));
+    const applied = record({ seq: 1, value: "corroborates", links: [artifactChoice] });
+    const createAssessment = vi.fn()
+      .mockResolvedValueOnce({ status: "succeeded" as const, applied, replayed: false })
+      .mockResolvedValueOnce(success(2));
     const view = mount({ createAssessment });
     fireEvent.click(screen.getByRole("radio", { name: "Corroborates" }));
     expect((screen.getByRole("button", { name: "Record assessment" }) as HTMLButtonElement).disabled).toBe(true);
@@ -208,7 +230,7 @@ describe("shared human assessments panel", () => {
 
     view.rerender(<HumanAssessmentsPanel
       {...view.props}
-      resource={{ status: "ready", value: [record({ seq: 1, value: "corroborates" })] }}
+      resource={{ status: "ready", value: [applied] }}
     />);
     await waitFor(() => expect(
       (screen.getByRole("radio", { name: "Insufficient evidence" }) as HTMLInputElement).disabled,
@@ -332,7 +354,7 @@ describe("shared human assessments panel", () => {
   it("mints a new request key when a definitive failure is edited into a new intent", async () => {
     const createAssessment = vi.fn()
       .mockResolvedValueOnce({ status: "failed" as const, error: "validation" as const })
-      .mockResolvedValueOnce({ status: "succeeded" as const });
+      .mockResolvedValueOnce(success());
     mount({ createAssessment });
     fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
     fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
@@ -349,7 +371,7 @@ describe("shared human assessments panel", () => {
 
   it("preserves the draft and key after conflict and never auto-posts", async () => {
     const createAssessment = vi.fn(async () => ({ status: "failed" as const, error: "conflict" as const }));
-    const refresh = vi.fn();
+    const refresh = vi.fn(() => 1);
     const view = mount({ createAssessment, refresh });
     fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Rationale (optional)" }), {
@@ -374,6 +396,12 @@ describe("shared human assessments panel", () => {
       {...view.props}
       resource={{ status: "ready", value: [] }}
     />);
+    expect((screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(<HumanAssessmentsPanel
+      {...view.props}
+      resource={{ status: "ready", value: [] }}
+      readCompletion={1}
+    />);
     await waitFor(() => expect(
       (screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled,
     ).toBe(false));
@@ -388,7 +416,7 @@ describe("shared human assessments panel", () => {
       status: "failed" as const,
       error: "commit_outcome_unknown" as const,
     }));
-    const refresh = vi.fn();
+    const refresh = vi.fn(() => 1);
     const view = mount({ createAssessment, refresh });
     fireEvent.click(screen.getByRole("radio", { name: "Corroborates" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "checkout-timeout.log" }));
@@ -415,6 +443,12 @@ describe("shared human assessments panel", () => {
       {...view.props}
       resource={{ status: "ready", value: [] }}
     />);
+    expect((screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(<HumanAssessmentsPanel
+      {...view.props}
+      resource={{ status: "ready", value: [] }}
+      readCompletion={1}
+    />);
     await waitFor(() => expect(
       (screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement).disabled,
     ).toBe(false));
@@ -437,7 +471,7 @@ describe("shared human assessments panel", () => {
   });
 
   it("clears the form, mints a new key, and announces success once", async () => {
-    const createAssessment = vi.fn(async () => ({ status: "succeeded" as const }));
+    const createAssessment = vi.fn(async () => success());
     const refresh = vi.fn();
     const view = mount({ createAssessment, refresh });
     fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
@@ -446,7 +480,7 @@ describe("shared human assessments panel", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
     await waitFor(() => expect(
-      screen.getByText("The assessment was recorded. Updating the recorded history…"),
+      screen.getByText(/The assessment was recorded.*Updating the recorded history/),
     ).toBeTruthy());
     const firstKey = commandInput(createAssessment, 0).idempotencyKey;
     expect(commandInput(createAssessment, 0).rationale).toBe("First reading.");
@@ -461,7 +495,7 @@ describe("shared human assessments panel", () => {
       resource={{ status: "ready", value: [record({ seq: 1 })] }}
     />);
     await waitFor(() => expect(
-      screen.getByText("The assessment was recorded."),
+      screen.getByText(/The assessment was recorded.*Sequence 1/),
     ).toBeTruthy());
     expect((screen.getByRole("radio", { name: "Insufficient evidence" }) as HTMLInputElement).disabled).toBe(false);
 
@@ -482,6 +516,9 @@ describe("shared human assessments panel", () => {
       createAssessment={createAssessment}
       refresh={vi.fn()}
     />);
+    fireEvent.click(screen.getByRole("checkbox", {
+      name: /I understand this assessment history cannot be carried/,
+    }));
     fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
     fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
     const alert = await screen.findByRole("alert");
@@ -500,7 +537,7 @@ describe("shared human assessments panel", () => {
   });
 
   it("prevents duplicate in-flight submits", async () => {
-    const deferred = createDeferred<{ status: "succeeded" }>();
+    const deferred = createDeferred<ReturnType<typeof success>>();
     const createAssessment = vi.fn(() => deferred.promise);
     mount({ createAssessment });
     fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
@@ -509,7 +546,7 @@ describe("shared human assessments panel", () => {
     fireEvent.submit(form);
     expect(createAssessment).toHaveBeenCalledTimes(1);
     await act(async () => {
-      deferred.resolve({ status: "succeeded" });
+      deferred.resolve(success());
       await deferred.promise;
     });
   });

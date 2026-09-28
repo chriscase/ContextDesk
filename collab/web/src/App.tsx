@@ -153,9 +153,13 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
     && props.focus.item.length > 0
       ? props.focus.item
       : null;
-  const humanAssessmentsPanel = focusedImportedRunId === null
+  const humanAssessmentsPanel = focusedImportedRunId === null || props.focusCaseId === null
     ? undefined
-    : <RuntimeExternalRunJudgments runId={focusedImportedRunId} />;
+    : <RuntimeExternalRunJudgments
+        caseId={props.focusCaseId}
+        runId={focusedImportedRunId}
+        onDeepNavigate={bindings.onDeepNavigate}
+      />;
 
   return (
     <>

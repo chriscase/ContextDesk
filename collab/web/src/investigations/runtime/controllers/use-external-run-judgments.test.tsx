@@ -241,6 +241,44 @@ describe("useExternalRunJudgments", () => {
     expect(create.mock.calls[1]?.[2]).toBe(frozenRequest);
   });
 
+  it("keeps the uncertain intent and key while refreshing only the CAS sequence", async () => {
+    const original = makeExternalRunJudgmentSuccess();
+    const list = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: makeExternalRunJudgmentList() })
+      .mockResolvedValueOnce({ ok: true, value: makeExternalRunJudgmentList({
+        judgments: [original.applied],
+      }) });
+    const create = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+      })
+      .mockResolvedValueOnce({ ok: true, value: makeExternalRunJudgmentSuccess({ replayed: true }) });
+    const gateway = transport({
+      listExternalRunJudgments: list,
+      createExternalRunJudgment: create,
+    });
+    const { result } = renderHook(() => useExternalRunJudgments(options(gateway)));
+    act(() => result.current.query(RUN_ID));
+    await waitFor(() => expect(result.current.judgments.status).toBe("ready"));
+    const firstRead = result.current.completedReadGeneration;
+    await act(async () => void await result.current.create(command()));
+    let requested!: number | undefined;
+    act(() => { requested = result.current.refresh(); });
+    await waitFor(() => expect(result.current.completedReadGeneration).toBe(requested));
+    expect(requested).toBeGreaterThan(firstRead ?? -1);
+    await act(async () => void await result.current.create(command()));
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[0]?.[2]).toMatchObject({ expectedSequence: 0 });
+    expect(create.mock.calls[1]?.[2]).toMatchObject({ expectedSequence: 1 });
+    expect(create.mock.calls[1]?.[2]).toMatchObject({
+      judgment: create.mock.calls[0]?.[2].judgment,
+      links: create.mock.calls[0]?.[2].links,
+      rationale: create.mock.calls[0]?.[2].rationale,
+      idempotencyKey: create.mock.calls[0]?.[2].idempotencyKey,
+    });
+  });
+
   it("fences identity, authority, run, and unmount completions", async () => {
     const deferred = createDeferred<{ ok: true; value: ExternalRunJudgmentListV1 }>();
     const list = vi.fn(() => deferred.promise);

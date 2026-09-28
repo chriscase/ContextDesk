@@ -1,10 +1,12 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import type { WorkFocus } from "../../app-location.js";
 import {
   useInvestigationRuntime,
   type ArtifactV1,
   type ContributionV1,
   type ExternalRunJudgmentLinkV1,
   type ExternalRunJudgmentListV1,
+  type ExternalRunJudgmentRecordV1,
   type ResourceState,
 } from "../runtime/public.js";
 import {
@@ -117,11 +119,11 @@ function linkLabel(
   return link.kind === "artifact" ? "Evidence" : "Contribution";
 }
 
-function mappedRecords(
-  list: ExternalRunJudgmentListV1,
+function mappedRecord(
+  row: ExternalRunJudgmentRecordV1,
   choices: readonly HumanAssessmentCitationChoice[],
-): readonly HumanAssessmentRecord[] {
-  return list.judgments.map((row) => ({
+): HumanAssessmentRecord {
+  return {
     seq: row.seq,
     value: row.judgment,
     actorUsername: row.actor.username,
@@ -132,7 +134,14 @@ function mappedRecords(
       id: link.id,
       label: linkLabel(link, choices),
     })),
-  }));
+  };
+}
+
+function mappedRecords(
+  list: ExternalRunJudgmentListV1,
+  choices: readonly HumanAssessmentCitationChoice[],
+): readonly HumanAssessmentRecord[] {
+  return list.judgments.map((row) => mappedRecord(row, choices));
 }
 
 function mappedResource(
@@ -203,11 +212,43 @@ function commandLinks(
  * public runtime's dedicated judgment resource, mutation, refresh, and create
  * command into the transport-free shared kit contract.
  */
-export function RuntimeExternalRunJudgments({ runId }: { readonly runId: string }) {
+export function RuntimeExternalRunJudgments({ caseId, runId, onDeepNavigate }: {
+  readonly caseId: string;
+  readonly runId: string;
+  readonly onDeepNavigate?: (stage: "capture" | "analyze", focus: WorkFocus) => void;
+}) {
   const runtime = useInvestigationRuntime();
   const query = runtime.commands.queryExternalRunJudgments;
   const create = runtime.commands.createExternalRunJudgment;
   const queryAvailable = query !== null;
+  const compositionToken = useMemo(() => Object.freeze({}), [
+    caseId,
+    runId,
+    runtime.presentationScopeKey,
+    queryAvailable,
+    create !== null,
+  ]);
+  const committedTokenRef = useRef<object | null>(null);
+  const navigationRef = useRef<{
+    evidence: ResourceState<readonly ArtifactV1[]>;
+    contributions: ResourceState<readonly ContributionV1[]>;
+  } | null>(null);
+  useLayoutEffect(() => {
+    committedTokenRef.current = compositionToken;
+    return () => {
+      if (committedTokenRef.current === compositionToken) {
+        committedTokenRef.current = null;
+        navigationRef.current = null;
+      }
+    };
+  }, [compositionToken]);
+  useLayoutEffect(() => {
+    navigationRef.current = {
+      evidence: runtime.resources.evidence,
+      contributions: runtime.resources.contributions,
+    };
+  });
+  const isCurrent = () => committedTokenRef.current === compositionToken;
   const matching = queryAvailable && runtime.resources.externalRunJudgmentsRunId === runId;
   const choices = citationChoices(
     runtime.resources.evidence,
@@ -226,6 +267,7 @@ export function RuntimeExternalRunJudgments({ runId }: { readonly runId: string 
   const createAssessment = !queryAvailable || create === null || !matching || readDenied
     ? null
     : async (input: HumanAssessmentCreateInput): Promise<HumanAssessmentCreateResult> => {
+        if (!isCurrent()) return { status: "ignored", reason: "stale" };
         const outcome = await create({
           runId,
           judgment: input.judgment,
@@ -233,24 +275,52 @@ export function RuntimeExternalRunJudgments({ runId }: { readonly runId: string 
           rationale: input.rationale,
           idempotencyKey: input.idempotencyKey,
         });
-        if (outcome.status === "succeeded") return { status: "succeeded" };
+        if (!isCurrent()) return { status: "ignored", reason: "stale" };
+        if (outcome.status === "succeeded") return {
+          status: "succeeded",
+          applied: mappedRecord(outcome.value.applied, choices),
+          replayed: outcome.value.replayed,
+        };
         if (outcome.status === "ignored") return outcome;
         return { status: "failed", error: writeError(outcome.error) };
       };
 
   useEffect(() => {
-    if (query === null) return;
+    if (query === null || !isCurrent()) return;
     query(runId);
-  }, [query, runId, runtime.presentationScopeKey]);
+  }, [query, runId, compositionToken]);
 
   return (
     <HumanAssessmentsPanel
-      key={`${runtime.presentationScopeKey}:${runId}`}
+      key={`${runtime.presentationScopeKey}:${caseId}:${runId}`}
       resource={resource}
+      readCompletion={matching
+        ? runtime.resources.externalRunJudgmentsCompletedReadGeneration ?? null
+        : null}
       mutation={mutation}
       citationChoices={choices}
+      {...(onDeepNavigate ? { onOpenCitation: (link: HumanAssessmentLink) => {
+        if (!isCurrent()) return;
+        const current = navigationRef.current;
+        if (link.kind === "artifact") {
+          const eligible = current?.evidence.status === "ready"
+            && current.evidence.value.some((row) => row.caseId === caseId && row.id === link.id);
+          if (eligible) onDeepNavigate("analyze", {
+            section: "triage-evidence-board", item: link.id, itemKind: "evidence",
+            lane: null, experiment: null,
+          });
+        } else if (link.kind === "contribution") {
+          const eligible = current?.contributions.status === "ready"
+            && current.contributions.value.some((row) => row.caseId === caseId
+              && row.id === link.id && !row.tombstoned);
+          if (eligible) onDeepNavigate("capture", {
+            section: "triage-capture", item: link.id, itemKind: "contribution",
+            lane: null, experiment: null,
+          });
+        }
+      } } : {})}
       createAssessment={createAssessment}
-      refresh={runtime.refresh.externalRunJudgments}
+      refresh={() => isCurrent() ? runtime.refresh.externalRunJudgments() : undefined}
     />
   );
 }

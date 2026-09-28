@@ -24,6 +24,7 @@ vi.mock("../runtime/public.js", async (importOriginal) => {
   };
 });
 
+const CASE_ID = "11111111-1111-4111-8111-111111111111";
 const RUN_A = "22222222-2222-4222-8222-222222222222";
 const RUN_B = "33333333-3333-4333-8333-333333333333";
 const ARTIFACT_ID = "44444444-4444-4444-8444-444444444444";
@@ -191,7 +192,12 @@ function makeRuntime(overrides: Partial<{
 
 function renderFor(runId = RUN_A, runtime?: InvestigationRuntime) {
   runtimeRef.current = runtime ?? makeRuntime();
-  return render(<RuntimeExternalRunJudgments runId={runId} />);
+  const view = render(<RuntimeExternalRunJudgments caseId={CASE_ID} runId={runId} />);
+  const disclosure = screen.queryByRole("checkbox", {
+    name: /I understand this assessment history cannot be carried/,
+  });
+  if (disclosure && !disclosure.hasAttribute("disabled")) fireEvent.click(disclosure);
+  return view;
 }
 
 afterEach(() => {
@@ -280,7 +286,7 @@ describe("runtime external run judgments adapter", () => {
       runId: RUN_B,
       judgments: { status: "ready", value: list({ runId: RUN_B }) },
     });
-    view.rerender(<RuntimeExternalRunJudgments runId={RUN_B} />);
+    view.rerender(<RuntimeExternalRunJudgments caseId={CASE_ID} runId={RUN_B} />);
     expect(query).toHaveBeenCalledTimes(2);
     expect(query).toHaveBeenLastCalledWith(RUN_B);
     expect((screen.getByRole("textbox", { name: "Rationale (optional)" }) as HTMLTextAreaElement).value).toBe("");
@@ -341,7 +347,7 @@ describe("runtime external run judgments adapter", () => {
       evidence: { status: "failed", error: { kind: "unavailable", status: 503 } },
       contributions: { status: "failed", error: { kind: "not_found", status: 404 } },
     }));
-    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /checkout-timeout|note:/ })).toBeNull();
     expect(screen.getByText("No citable records are available in this view.")).toBeTruthy();
   });
 

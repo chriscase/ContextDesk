@@ -4,7 +4,7 @@ import {
   type ExternalRunJudgmentSuccessV1,
   type ExternalRunJudgmentValue,
 } from "@cd-collab/contracts/external-run-judgment";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { deepFreezeDto } from "../deep-freeze.js";
 import type { RuntimeFailure } from "../errors.js";
 import type {
@@ -53,9 +53,11 @@ export interface UseExternalRunJudgmentsOptions {
 export interface ExternalRunJudgmentsController {
   readonly judgments: ResourceState<ExternalRunJudgmentListV1>;
   readonly runId: string | null;
+  /** Only a successful authoritative read begun in this scope completes a generation. */
+  readonly completedReadGeneration: number | null;
   readonly state: MutationState<ExternalRunJudgmentSuccessV1>;
   readonly query: (runId: string) => void;
-  readonly refresh: () => void;
+  readonly refresh: () => number | undefined;
   readonly create: (
     command: ExternalRunJudgmentCommand,
   ) => Promise<CommandOutcome<ExternalRunJudgmentSuccessV1>>;
@@ -148,7 +150,12 @@ export function useExternalRunJudgments(
   const activeWriteRef = useRef<RequestToken<JudgmentScope> | null>(null);
   const retainedRef = useRef<RetainedIntent | null>(null);
   const [requested, setRequested] = useState<QueryRequest | null>(null);
+  const nextReadGenerationRef = useRef(0);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [completedRead, setCompletedRead] = useState<{
+    readonly scope: JudgmentScope;
+    readonly generation: number;
+  } | null>(null);
   const [resource, setResource] = useState<
     KeyedResourceState<string, ExternalRunJudgmentListV1>
   >(() => createResourceState());
@@ -209,8 +216,27 @@ export function useExternalRunJudgments(
     : null;
   const currentRef = useRef({ scope, scopeKey, writeScopeKey, resource });
   currentRef.current = { scope, scopeKey, writeScopeKey, resource };
+  const committedScopeRef = useRef<{ scope: JudgmentScope | null; writeScopeKey: string | null }>({
+    scope: null,
+    writeScopeKey: null,
+  });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const previous = committedScopeRef.current;
+    if (previous.scope === scope && previous.writeScopeKey === writeScopeKey) return;
+    committedScopeRef.current = { scope, writeScopeKey };
+    if (previous.scope !== scope) {
+      readSlotRef.current.invalidate();
+      setResource(resetResource());
+      setCompletedRead(null);
+    }
+    writeSlotRef.current.invalidate();
+    activeWriteRef.current = null;
+    retainedRef.current = null;
+    setStoredMutation(emptyScopedMutationState());
+  }, [scope, writeScopeKey]);
+
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
@@ -254,9 +280,12 @@ export function useExternalRunJudgments(
       if (!result.ok && result.error.kind === "auth_lost") {
         latestRef.current.onScopeDenied(scope.investigationId, result.error);
       }
-      setResource((current) => result.ok
-        ? succeedResourceLoad(current, scopeKey, result.value)
-        : failResourceLoad(current, scopeKey, result.error));
+      if (result.ok) {
+        setResource((current) => succeedResourceLoad(current, scopeKey, result.value));
+        setCompletedRead({ scope, generation: refreshGeneration });
+      } else {
+        setResource((current) => failResourceLoad(current, scopeKey, result.error));
+      }
     }).catch(() => {
       if (!mountedRef.current || !readSlotRef.current.isCurrent(token)) return;
       setResource((current) => failResourceLoad(current, scopeKey, { kind: "unexpected" }));
@@ -265,7 +294,10 @@ export function useExternalRunJudgments(
   }, [options.gateway, refreshGeneration, scope, scopeKey]);
 
   const refresh = useCallback(() => {
-    if (currentRef.current.scope !== null) setRefreshGeneration((value) => value + 1);
+    if (currentRef.current.scope === null) return undefined;
+    const generation = ++nextReadGenerationRef.current;
+    setRefreshGeneration(generation);
+    return generation;
   }, []);
 
   const create = useCallback(async (
@@ -317,7 +349,9 @@ export function useExternalRunJudgments(
         }));
         return frozenOutcome({ status: "failed", error });
       }
-      request = retained.request;
+      request = retained.request.expectedSequence === list.judgments.length
+        ? retained.request
+        : deepFreezeDto({ ...retained.request, expectedSequence: list.judgments.length });
     } else {
       request = deepFreezeDto({
         expectedSequence: list.judgments.length,
@@ -401,6 +435,9 @@ export function useExternalRunJudgments(
       ? resource.state
       : { status: "idle" },
     runId: scope?.runId ?? null,
+    completedReadGeneration: completedRead?.scope === scope
+      ? completedRead.generation
+      : null,
     state: visibleMutationState(storedMutation, writeScopeKey),
     query,
     refresh,

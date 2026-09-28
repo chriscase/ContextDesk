@@ -83,7 +83,7 @@ export interface HumanAssessmentCreateInput {
 }
 
 export type HumanAssessmentCreateResult =
-  | { readonly status: "succeeded" }
+  | { readonly status: "succeeded"; readonly applied: HumanAssessmentRecord; readonly replayed: boolean }
   | { readonly status: "failed"; readonly error: HumanAssessmentsWriteError }
   | { readonly status: "ignored"; readonly reason: "busy" | "stale" | "not_ready" };
 
@@ -93,10 +93,13 @@ export type HumanAssessmentCreateCommand = (
 
 export interface HumanAssessmentsPanelProps {
   readonly resource: HumanAssessmentsResourceState;
+  /** Successful same-scope history read generation, supplied by the public Runtime. */
+  readonly readCompletion?: number | null;
   readonly mutation?: HumanAssessmentsMutationState;
   readonly citationChoices: readonly HumanAssessmentCitationChoice[];
   readonly createAssessment: HumanAssessmentCreateCommand | null;
-  readonly refresh: () => void;
+  readonly refresh: () => number | void;
+  readonly onOpenCitation?: (link: HumanAssessmentLink) => void;
 }
 
 const MAX_LINKS = 64;
@@ -223,15 +226,14 @@ function orderedRecords(
   return [...records].sort((left, right) => left.seq - right.seq);
 }
 
-function recordsFingerprint(records: readonly HumanAssessmentRecord[]): string {
-  return JSON.stringify(orderedRecords(records).map((record) => ({
-    seq: record.seq,
-    value: record.value,
-    actorUsername: record.actorUsername,
-    recordedAt: record.recordedAt,
-    rationale: record.rationale,
-    links: record.links.map((link) => ({ kind: link.kind, id: link.id })),
-  })));
+function sameRecord(left: HumanAssessmentRecord, right: HumanAssessmentRecord): boolean {
+  return left.seq === right.seq
+    && left.value === right.value
+    && left.actorUsername === right.actorUsername
+    && left.recordedAt === right.recordedAt
+    && left.rationale === right.rationale
+    && JSON.stringify(left.links.map(({ kind, id }) => ({ kind, id })))
+      === JSON.stringify(right.links.map(({ kind, id }) => ({ kind, id })));
 }
 
 function blocksFurtherWriting(error: HumanAssessmentsWriteError | null): boolean {
@@ -251,13 +253,14 @@ interface FrozenDraft {
 }
 
 type SubmissionFeedback =
-  | { readonly status: "succeeded" }
+  | { readonly status: "succeeded"; readonly applied: HumanAssessmentRecord; readonly replayed: boolean }
   | { readonly status: "failed"; readonly error: HumanAssessmentsWriteError }
   | { readonly status: "ignored"; readonly reason: "busy" | "stale" | "not_ready" }
   | { readonly status: "invalid"; readonly message: string };
 
 function HistoryList(props: {
   readonly records: readonly HumanAssessmentRecord[];
+  readonly onOpenCitation?: (link: HumanAssessmentLink) => void;
 }): ReactNode {
   const records = orderedRecords(props.records);
   if (records.length === 0) {
@@ -285,7 +288,14 @@ function HistoryList(props: {
           ) : (
             <ul className="strategy-kit__human-assessments-citations">
               {record.links.map((link) => (
-                <li key={citationKey(link)}>{link.label}</li>
+                <li key={citationKey(link)}>
+                  {link.label} <code>{link.id}</code>
+                  {props.onOpenCitation && link.kind !== "snapshot" ? (
+                    <button type="button" onClick={() => props.onOpenCitation?.(link)}>
+                      Open cited {link.kind === "artifact" ? "evidence" : "contribution"}
+                    </button>
+                  ) : null}
+                </li>
               ))}
             </ul>
           )}
@@ -297,10 +307,12 @@ function HistoryList(props: {
 
 export function HumanAssessmentsPanel({
   resource,
+  readCompletion = null,
   mutation,
   citationChoices,
   createAssessment,
   refresh,
+  onOpenCitation,
 }: HumanAssessmentsPanelProps) {
   const id = useId();
   const titleId = `${id}-title`;
@@ -311,15 +323,16 @@ export function HumanAssessmentsPanel({
   const rationaleId = `${id}-rationale`;
   const rationaleHelpId = `${id}-rationale-help`;
   const rationaleCountId = `${id}-rationale-count`;
+  const portableDisclosureId = `${id}-portable-disclosure`;
   const alertRef = useRef<HTMLDivElement>(null);
   const focusedFailureRef = useRef<string | null>(null);
   const submittingRef = useRef(false);
   const intentRef = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
-  const refreshStartResourceRef = useRef<HumanAssessmentsResourceState | null>(null);
-  const successBaselineRef = useRef<string | null>(null);
+  const [awaitedReadGeneration, setAwaitedReadGeneration] = useState<number | null>(null);
   const [judgment, setJudgment] = useState<HumanAssessmentValue | "">("");
   const [selected, setSelected] = useState<HumanAssessmentCitationChoice[]>([]);
   const [rationale, setRationale] = useState("");
+  const [portableAcknowledged, setPortableAcknowledged] = useState(false);
   const [idempotencyKey, setIdempotencyKey] = useState(createAssessmentIdempotencyKey);
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<SubmissionFeedback | null>(null);
@@ -357,6 +370,7 @@ export function HumanAssessmentsPanel({
     && !awaitingSuccessHistory
     && !writeFailureBlocksEditing
     && judgment !== ""
+    && portableAcknowledged
     && rationale.length <= MAX_RATIONALE
     && selected.length <= MAX_LINKS
     && (!citationsRequired || selected.length > 0);
@@ -373,28 +387,29 @@ export function HumanAssessmentsPanel({
 
   useEffect(() => {
     if (frozen === null) {
-      refreshStartResourceRef.current = null;
+      setAwaitedReadGeneration(null);
       setAwaitingHistoryReview(false);
       return;
     }
     if (
       awaitingHistoryReview
-      && resource !== refreshStartResourceRef.current
+      && awaitedReadGeneration !== null
+      && readCompletion !== null
+      && readCompletion >= awaitedReadGeneration
       && resource.status === "ready"
     ) {
-      refreshStartResourceRef.current = null;
+      setAwaitedReadGeneration(null);
       setAwaitingHistoryReview(false);
       setHistoryReviewed(true);
     }
-  }, [awaitingHistoryReview, frozen, resource]);
+  }, [awaitedReadGeneration, awaitingHistoryReview, frozen, readCompletion, resource.status]);
 
   useEffect(() => {
-    if (!awaitingSuccessHistory || resource.status !== "ready") return;
-    const baseline = successBaselineRef.current;
-    if (baseline === null || recordsFingerprint(resource.value) === baseline) return;
-    successBaselineRef.current = null;
-    setAwaitingSuccessHistory(false);
-  }, [awaitingSuccessHistory, resource]);
+    if (!awaitingSuccessHistory || resource.status !== "ready" || feedback?.status !== "succeeded") return;
+    if (resource.value.some((record) => sameRecord(record, feedback.applied))) {
+      setAwaitingSuccessHistory(false);
+    }
+  }, [awaitingSuccessHistory, feedback, resource]);
 
   function clearTransientFeedback() {
     if (frozen !== null) return;
@@ -446,8 +461,7 @@ export function HumanAssessmentsPanel({
     setSubmitting(false);
     if (outcome.status === "succeeded") {
       intentRef.current = null;
-      refreshStartResourceRef.current = null;
-      successBaselineRef.current = recordsFingerprint(records ?? []);
+      setAwaitedReadGeneration(null);
       setFrozen(null);
       setAwaitingHistoryReview(false);
       setHistoryReviewed(false);
@@ -456,7 +470,7 @@ export function HumanAssessmentsPanel({
       setSelected([]);
       setRationale("");
       setIdempotencyKey(createAssessmentIdempotencyKey());
-      setFeedback({ status: "succeeded" });
+      setFeedback({ status: "succeeded", applied: outcome.applied, replayed: outcome.replayed });
       refresh();
       return;
     }
@@ -488,6 +502,7 @@ export function HumanAssessmentsPanel({
       || running
       || createAssessment === null
       || !canWrite
+      || !portableAcknowledged
       || awaitingSuccessHistory
       || writeFailureBlocksEditing
     ) return;
@@ -574,10 +589,12 @@ export function HumanAssessmentsPanel({
   function refreshHistory() {
     if (frozen !== null) {
       setHistoryReviewed(false);
-      refreshStartResourceRef.current = resource;
-      setAwaitingHistoryReview(true);
     }
-    refresh();
+    const generation = refresh();
+    if (frozen !== null) {
+      setAwaitedReadGeneration(typeof generation === "number" ? generation : null);
+      setAwaitingHistoryReview(typeof generation === "number");
+    }
   }
 
   const retryRead = readError === "not_found" || readError === "auth_lost"
@@ -600,6 +617,11 @@ export function HumanAssessmentsPanel({
             <p>
               The banner and Save review above are the existing run-review status.
               Assessments are a separate append-only history and do not change that status.
+            </p>
+            <p id={portableDisclosureId}>
+              Human assessment history is not yet included in portable investigation archives.
+              After recording an assessment, exact portable export and restore for an affected investigation
+              may be unavailable. Ordinary brief and package exports also do not carry this history.
             </p>
           </>
         )}
@@ -646,7 +668,7 @@ export function HumanAssessmentsPanel({
         <section className="strategy-kit__human-assessments-history" aria-labelledby={historyId}>
           <h4 id={historyId}>Recorded assessments</h4>
           {records !== undefined && !(awaitingSuccessHistory && records.length === 0)
-            ? <HistoryList records={records} />
+            ? <HistoryList records={records} {...(onOpenCitation ? { onOpenCitation } : {})} />
             : null}
           {!hasSnapshot && resource.status !== "failed" ? (
             <p className="strategy-kit__human-assessments-meta">
@@ -741,6 +763,17 @@ export function HumanAssessmentsPanel({
                 {rationale.length} / {MAX_RATIONALE}
               </p>
 
+              <label className="strategy-kit__human-assessments-choice">
+                <input
+                  type="checkbox"
+                  checked={portableAcknowledged}
+                  disabled={fieldsDisabled}
+                  aria-describedby={portableDisclosureId}
+                  onChange={(event) => setPortableAcknowledged(event.target.checked)}
+                />
+                <span>I understand this assessment history cannot be carried in a portable archive yet.</span>
+              </label>
+
               <StrategyActionRow className="strategy-kit__human-assessments-actions">
                 {frozen === null ? (
                   <button type="submit" disabled={!canSubmit}>
@@ -798,9 +831,9 @@ export function HumanAssessmentsPanel({
         ) : null}
         {!running && feedback?.status === "succeeded" ? (
           <StrategyStateNotice tone="success" title="Assessment recorded">
-            {awaitingSuccessHistory
-              ? "The assessment was recorded. Updating the recorded history…"
-              : "The assessment was recorded."}
+            {feedback.replayed ? "The original assessment was confirmed by same-intent replay. " : "The assessment was recorded. "}
+            {`Sequence ${feedback.applied.seq}, ${feedback.applied.actorUsername}, ${timestampLabel(feedback.applied.recordedAt)}.`}
+            {awaitingSuccessHistory ? " Updating the recorded history…" : ""}
           </StrategyStateNotice>
         ) : null}
         {frozen !== null && !historyReviewed ? (

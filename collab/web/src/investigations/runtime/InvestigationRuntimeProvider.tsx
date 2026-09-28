@@ -125,6 +125,8 @@ export interface InvestigationRuntimeResources {
   readonly artifactAnnotations: ResourceState<readonly ArtifactAnnotationV1[]>;
   readonly externalRunJudgments: ResourceState<ExternalRunJudgmentListV1>;
   readonly externalRunJudgmentsRunId: string | null;
+  /** Optional for older injected Runtime snapshots; absent never proves a fresh read. */
+  readonly externalRunJudgmentsCompletedReadGeneration?: number | null;
 }
 
 export interface InvestigationRuntimeMutations {
@@ -151,7 +153,7 @@ export interface InvestigationRuntimeRefresh {
   readonly lifecycle: () => void;
   readonly coordination: () => void;
   readonly artifactAnnotations: () => Promise<void>;
-  readonly externalRunJudgments: () => void;
+  readonly externalRunJudgments: () => number | void;
   readonly activeInvestigation: () => void;
 }
 
@@ -596,6 +598,10 @@ export function InvestigationRuntimeProvider({
     activeScopeUnavailable || activeInvestigation.investigation.status !== "ready"
       ? null
       : activeCaseId;
+  const assessmentWritable = canRecordRunJudgment
+    && activeReadyCaseId !== null
+    && activeInvestigation.investigation.status === "ready"
+    && activeInvestigation.investigation.value.status !== "archived";
 
   const artifactAnnotationsController = useArtifactAnnotations({
     gateway: annotationGateway,
@@ -769,7 +775,7 @@ export function InvestigationRuntimeProvider({
     investigationId: activeScopeUnavailable ? null : activeCaseId,
     active,
     canRead: capabilities.canRead && !activeScopeUnavailable,
-    canRecordRunJudgment: canRecordRunJudgment && !activeScopeUnavailable,
+    canRecordRunJudgment: assessmentWritable,
     readOnly,
     onScopeDenied: activeInvestigation.denyScope,
   });
@@ -822,6 +828,8 @@ export function InvestigationRuntimeProvider({
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : externalRunJudgmentsController.judgments,
       externalRunJudgmentsRunId: externalRunJudgmentsController.runId,
+      externalRunJudgmentsCompletedReadGeneration:
+        externalRunJudgmentsController.completedReadGeneration,
     },
     mutations: {
       create: createController.state,
@@ -918,9 +926,7 @@ export function InvestigationRuntimeProvider({
         && !activeScopeUnavailable
         ? externalRunJudgmentsController.query
         : null,
-      createExternalRunJudgment: canRecordRunJudgment
-        && activeReadyCaseId !== null
-        && !activeScopeUnavailable
+      createExternalRunJudgment: assessmentWritable
         ? externalRunJudgmentsController.create
         : null,
       queryInvestigations: capabilities.canRead ? requestInvestigationCollection : null,
@@ -951,7 +957,7 @@ export function InvestigationRuntimeProvider({
     canCreate,
     canEditSituation,
     canManageLifecycle,
-    canRecordRunJudgment,
+    assessmentWritable,
     canUpload,
     capabilities,
     contributionController.create,
