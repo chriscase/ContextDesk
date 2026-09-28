@@ -104,7 +104,7 @@ test.describe("complete war-room operator journey", () => {
     await expect(imported.locator(".imported-run__banner")).toHaveText("Unverified imported run");
     await expect(imported).toContainText("Fixture chat assistant");
     await expect(imported).toContainText("From Fixture chat assistant");
-    await expect(imported.getByText("Prompt and import details")).toBeVisible();
+    await expect(imported.getByText("Inspect recorded provenance")).toBeVisible();
     await expect(imported).not.toContainText("human-authored");
     await expect(capture.getByText("imported output").first()).toBeVisible();
     await expect(capture.getByText("imported · unverified").first()).toBeVisible();
