@@ -12,8 +12,9 @@ describe("migration versions", () => {
   // first-class artifact annotations, replay-safe singular writes, and one
   // parent intent for each replay-safe bulk write, capability model v2,
   // case-row-serialized investigation coordination, source catalog CAS, and
-  // durable strict external-run import markers and replay intents.
-  it("pins the canonical PostgreSQL head at atomic external-run imports", () => {
+  // durable strict external-run import markers/replay intents, and append-only
+  // human judgments over those immutable runs.
+  it("pins the canonical PostgreSQL head at external-run judgments", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
@@ -32,7 +33,8 @@ describe("migration versions", () => {
     expect(versions).toContain("029_investigation_coordination");
     expect(versions).toContain("030_source_catalog_mutations");
     expect(versions).toContain("031_external_run_import_atomic");
-    expect(latestMigrationVersion()).toBe("031_external_run_import_atomic");
+    expect(versions).toContain("032_external_run_judgments");
+    expect(latestMigrationVersion()).toBe("032_external_run_judgments");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -42,7 +44,6 @@ describe("migration versions", () => {
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
     expect(versions.slice(-8)).toEqual([
-      "024_ui_strategy_governance",
       "025_artifact_annotations",
       "026_artifact_annotation_write_intents",
       "027_artifact_annotation_bulk_write_intents",
@@ -50,7 +51,41 @@ describe("migration versions", () => {
       "029_investigation_coordination",
       "030_source_catalog_mutations",
       "031_external_run_import_atomic",
+      "032_external_run_judgments",
     ]);
+  });
+
+  it("keeps external-run judgments and replay intents insert-only with guarded rollback", () => {
+    const migration = listMigrations().find(
+      (file) => file.version === "032_external_run_judgments",
+    );
+    expect(migration).toBeDefined();
+    const upSql = readFileSync(migration!.upPath, "utf8");
+    expect(upSql).toContain("FOREIGN KEY (run_id, case_id)");
+    expect(upSql).toContain("FOREIGN KEY (run_id, case_id, judgment_seq)");
+    expect(upSql).toMatch(/CHECK \(seq >= 1 AND seq <= 1024\)/);
+    expect(upSql).toMatch(/jsonb_array_length\(links\) <= 64/);
+    expect(upSql).toMatch(/BEFORE UPDATE OR DELETE ON external_run_judgments/);
+    expect(upSql).toMatch(/BEFORE UPDATE OR DELETE ON external_run_judgment_success_intents/);
+    expect(upSql).toMatch(/GRANT SELECT, INSERT ON TABLE external_run_judgments/);
+    expect(upSql).toMatch(/REVOKE UPDATE, DELETE ON TABLE external_run_judgments/);
+
+    const downSql = readFileSync(migration!.downPath, "utf8");
+    const intentLock = downSql.indexOf(
+      "LOCK TABLE external_run_judgment_success_intents IN ACCESS EXCLUSIVE MODE",
+    );
+    const judgmentLock = downSql.indexOf(
+      "LOCK TABLE external_run_judgments IN ACCESS EXCLUSIVE MODE",
+    );
+    const runLock = downSql.indexOf("LOCK TABLE imported_runs IN ACCESS EXCLUSIVE MODE");
+    const guard = downSql.indexOf(
+      "IF EXISTS (SELECT 1 FROM external_run_judgment_success_intents LIMIT 1)",
+    );
+    expect(intentLock).toBeGreaterThanOrEqual(0);
+    expect(judgmentLock).toBeGreaterThan(intentLock);
+    expect(runLock).toBeGreaterThan(judgmentLock);
+    expect(guard).toBeGreaterThan(runLock);
+    expect(downSql).toMatch(/cannot roll back 032_external_run_judgments/);
   });
 
   it("keeps strict import markers paired and protects insert-only replay state", () => {
@@ -302,6 +337,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("029_investigation_coordination");
       expect(up.applied).toContain("030_source_catalog_mutations");
       expect(up.applied).toContain("031_external_run_import_atomic");
+      expect(up.applied).toContain("032_external_run_judgments");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -441,6 +477,18 @@ describe.skipIf(!adminUrl())("migrations", () => {
       );
       expect(importIntentTable.rows[0]?.to_regclass).not.toBeNull();
 
+      const judgmentTables = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename IN ('external_run_judgments',
+                             'external_run_judgment_success_intents')
+         ORDER BY tablename`,
+      );
+      expect(judgmentTables.rows.map((row) => row.tablename)).toEqual([
+        "external_run_judgment_success_intents",
+        "external_run_judgments",
+      ]);
+
+      expect((await migrateDown(client)).rolledBack).toBe("032_external_run_judgments");
       expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       const strictImportColumnsAfterRollback = await client.query<{ column_name: string }>(
         `SELECT column_name FROM information_schema.columns
@@ -688,6 +736,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("enforces strict imported-run marker and replay-intent durability", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("032_external_run_judgments");
       await client.query(`
         INSERT INTO cases (id, title, severity, status, created_by, created_by_username)
         VALUES (
@@ -779,9 +828,66 @@ describe.skipIf(!adminUrl())("migrations", () => {
     });
   });
 
+  it("refuses judgment rollback while immutable judgment history exists", async () => {
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      await client.query(`
+        INSERT INTO cases (id, title, severity, status, created_by, created_by_username)
+        VALUES (
+          '11111111-1111-4111-8111-111111111111', 'judgment rollback migration',
+          'low', 'open', 'synthetic-actor', 'synthetic-actor'
+        )
+      `);
+      await client.query(`
+        INSERT INTO contributions (
+          id, case_id, kind, privacy_class, created_by, created_by_username
+        ) VALUES (
+          '22222222-2222-4222-8222-222222222222',
+          '11111111-1111-4111-8111-111111111111',
+          'external_run', 'owner_only', 'synthetic-actor', 'synthetic-actor'
+        )
+      `);
+      await client.query(`
+        INSERT INTO imported_runs (
+          id, case_id, contribution_id, source_id, output_hash, output_text,
+          prompt_completeness, output_completeness, workflow_completeness,
+          evidence_visibility, importer_id, importer_username, operator_id,
+          operator_username, claimed_traces, privacy_class
+        ) VALUES (
+          '33333333-3333-4333-8333-333333333333',
+          '11111111-1111-4111-8111-111111111111',
+          '22222222-2222-4222-8222-222222222222',
+          '00000000-0000-0000-0000-000000000001',
+          '${"a".repeat(64)}', 'judgment output',
+          'unknown', 'exact', 'unknown', 'unknown',
+          'synthetic-actor', 'synthetic-actor', 'synthetic-actor',
+          'synthetic-actor', '[]'::jsonb, 'owner_only'
+        )
+      `);
+      await client.query(`
+        INSERT INTO external_run_judgments (
+          case_id, run_id, seq, judgment, actor_id, actor_username,
+          links, rationale, recorded_at
+        ) VALUES (
+          '11111111-1111-4111-8111-111111111111',
+          '33333333-3333-4333-8333-333333333333', 1,
+          'insufficient_evidence', 'synthetic-actor', 'synthetic-actor',
+          '[]'::jsonb, NULL, CURRENT_TIMESTAMP
+        )
+      `);
+      await expect(migrateDown(client)).rejects.toThrow(
+        /cannot roll back 032_external_run_judgments while judgment data or success intents exist/,
+      );
+      expect((await client.query(
+        `SELECT judgment FROM external_run_judgments`,
+      )).rows).toEqual([{ judgment: "insufficient_evidence" }]);
+    });
+  });
+
   it("refuses catalog rollback when an immutable success intent exists without deleting it", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("032_external_run_judgments");
       expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       await client.query(`
         INSERT INTO catalog_sources (
@@ -816,6 +922,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("excludes concurrent writers from both coordination tables during the rollback guard", async () => {
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("032_external_run_judgments");
       expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       const catalogRollback = await migrateDown(client);
       expect(catalogRollback.rolledBack).toBe("030_source_catalog_mutations");
@@ -921,6 +1028,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("029_investigation_coordination");
       expect(dry.pending).toContain("030_source_catalog_mutations");
       expect(dry.pending).toContain("031_external_run_import_atomic");
+      expect(dry.pending).toContain("032_external_run_judgments");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

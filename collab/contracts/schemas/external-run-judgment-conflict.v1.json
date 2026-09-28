@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/external-run-judgment-conflict.v1.json",
+  "title": "cd-collab External Run Judgment Conflict v1",
+  "description": "Stale CAS conflict. JSON Schema cannot compare expectedSequence and currentSequence; the parser requires those values to differ.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "caseId", "runId", "expectedSequence", "currentSequence"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.external_run_judgment_conflict.v1" },
+    "caseId": { "$ref": "#/$defs/uuid" },
+    "runId": { "$ref": "#/$defs/uuid" },
+    "expectedSequence": { "$ref": "#/$defs/unsignedSafeInteger" },
+    "currentSequence": { "$ref": "#/$defs/unsignedSafeInteger" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "unsignedSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  }
+}

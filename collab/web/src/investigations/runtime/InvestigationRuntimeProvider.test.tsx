@@ -46,10 +46,13 @@ import {
   makeContributionList,
   makeEvidenceList,
   makeEvidenceUploadSuccess,
+  makeExternalRunJudgmentList,
+  makeExternalRunJudgmentSuccess,
   makeOperationsQueuePage,
   makePopulatedCase,
   makeSparseImportedCase,
   RUNTIME_FIXTURE_IDS,
+  RUNTIME_JUDGMENT_FIXTURE_IDS,
 } from "./testkit/fixtures.js";
 import { createDeferred, type Deferred } from "./testkit/promises.js";
 
@@ -372,6 +375,65 @@ describe("InvestigationRuntimeProvider", () => {
       error: { kind: "unavailable", status: 503 },
     }));
     expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
+  it("queries and records human run judgment only through the explicit public seam", async () => {
+    const listExternalRunJudgments = vi.fn(async () =>
+      succeeded(makeExternalRunJudgmentList()));
+    const success = makeExternalRunJudgmentSuccess();
+    const createExternalRunJudgment = vi.fn(async () => succeeded(success));
+    const gateway = makeGateway({ listExternalRunJudgments, createExternalRunJudgment });
+    render(
+      <ProviderUnderTest
+        identityKey="lead-session"
+        identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+        authorityKey="lead-authority-v1"
+        capabilities={["investigation:read", "investigation:write"]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    expect(currentRuntime().resources.externalRunJudgments).toEqual({ status: "idle" });
+    expect(listExternalRunJudgments).not.toHaveBeenCalled();
+
+    act(() => currentRuntime().commands.queryExternalRunJudgments!(
+      RUNTIME_JUDGMENT_FIXTURE_IDS.runId,
+    ));
+    await waitFor(() => expect(currentRuntime().resources.externalRunJudgments.status).toBe("ready"));
+    expect(currentRuntime().resources.externalRunJudgmentsRunId)
+      .toBe(RUNTIME_JUDGMENT_FIXTURE_IDS.runId);
+    expect(currentRuntime().capabilities.canRecordRunJudgment).toBe(true);
+    expect(currentRuntime().commands.queryExternalRunJudgments).toEqual(expect.any(Function));
+    expect(currentRuntime().commands.createExternalRunJudgment).toEqual(expect.any(Function));
+
+    act(() => currentRuntime().refresh.activeInvestigation());
+    await waitFor(() => expect(listExternalRunJudgments).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      await expect(currentRuntime().commands.createExternalRunJudgment!({
+        runId: RUNTIME_JUDGMENT_FIXTURE_IDS.runId,
+        judgment: "insufficient_evidence",
+        links: [],
+        rationale: "Human review is not yet conclusive.",
+        idempotencyKey: "provider-judgment-0001",
+      })).resolves.toEqual({ status: "succeeded", value: success });
+    });
+    expect(createExternalRunJudgment).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_JUDGMENT_FIXTURE_IDS.runId,
+      expect.objectContaining({ expectedSequence: 0 }),
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(currentRuntime().mutations.externalRunJudgment)
+      .toEqual({ status: "succeeded", value: success });
+    expect(Object.isFrozen(currentRuntime().resources.externalRunJudgments)).toBe(true);
   });
 
   it("reads coordination but exposes no action without a nonempty authenticated identity", async () => {
@@ -723,6 +785,8 @@ describe("InvestigationRuntimeProvider", () => {
       applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
+      queryExternalRunJudgments: null,
+      createExternalRunJudgment: null,
       queryInvestigations: null,
       queryOperationsQueue: null,
     });
@@ -769,6 +833,7 @@ describe("InvestigationRuntimeProvider", () => {
       canManageLifecycle: false,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
@@ -781,6 +846,8 @@ describe("InvestigationRuntimeProvider", () => {
       applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
+      queryExternalRunJudgments: expect.any(Function),
+      createExternalRunJudgment: null,
       queryInvestigations: expect.any(Function),
       queryOperationsQueue: expect.any(Function),
     });
@@ -827,6 +894,7 @@ describe("InvestigationRuntimeProvider", () => {
       "canManageLifecycle",
       "canRead",
       "canReadPrivate",
+      "canRecordRunJudgment",
       "canUpload",
     ]);
     expect(JSON.stringify(currentRuntime())).not.toContain("evidence:private:read");
@@ -876,6 +944,7 @@ describe("InvestigationRuntimeProvider", () => {
       canManageLifecycle: false,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
     expect(currentRuntime().commands.uploadEvidence).toBeNull();
   });
@@ -921,6 +990,7 @@ describe("InvestigationRuntimeProvider", () => {
     });
     expect(currentRuntime().commands.uploadEvidence).toBeNull();
     expect(currentRuntime().commands.applyLifecycle).toBeNull();
+    expect(currentRuntime().commands.queryExternalRunJudgments).toBeNull();
   });
 
   it("denies the active scope when an authoritative collection no longer includes it", async () => {
@@ -960,6 +1030,7 @@ describe("InvestigationRuntimeProvider", () => {
     });
     expect(currentRuntime().commands.uploadEvidence).toBeNull();
     expect(currentRuntime().commands.applyLifecycle).toBeNull();
+    expect(currentRuntime().commands.queryExternalRunJudgments).toBeNull();
   });
 
   it("refreshes a settled list before inferring that a newly focused investigation is absent", async () => {
@@ -1780,6 +1851,7 @@ describe("InvestigationRuntimeProvider", () => {
       canManageLifecycle: true,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
     expect(currentRuntime().commands.createContribution).toBeNull();
     expect(currentRuntime().commands.updateSituation).toBeNull();
@@ -2073,6 +2145,8 @@ describe("InvestigationRuntimeProvider", () => {
       applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
+      queryExternalRunJudgments: null,
+      createExternalRunJudgment: null,
       queryInvestigations: expect.any(Function),
       queryOperationsQueue: expect.any(Function),
     });
@@ -2227,6 +2301,7 @@ describe("InvestigationRuntimeProvider", () => {
         canManageLifecycle: false,
         canCoordinateSelf: false,
         canCoordinateParticipants: false,
+        canRecordRunJudgment: false,
       });
       expect(runtime.commands).toEqual({
         createInvestigation: null,
@@ -2239,6 +2314,8 @@ describe("InvestigationRuntimeProvider", () => {
         applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
+        queryExternalRunJudgments: null,
+        createExternalRunJudgment: null,
         queryInvestigations: expect.any(Function),
         queryOperationsQueue: expect.any(Function),
       });
@@ -2406,6 +2483,7 @@ describe("InvestigationRuntimeProvider", () => {
         canManageLifecycle: false,
         canCoordinateSelf: false,
         canCoordinateParticipants: false,
+        canRecordRunJudgment: false,
       });
       expect(runtime.commands).toEqual({
         createInvestigation: null,
@@ -2418,6 +2496,8 @@ describe("InvestigationRuntimeProvider", () => {
         applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
+        queryExternalRunJudgments: null,
+        createExternalRunJudgment: null,
         queryInvestigations: expect.any(Function),
         queryOperationsQueue: expect.any(Function),
       });

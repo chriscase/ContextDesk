@@ -32,6 +32,10 @@
       "types": "./dist/evidence-annotations.d.ts",
       "import": "./dist/evidence-annotations.js"
     },
+    "./external-run-judgment": {
+      "types": "./dist/external-run-judgment.d.ts",
+      "import": "./dist/external-run-judgment.js"
+    },
     "./model-purpose-policy-shared": {
       "types": "./dist/model-purpose-policy-shared.d.ts",
       "import": "./dist/model-purpose-policy-shared.js"

@@ -40,8 +40,8 @@ export function createInvestigationGatewayDouble(
     error: { kind: "unexpected" },
   });
   return {
-    // Both optional collection query methods are intentionally absent so an
-    // older double stays valid and each resolver fails closed independently.
+    // Optional collection, queue, and run-judgment methods are intentionally
+    // absent so an older double stays valid and each resolver fails closed.
     listInvestigations: vi.fn(async () => gatewayOk(makeCaseList().cases)),
     getInvestigation: vi.fn(async () => gatewayOk(makePopulatedCase())),
     createInvestigation: vi.fn(() => unexpected<CaseV1>()),

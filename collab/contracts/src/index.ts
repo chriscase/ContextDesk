@@ -677,6 +677,47 @@ export type {
 } from "./run.js";
 
 export {
+  EXTERNAL_RUN_JUDGMENT_CONFLICT_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_ERROR,
+  EXTERNAL_RUN_JUDGMENT_IDEMPOTENCY,
+  EXTERNAL_RUN_JUDGMENT_IDEMPOTENCY_KEY_RE,
+  EXTERNAL_RUN_JUDGMENT_LIMITS,
+  EXTERNAL_RUN_JUDGMENT_LINK_KINDS,
+  EXTERNAL_RUN_JUDGMENT_LIST_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_NOT_CORRECTNESS,
+  EXTERNAL_RUN_JUDGMENT_REFUSALS,
+  EXTERNAL_RUN_JUDGMENT_REFUSED_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_REQUEST_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_RESPONSE_CONTEXT,
+  EXTERNAL_RUN_JUDGMENT_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_SUCCESS_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_UUID_RE,
+  EXTERNAL_RUN_JUDGMENT_VALUES,
+  parseExternalRunJudgment,
+  parseExternalRunJudgmentConflict,
+  parseExternalRunJudgmentList,
+  parseExternalRunJudgmentRefused,
+  parseExternalRunJudgmentRequest,
+  parseExternalRunJudgmentSuccess,
+  projectExternalRunJudgmentIdempotencyIntent,
+} from "./external-run-judgment.js";
+export type {
+  ExternalRunJudgmentActorV1,
+  ExternalRunJudgmentConflictV1,
+  ExternalRunJudgmentIdempotencyIntentV1,
+  ExternalRunJudgmentLinkKind,
+  ExternalRunJudgmentLinkV1,
+  ExternalRunJudgmentListV1,
+  ExternalRunJudgmentRecordV1,
+  ExternalRunJudgmentRefusal,
+  ExternalRunJudgmentRefusedV1,
+  ExternalRunJudgmentRequestV1,
+  ExternalRunJudgmentRunProjectionV1,
+  ExternalRunJudgmentSuccessV1,
+  ExternalRunJudgmentValue,
+} from "./external-run-judgment.js";
+
+export {
   FILE_SERVER_REF_SCHEMA_ID,
   parseFileServerReference,
 } from "./evidence.js";
