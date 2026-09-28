@@ -350,13 +350,13 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "On the Capture stage, open the pasted-external-output form.",
           "Paste the output (and the prompt, if you have it), pick the source, and enter the operator's name and ID.",
           "Confirm you redacted secrets before saving, and state the evidence visibility — leave it unknown rather than guessing.",
-          "Optionally record a package snapshot identity under Provenance details if the run came from an exported ContextDesk package.",
+          "If you used a downloaded ContextDesk prompt package, open Import details, choose importer-described visibility, and paste the package snapshot identity into its supported field. Reopen the imported run to check the recorded value.",
           "Later, record a human judgment: corroborated or contradicted, linked to a specific evidence or contribution ID.",
         ],
         recorded:
           "The import records importer and operator identities, a content hash of the output (and prompt when given), the stated evidence visibility, and prompt completeness — an output-only import can never claim an exact prompt.",
         limits:
-          "A package snapshot identity is a content-addressed reference, not a signature or a verification. Importing never runs the outside tool, and an unverified banner stays until a human records a judgment.",
+          "The package snapshot identity is an importer-reported content-addressed reference, not proof that the outside tool consumed that package or that its answer is correct. Importing never runs the outside tool, and an unverified banner stays until a human records a judgment.",
         actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
       {
@@ -753,14 +753,16 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Export when findings need to travel — a summary for stakeholders, or a package another tool will consume — instead of copying raw case data out of the workspace.",
         steps: [
           "On the Decide stage, open Case export tools.",
-          "Choose the variant: owner_only needs write access; share_safe needs the case-lead role.",
-          "For a package, tick the evidence to include; excluded-by-default items cannot be selected.",
-          "Export. If the privacy scan blocks it, nothing left the case — the findings list shows why.",
+          "Choose the privacy variant your current export and private-evidence capabilities allow. Check the listed privacy class before sharing.",
+          "For a package, tick only the evidence to include; excluded-by-default items cannot be selected. Optional scaffold text becomes part of this package request.",
+          "Prepare the result and review its recorded case, type, privacy, generation time, selected manifest and any omitted bodies. A blocked privacy scan provides redacted finding locations without a downloadable result.",
+          "Use Download JSON and Download Markdown deliberately. Check that your browser actually saved both files before handing them to an outside tool; preparation alone does not save either file.",
+          "If a synthetic outside response comes back, open Capture, paste it through Import external run, choose the source, confirm redaction, and report the package snapshot identity under Import details with importer-described visibility.",
         ],
         recorded:
-          "Each export reports a snapshot identity: the content hash of its manifest, so identical inputs reproduce the same identity. Export never edits the case.",
+          "A prepared package reports the server-computed snapshot identity of its selected manifest. A brief has no package snapshot identity. The versioned JSON envelope and its Markdown projection can be downloaded separately; neither preparation nor download edits the case.",
         limits:
-          "The snapshot identity is a content hash, not a cryptographic signature — exports are not signed. share_safe is deny-by-default, and a blocked export sends nothing. Neither current export can reconstruct the complete investigation on another installation.",
+          "The package snapshot identity is a content hash, not a signature or evidence that an outside model saw it. share_safe is deny-by-default for private bodies; a blocked export has no checked file to download, though the server may have projected or audited the attempt. A browser download click is not proof that a file was saved. Neither brief nor prompt package can restore an investigation; the separately authorized portable archive has its own dry-run and typed confirmation.",
         actions: [{ label: "Open the Decide stage", go: { stage: "decide" } }],
       },
       {

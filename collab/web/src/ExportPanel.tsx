@@ -1,14 +1,8 @@
-import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { parseExportEnvelope, parseExportInventory, type ExportEnvelopeV1, type ExportInventoryItemV1 } from "@cd-collab/contracts/export";
 import { protectedApiFetch } from "./protected-api.js";
 
-interface InventoryItem {
-  kind: "artifact" | "contribution";
-  id: string;
-  label: string;
-  privacyClass: string;
-  contentHash: string | null;
-  excludedByDefault: boolean;
-}
+type InventoryItem = ExportInventoryItemV1;
 
 interface ScanFinding {
   rule: string;
@@ -17,7 +11,7 @@ interface ScanFinding {
 }
 
 type ExportKind = "brief" | "package";
-type InventoryStatus = "loading" | "ready" | "error";
+type InventoryStatus = "loading" | "ready" | "error" | "unavailable";
 type PortableStatus = "loading" | "ready" | "unavailable";
 
 interface PortableCapabilities {
@@ -97,53 +91,81 @@ interface PortablePreflightResult {
   };
 }
 
-function safeFinding(finding: ScanFinding): ScanFinding {
-  if (/(credential|secret|token|authorization|request[_-]?id|endpoint|url)/i.test(finding.rule)) {
-    return { ...finding, excerpt: "[redacted]" };
-  }
-  return {
-    ...finding,
-    excerpt: finding.excerpt.length > 160 ? `${finding.excerpt.slice(0, 157)}…` : finding.excerpt,
-  };
+function safeFinding(finding: ScanFinding): ScanFinding | null {
+  if (!["credential", "internal_hostname", "raw_private_evidence"].includes(finding.rule)) return null;
+  const path = finding.path.length <= 120 && /^\$(?:\.[A-Za-z][A-Za-z0-9_]*|\[\d{1,5}\])+$/.test(finding.path)
+    ? finding.path : "[redacted path]";
+  return { rule: finding.rule, path, excerpt: "[redacted]" };
 }
 
 const NETWORK_ERROR_MESSAGE =
-  "The export request did not complete — the server returned no result. Nothing was exported and " +
-  "your variant and evidence selection are unchanged; retry with the same export button.";
-
-/**
- * How long a download's object URL is allowed to outlive the click.
- *
- * Revoking in the same tick as the click can invalidate the blob before the
- * browser has started reading it, so the download silently fails and nothing
- * observes it. A few seconds is long enough for the browser to take the bytes
- * and short enough that the URL is not left addressable.
- */
+  "The export response was interrupted, so no checked file is ready. The server may have processed the request; retry only if you need a new export.";
+const INVALID_EXPORT_MESSAGE =
+  "The server returned an invalid export result. Nothing is available to download; retry the export or contact an administrator.";
 const OBJECT_URL_TTL_MS = 5_000;
 
-/**
- * Hand a generated file to the browser without leaving a live object URL.
- *
- * The anchor is attached to the document before it is clicked — a detached
- * anchor is ignored by some browsers and by automation — removed immediately
- * after, and its URL revoked on a short timer that the caller can cancel when
- * the panel unmounts.
- */
-function startDownload(blob: Blob, filename: string, timers: Set<number>): void {
+interface ObjectUrlLease { url: string; timer: number | null }
+
+function revokeDownloads(leases: Set<ObjectUrlLease>): void {
+  for (const lease of leases) {
+    if (lease.timer !== null) window.clearTimeout(lease.timer);
+    URL.revokeObjectURL(lease.url);
+  }
+  leases.clear();
+}
+
+function startDownload(blob: Blob, filename: string, leases: Set<ObjectUrlLease>): void {
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.rel = "noopener";
-  anchor.style.display = "none";
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  const timer = window.setTimeout(() => {
-    URL.revokeObjectURL(url);
-    timers.delete(timer);
-  }, OBJECT_URL_TTL_MS);
-  timers.add(timer);
+  const lease: ObjectUrlLease = { url, timer: null };
+  leases.add(lease);
+  let anchor: HTMLAnchorElement | null = null;
+  try {
+    anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.rel = "noopener";
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    lease.timer = window.setTimeout(() => {
+      if (leases.delete(lease)) URL.revokeObjectURL(url);
+    }, OBJECT_URL_TTL_MS);
+  } catch (error) {
+    if (leases.delete(lease)) URL.revokeObjectURL(url);
+    throw error;
+  } finally {
+    anchor?.remove();
+  }
+}
+
+function safeFilenamePart(value: string): string {
+  return value.slice(0, 80).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "investigation";
+}
+
+function envelopeCaseId(envelope: ExportEnvelopeV1): string {
+  return envelope.kind === "brief"
+    ? (envelope.payload as Extract<ExportEnvelopeV1["payload"], { header: unknown }>).header.caseId
+    : (envelope.payload as Extract<ExportEnvelopeV1["payload"], { caseId: unknown }>).caseId;
+}
+
+function envelopeSnapshotIdentity(envelope: ExportEnvelopeV1): string | null {
+  return envelope.kind === "package" ? (envelope.payload as Extract<ExportEnvelopeV1["payload"], { snapshotIdentity: unknown }>).snapshotIdentity : null;
+}
+
+function parseDeliveryEnvelope(value: unknown, kind: ExportKind, privacy: "owner_only" | "share_safe", caseId: string): ExportEnvelopeV1 {
+  const envelope = parseExportEnvelope(value);
+  if (envelope.kind !== kind || envelope.privacyClass !== privacy || envelopeCaseId(envelope) !== caseId) {
+    throw new Error("export request identity mismatch");
+  }
+  return envelope;
+}
+
+function exportFailure(status: number, body: unknown): string {
+  const code = asRecord(body)?.error;
+  if (status === 401 || status === 403) return "Your current account is not authorized to export this investigation.";
+  if (status === 404) return "This investigation is no longer available for export.";
+  if (status === 422 && code === "privacy_scan_failed") return "Privacy scan blocked this export (privacy_scan_failed). Review the findings and selection.";
+  return "The export could not be prepared. Review the selection and try again.";
 }
 
 const PORTABLE_NETWORK_ERROR =
@@ -226,19 +248,34 @@ function readablePrivacy(value: string): string {
   return value.replaceAll("_", " ");
 }
 
-export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead: boolean }) {
+export function ExportPanel(props: {
+  caseId: string; canWrite: boolean; canLead: boolean;
+  identityKey?: string; authorityKey?: string;
+  canRead?: boolean; canExport?: boolean; canReadPrivate?: boolean;
+}) {
+  const canRead = props.canRead ?? (props.canWrite || props.canLead);
+  const canExport = props.canExport ?? (props.canWrite || props.canLead);
+  const canReadPrivate = props.canReadPrivate ?? (props.canWrite || props.canLead);
+  const scopeKey = JSON.stringify([props.caseId, props.identityKey, props.authorityKey,
+    canRead, canExport, canReadPrivate, props.canLead]);
+  // Each scope visit has a distinct identity, including A → B → A in one mount.
+  // A callback retained from the first A must never become current again.
+  const scopeVisit = useMemo(() => ({ key: scopeKey }), [scopeKey]);
+  const activeScope = useRef<typeof scopeVisit | null>(null);
+  const preparedRef = useRef<ExportEnvelopeV1 | null>(null);
+  const isCurrentScope = () => activeScope.current === scopeVisit;
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [inventoryStatus, setInventoryStatus] = useState<InventoryStatus>("loading");
   const [inventoryAttempt, setInventoryAttempt] = useState(0);
-  const [variant, setVariant] = useState<"owner_only" | "share_safe">("owner_only");
+  const [variant, setVariant] = useState<"owner_only" | "share_safe">(canReadPrivate ? "owner_only" : "share_safe");
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [scaffold, setScaffold] = useState("");
-  const [markdown, setMarkdown] = useState("");
-  const [snapshot, setSnapshot] = useState<string | null>(null);
+  const [exportResult, setExportResult] = useState<ExportEnvelopeV1 | null>(null);
   const [findings, setFindings] = useState<ScanFinding[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<ExportKind | null>(null);
-  const [completed, setCompleted] = useState<ExportKind | null>(null);
+  const [exportScopeKey, setExportScopeKey] = useState(scopeKey);
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
   const [portableStatus, setPortableStatus] = useState<PortableStatus>("loading");
   const [portableCapabilities, setPortableCapabilities] = useState<PortableCapabilities | null>(
     null,
@@ -253,38 +290,76 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const [applyResult, setApplyResult] = useState<PortableApplyResult | null>(null);
   const inFlight = useRef(false);
+  const exportGeneration = useRef(0);
   // Object URLs still waiting to be revoked. Unmounting revokes them at once
   // rather than leaving them addressable for the rest of the session.
-  const objectUrls = useRef(new Set<number>());
-  useEffect(() => {
-    const timers = objectUrls.current;
+  const objectUrls = useRef(new Set<ObjectUrlLease>());
+  const exportObjectUrls = useRef(new Set<ObjectUrlLease>());
+  useLayoutEffect(() => {
+    activeScope.current = scopeVisit;
+    inFlight.current = false;
+    setExportScopeKey(scopeKey);
+    preparedRef.current = null;
+    setExportResult(null);
+    setVariant(canReadPrivate ? "owner_only" : "share_safe");
+    setSelected({});
+    setScaffold("");
+    setItems([]);
+    setInventoryStatus("loading");
+    setFindings([]);
+    setError(null);
+    setPending(null);
+    setDownloadNotice(null);
+    setPortableSelection(null);
+    setPreflight(null);
+    setApplyResult(null);
+    setTypedConfirmation("");
+    setPortableMessage(null);
+    setPortableError(null);
+    setPortablePending(null);
+    setPortableStatus(props.canLead ? "loading" : "unavailable");
     return () => {
-      for (const timer of timers) window.clearTimeout(timer);
-      timers.clear();
+      activeScope.current = null;
+      preparedRef.current = null;
+      exportGeneration.current += 1;
+      revokeDownloads(exportObjectUrls.current);
+      revokeDownloads(objectUrls.current);
     };
-  }, []);
+  }, [scopeVisit]);
 
   useEffect(() => {
+    if (!canRead || !canExport) return;
     let stale = false;
     setInventoryStatus("loading");
     void protectedApiFetch(`/api/cases/${props.caseId}/export/inventory`)
       .then(async (res) => {
-        if (!res.ok) throw new Error(`inventory request failed (${res.status})`);
-        return (await res.json()) as { items?: InventoryItem[] };
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403 || res.status === 404) return null;
+          throw new Error("inventory failed");
+        }
+        return parseExportInventory(await res.json());
       })
-      .then((body) => {
-        if (stale) return;
-        setItems(body.items ?? []);
+      .then((inventory) => {
+        if (stale || !isCurrentScope()) return;
+        if (inventory === null) {
+          setItems([]);
+          setInventoryStatus("unavailable");
+          return;
+        }
+        if (inventory.caseId !== props.caseId) throw new Error("wrong inventory case");
+        setItems(inventory.items);
+        setSelected((previous) => Object.fromEntries(
+          inventory.items.filter((item) => !item.excludedByDefault && previous[`${item.kind}:${item.id}`])
+            .map((item) => [`${item.kind}:${item.id}`, true]),
+        ));
         setInventoryStatus("ready");
       })
       .catch(() => {
-        if (stale) return;
+        if (stale || !isCurrentScope()) return;
         setInventoryStatus("error");
       });
-    return () => {
-      stale = true;
-    };
-  }, [props.caseId, inventoryAttempt]);
+    return () => { stale = true; };
+  }, [scopeKey, inventoryAttempt]);
 
   useEffect(() => {
     if (!props.canLead) {
@@ -299,7 +374,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
         return (await res.json()) as PortableCapabilities;
       })
       .then((body) => {
-        if (stale) return;
+        if (stale || !isCurrentScope()) return;
         if (
           body.exportAvailable !== true ||
           body.dryRunPreflightAvailable !== true ||
@@ -316,14 +391,14 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
         setPortableStatus("ready");
       })
       .catch(() => {
-        if (!stale) setPortableStatus("unavailable");
+        if (!stale && isCurrentScope()) setPortableStatus("unavailable");
       });
     return () => {
       stale = true;
     };
-  }, [props.canLead]);
+  }, [scopeKey]);
 
-  const allowed = variant === "share_safe" ? props.canLead : props.canWrite;
+  const allowed = canRead && canExport && (variant === "share_safe" || canReadPrivate);
   const selectableItems = items.filter((item) => !item.excludedByDefault);
   const excludedCount = items.length - selectableItems.length;
   const selectedCount = selectableItems.filter(
@@ -331,18 +406,40 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   ).length;
   const permissionNote = !allowed
     ? variant === "share_safe"
-      ? "share_safe exports require the case lead role."
-      : "owner_only exports require write access to this case."
-    : !props.canLead
-      ? "share_safe is available to case leads only."
+      ? "Export access is unavailable for this account."
+      : "Owner-only exports require private-evidence access."
+    : !canReadPrivate
+      ? "Only share-safe export is available to this account."
       : null;
-  if (!props.canWrite && !props.canLead) return null;
+  const exportStateIsCurrent = exportScopeKey === scopeKey && allowed;
+  const currentExportResult = exportStateIsCurrent &&
+    (exportResult?.privacyClass !== "owner_only" || canReadPrivate) ? exportResult : null;
+  const currentPending = exportStateIsCurrent ? pending : null;
+  const currentError = exportStateIsCurrent ? error : null;
+  const currentFindings = exportStateIsCurrent ? findings : [];
+  if ((!canRead || !canExport) && !props.canLead) return null;
 
-  async function postExport(kind: ExportKind, path: string, body: unknown) {
-    if (inFlight.current) return;
+  function clearPrepared() {
+    preparedRef.current = null;
+    setExportResult(null);
+    setDownloadNotice(null);
+    revokeDownloads(exportObjectUrls.current);
+  }
+
+  async function postExport(kind: ExportKind, path: string, body: {
+    variant: "owner_only" | "share_safe";
+    selection?: { kind: "artifact" | "contribution"; id: string }[];
+    promptScaffold?: string | null;
+  }) {
+    if (!isCurrentScope() || !allowed || inFlight.current) return;
+    const requestGeneration = exportGeneration.current;
+    const requestedCaseId = props.caseId;
+    const requestedVariant = variant;
     inFlight.current = true;
+    setExportScopeKey(scopeKey);
+    setDownloadNotice(null);
     setPending(kind);
-    setCompleted(null);
+    clearPrepared();
     setError(null);
     setFindings([]);
     try {
@@ -351,39 +448,98 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      const json = (await res.json()) as {
-        error?: string;
-        findings?: ScanFinding[];
-        markdown?: string;
-        payload?: { snapshotIdentity?: string };
-      };
-      if (!res.ok) {
-        setError(json.error ?? "export failed");
-        setFindings((json.findings ?? []).map(safeFinding));
-        setMarkdown("");
-        setSnapshot(null);
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch {
+        if (requestGeneration !== exportGeneration.current || !isCurrentScope()) return;
+        setError(INVALID_EXPORT_MESSAGE);
         return;
       }
-      setMarkdown(json.markdown ?? "");
-      setSnapshot(json.payload?.snapshotIdentity ?? null);
-      setCompleted(kind);
+      if (requestGeneration !== exportGeneration.current || !isCurrentScope()) return;
+      if (!res.ok) {
+        const record = asRecord(json);
+        setError(exportFailure(res.status, json));
+        setFindings(
+          Array.isArray(record?.findings)
+            ? record.findings
+                .map((value) => asRecord(value))
+                .filter(
+                  (value): value is Record<string, unknown> =>
+                    value !== null &&
+                    typeof value.rule === "string" &&
+                    typeof value.path === "string" &&
+                    typeof value.excerpt === "string",
+                )
+                .map((value) =>
+                  safeFinding({
+                    rule: value.rule as string,
+                    path: value.path as string,
+                    excerpt: value.excerpt as string,
+                  }),
+                )
+                .filter((value): value is ScanFinding => value !== null)
+                .slice(0, 12)
+            : [],
+        );
+        return;
+      }
+      try {
+        const envelope = parseDeliveryEnvelope(json, kind, requestedVariant, requestedCaseId);
+        if (kind === "package") {
+          const pkg = envelope.payload as Extract<ExportEnvelopeV1["payload"], { manifest: unknown }>;
+          const requested = body.selection ?? [];
+          const actual = pkg.manifest.items.map((item) => `${item.kind}:${item.id}`);
+          const expected = requested.map((item) => `${item.kind}:${item.id}`);
+          if (actual.length !== expected.length ||
+              actual.some((key) => !expected.includes(key)) ||
+              pkg.promptScaffold !== (body.promptScaffold ?? null)) {
+            throw new Error("package selection differs from request");
+          }
+        }
+        preparedRef.current = envelope;
+        setExportResult(envelope);
+      } catch {
+        setError(INVALID_EXPORT_MESSAGE);
+      }
     } catch {
+      if (requestGeneration !== exportGeneration.current || !isCurrentScope()) return;
       setError(NETWORK_ERROR_MESSAGE);
-      setMarkdown("");
-      setSnapshot(null);
     } finally {
-      inFlight.current = false;
-      setPending(null);
+      if (requestGeneration === exportGeneration.current && isCurrentScope()) {
+        inFlight.current = false;
+        setPending(null);
+      }
+    }
+  }
+
+  function downloadExport(format: "json" | "markdown") {
+    if (!isCurrentScope() || !allowed || inFlight.current || !currentExportResult ||
+        preparedRef.current !== currentExportResult) return;
+    const safeId = safeFilenamePart(envelopeCaseId(currentExportResult));
+    const stem = `contextdesk-${safeId}-${currentExportResult.kind}-${currentExportResult.privacyClass}`;
+    const contents = format === "json"
+      ? `${JSON.stringify(currentExportResult, null, 2)}\n`
+      : currentExportResult.markdown;
+    try {
+      startDownload(new Blob([contents], {
+        type: format === "json" ? "application/json;charset=utf-8" : "text/markdown;charset=utf-8",
+      }), `${stem}.${format === "json" ? "json" : "md"}`, exportObjectUrls.current);
+      setDownloadNotice(`${format === "json" ? "JSON" : "Markdown"} download started. Check your browser's downloads; saving the file is not confirmed here.`);
+    } catch {
+      setDownloadNotice("The browser could not start this download. The prepared result is still available; retry its download button.");
     }
   }
 
   async function exportBrief(event: FormEvent) {
     event.preventDefault();
+    if (!isCurrentScope() || !allowed || inFlight.current) return;
     await postExport("brief", `/api/cases/${props.caseId}/export/brief`, { variant });
   }
 
   async function exportPackage(event: FormEvent) {
     event.preventDefault();
+    if (!isCurrentScope() || !allowed || inventoryStatus !== "ready" || inFlight.current) return;
     const selection = items
       .filter((item) => selected[`${item.kind}:${item.id}`] && !item.excludedByDefault)
       .map((item) => ({ kind: item.kind, id: item.id }));
@@ -396,35 +552,38 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   }
 
   async function downloadPortableArchive() {
-    if (!props.canLead || portableStatus !== "ready" || portablePending) return;
+    if (!isCurrentScope() || !props.canLead || portableStatus !== "ready" || portablePending) return;
     setPortablePending("download");
     setPortableError(null);
     setPortableMessage(null);
     try {
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/portable-archive`);
+      if (!isCurrentScope()) return;
       if (!response.ok) {
         setPortableError(portableErrorMessage(response.status));
         return;
       }
       const archive = await response.json();
+      if (!isCurrentScope()) return;
       const contents = JSON.stringify(archive, null, 2);
-      const safeId = props.caseId.replace(/[^a-zA-Z0-9_-]/g, "-");
+      const safeId = safeFilenamePart(props.caseId);
       startDownload(
         new Blob([contents], { type: "application/json;charset=utf-8" }),
         `contextdesk-investigation-${safeId}.json`,
         objectUrls.current,
       );
       setPortableMessage(
-        "Portable investigation archive downloaded. Store it according to its privacy classification.",
+        "Portable archive download started. Check your browser downloads and handle the file according to its privacy classification.",
       );
     } catch {
-      setPortableError(PORTABLE_NETWORK_ERROR);
+      if (isCurrentScope()) setPortableError(PORTABLE_NETWORK_ERROR);
     } finally {
-      setPortablePending(null);
+      if (isCurrentScope()) setPortablePending(null);
     }
   }
 
   async function selectPortableArchive(event: ChangeEvent<HTMLInputElement>) {
+    if (!isCurrentScope() || !props.canLead) return;
     setPortableSelection(null);
     setPreflight(null);
     setApplyResult(null);
@@ -440,6 +599,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
     }
     try {
       const archive = JSON.parse(await file.text()) as unknown;
+      if (!isCurrentScope()) return;
       const actors = portableActors(archive);
       if (!actors) {
         setPortableError("This file is not a valid portable investigation archive.");
@@ -451,13 +611,14 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
         `Archive selected. ${actors.length} historical ${actors.length === 1 ? "person" : "people"} will remain attribution only.`,
       );
     } catch {
+      if (!isCurrentScope()) return;
       setPortableError("This file is not a valid portable investigation archive.");
       event.target.value = "";
     }
   }
 
   async function runPortablePreflight() {
-    if (!props.canLead || !portableSelection || portablePending) return;
+    if (!isCurrentScope() || !props.canLead || !portableSelection || portablePending) return;
     setPortablePending("preflight");
     setPortableError(null);
     setPortableMessage(null);
@@ -479,24 +640,27 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           })),
         }),
       });
+      if (!isCurrentScope()) return;
       if (!response.ok) {
         setPortableError(portableErrorMessage(response.status));
         return;
       }
       const result = (await response.json()) as PortablePreflightResult;
+      if (!isCurrentScope()) return;
       setPreflight(result);
       setPortableMessage(
         "Dry-run check complete. No investigation, user, membership, role, or permission was created or changed.",
       );
     } catch {
-      setPortableError(PORTABLE_NETWORK_ERROR);
+      if (isCurrentScope()) setPortableError(PORTABLE_NETWORK_ERROR);
     } finally {
-      setPortablePending(null);
+      if (isCurrentScope()) setPortablePending(null);
     }
   }
 
   async function applyPortableArchive() {
     if (
+      !isCurrentScope() ||
       !props.canLead ||
       !portableSelection ||
       !preflight?.apply.confirmationToken ||
@@ -528,6 +692,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
         }),
       });
       const body = asRecord(await response.json());
+      if (!isCurrentScope()) return;
       if (!response.ok) {
         const code = typeof body?.error === "string" ? body.error : null;
         setPortableError(applyErrorMessage(response.status, code));
@@ -554,14 +719,14 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           : "Restore complete. Historical people remain attribution only and received no destination access.",
       );
     } catch {
-      setPortableError(PORTABLE_APPLY_NETWORK_ERROR);
+      if (isCurrentScope()) setPortableError(PORTABLE_APPLY_NETWORK_ERROR);
     } finally {
-      setPortablePending(null);
+      if (isCurrentScope()) setPortablePending(null);
     }
   }
 
   return (
-    <section className="export" aria-busy={pending !== null ? true : undefined}>
+    <section className="export" aria-busy={currentPending !== null ? true : undefined}>
       <h3 className="export__title">Export</h3>
       <p className="export__copy">
         Projection only — export never edits the case. <code>share_safe</code> is
@@ -578,10 +743,14 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
             className="login__input"
             value={variant}
             disabled={pending !== null}
-            onChange={(e) => setVariant(e.target.value as "owner_only" | "share_safe")}
+            onChange={(e) => {
+              if (!isCurrentScope() || inFlight.current) return;
+              clearPrepared();
+              setVariant(e.target.value as "owner_only" | "share_safe");
+            }}
           >
-            <option value="owner_only">owner_only</option>
-            <option value="share_safe" disabled={!props.canLead}>
+            <option value="owner_only" disabled={!canReadPrivate}>owner_only</option>
+            <option value="share_safe">
               share_safe
             </option>
           </select>
@@ -606,6 +775,9 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
               Loading evidence inventory…
             </p>
           ) : null}
+          {inventoryStatus === "unavailable" ? (
+            <p className="case-memory__note" role="status">Evidence inventory is unavailable for this account or investigation.</p>
+          ) : null}
           {inventoryStatus === "error" ? (
             <>
               <p className="case-memory__error" role="alert">
@@ -614,7 +786,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
               <button
                 className="case-memory__secondary-button"
                 type="button"
-                onClick={() => setInventoryAttempt((attempt) => attempt + 1)}
+                onClick={() => { if (isCurrentScope()) setInventoryAttempt((attempt) => attempt + 1); }}
               >
                 Retry loading inventory
               </button>
@@ -626,25 +798,24 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
               cannot be exported.
             </p>
           ) : null}
-          {items.map((item) => (
+          {inventoryStatus === "ready" ? items.map((item) => (
             <label key={`${item.kind}:${item.id}`} className="export__item">
               <input
                 type="checkbox"
-                disabled={item.excludedByDefault}
+                disabled={item.excludedByDefault || pending !== null}
                 checked={Boolean(selected[`${item.kind}:${item.id}`])}
-                onChange={(e) =>
-                  setSelected((cur) => ({
-                    ...cur,
-                    [`${item.kind}:${item.id}`]: e.target.checked,
-                  }))
-                }
+                onChange={(e) => {
+                  if (!isCurrentScope() || inFlight.current || item.excludedByDefault) return;
+                  clearPrepared();
+                  setSelected((cur) => ({ ...cur, [`${item.kind}:${item.id}`]: e.target.checked }));
+                }}
               />
               <span>
                 {item.kind} · {item.label} · {item.privacyClass}
                 {item.excludedByDefault ? " (excluded by default)" : ""}
               </span>
             </label>
-          ))}
+          )) : null}
           <p className="case-memory__note">
             This package contains only the evidence you select for another analysis tool. It is
             not a full investigation backup and cannot restore this case on another War Room.
@@ -666,40 +837,44 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           Optional prompt scaffold
           <textarea
             className="login__input"
+            disabled={pending !== null}
             value={scaffold}
-            onChange={(e) => setScaffold(e.target.value)}
+            onChange={(e) => {
+              if (!isCurrentScope() || inFlight.current) return;
+              clearPrepared();
+              setScaffold(e.target.value);
+            }}
             rows={2}
           />
         </label>
         <button
           className="login__submit"
           type="submit"
-          disabled={!allowed || pending !== null || selectedCount === 0}
+          disabled={!allowed || pending !== null || inventoryStatus !== "ready" || selectedCount === 0}
         >
           Export selected-evidence prompt package
         </button>
       </form>
-      {pending ? (
+      {currentPending ? (
         <p className="case-memory__note" role="status">
-          {pending === "brief"
+          {currentPending === "brief"
             ? "Exporting triage brief…"
             : "Exporting selected-evidence prompt package…"} Export buttons stay disabled until
           it finishes; your selection is preserved.
         </p>
       ) : null}
-      {error ? (
+      {currentError ? (
         <p className="export__error" role="alert">
-          {error}
+          {currentError}
         </p>
       ) : null}
-      {findings.length > 0 ? (
+      {currentFindings.length > 0 ? (
         <>
           <p className="case-memory__note">
-            The privacy scan blocked this export; nothing left the case. Excerpts below are
-            redacted where they may contain sensitive values.
+            The privacy scan blocked a downloadable result. The server may have performed projection or audit work. Finding values are redacted.
           </p>
           <ul className="export__findings" aria-label="Privacy scan findings">
-            {findings.map((f, i) => (
+            {currentFindings.map((f, i) => (
               <li key={`${f.rule}-${i}`}>
                 <span className="imported-run__text">
                   {f.rule} · {f.path} · {f.excerpt}
@@ -709,29 +884,91 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           </ul>
         </>
       ) : null}
-      {completed ? (
-        <p className="export__copy" role="status">
-          {completed === "brief"
-            ? "Triage brief exported."
-            : "Selected-evidence prompt package exported."} The result below is a read-only
-          projection of the case.
-        </p>
-      ) : null}
-      {snapshot ? (
-        <p className="export__copy">
-          Snapshot identity: <code className="imported-run__text">{snapshot}</code> — the content
-          hash of this export's manifest; identical inputs reproduce the same identity.
-        </p>
-      ) : null}
-      {markdown ? (
-        <pre
-          className="export__markdown"
-          tabIndex={0}
-          role="region"
-          aria-label="Exported markdown"
-        >
-          {markdown}
-        </pre>
+      {currentExportResult ? (
+        <section className="export__result" aria-labelledby="export-result-heading">
+          <div className="export__result-heading">
+            <div>
+              <p className="export__eyebrow">Ready to hand off</p>
+              <h4 id="export-result-heading">Export files</h4>
+            </div>
+            <span className="export__badge">
+              {readablePrivacy(currentExportResult.privacyClass)}
+            </span>
+          </div>
+          <p className="export__copy" role="status">
+            {currentExportResult.kind === "brief"
+              ? "Triage brief prepared."
+              : "Selected-evidence prompt package prepared."} Download each checked file deliberately; preparation does not save a file.
+          </p>
+          <dl className="export__result-facts">
+            <div><dt>Investigation</dt><dd><code>{envelopeCaseId(currentExportResult)}</code></dd></div>
+            <div><dt>Generated</dt><dd>{currentExportResult.exportedAt}</dd></div>
+            <div>
+              <dt>Export type</dt>
+              <dd>
+                {currentExportResult.kind === "brief" ? "Triage brief" : "Prompt package"}
+              </dd>
+            </div>
+            <div>
+              <dt>Privacy</dt>
+              <dd>{readablePrivacy(currentExportResult.privacyClass)}</dd>
+            </div>
+            {envelopeSnapshotIdentity(currentExportResult) ? (
+              <div>
+                <dt>Snapshot identity</dt>
+                <dd>
+                  <code className="imported-run__text">
+                    {envelopeSnapshotIdentity(currentExportResult)}
+                  </code>
+                </dd>
+              </div>
+            ) : null}
+          </dl>
+          {currentExportResult.kind === "package" ? (
+            <div className="export__selection" aria-label="Prepared package selection">
+              <p className="export__copy">Selected manifest items and body inclusion:</p>
+              <ul>
+                {(currentExportResult.payload as Extract<ExportEnvelopeV1["payload"], { excerpts: unknown }>).excerpts.map((item) => (
+                  <li key={`${item.kind}:${item.id}`}>
+                    <code>{item.kind}:{item.id}</code> · {readablePrivacy(item.privacyClass)} ·
+                    {item.bodyIncluded ? " body included" : " body omitted"}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {envelopeSnapshotIdentity(currentExportResult) ? (
+            <p className="export__copy">
+              The snapshot identity is the content hash of this package's manifest; identical
+              inputs reproduce the same identity.
+            </p>
+          ) : null}
+          <div className="export__result-actions" aria-label="Export file downloads">
+            <button
+              className="case-memory__secondary-button"
+              type="button"
+              onClick={() => downloadExport("json")}
+            >
+              Download JSON
+            </button>
+            <button
+              className="case-memory__secondary-button"
+              type="button"
+              onClick={() => downloadExport("markdown")}
+            >
+              Download Markdown
+            </button>
+          </div>
+          {downloadNotice ? <p role="status" className="export__copy">{downloadNotice}</p> : null}
+          <pre
+            className="export__markdown"
+            tabIndex={0}
+            role="region"
+            aria-label="Exported markdown"
+          >
+            {currentExportResult.markdown}
+          </pre>
+        </section>
       ) : null}
       <section className="export__portable" aria-labelledby="portable-archive-heading">
         <div className="export__portable-heading">

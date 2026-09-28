@@ -13,6 +13,28 @@ Proposal ranking, supersede/resolve history surfacing, and walkthroughs remain
 unsupported-claim detection, HTML/PDF export, and an evidence appendix remain
 #532.
 
+### Trusted export and outside-response handoff (Goal 06 local draft)
+
+The War Room's Decide export support prepares a versioned brief or selected-evidence
+prompt package through the existing server projection, capability checks and
+share-safe scan. The browser uses the same nested envelope and inventory
+parsers as the server through a browser-safe entry, binds the checked result
+to its requested case/kind/privacy/selection, and presents recorded facts
+before a person deliberately downloads JSON or byte-matching Markdown.
+Private bodies in share-safe packages stay omitted. Prepared files are scoped
+to the authenticated identity, authority and available lifecycle; a stale
+callback cannot create a new download after that scope changes. The browser
+releases temporary download URLs on replacement, unmount and a bounded timer.
+
+Capture's existing manual import can record a synthetic outside response with
+its source, redaction confirmation, importer-described visibility and the
+package snapshot identity. That binding reports what the importer entered; it
+is not proof that an external model received the package, nor a correctness or
+corroboration judgment. The imported run stays unverified until a separate
+human assessment. A brief has no package snapshot. Neither file is a portable
+investigation archive; portable restore keeps its own dry-run and typed
+confirmation path. These Goal 06 changes remain unmerged until review.
+
 The current local integration also adds a strategy-neutral evidence workspace:
 case-bound files remain owned by the evidence provider (filesystem or the
 S3-compatible provider), while append-only artifact annotations stay in the

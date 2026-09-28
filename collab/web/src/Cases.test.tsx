@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CaseDiscussion } from "./CaseDiscussion.js";
 import { Cases, activityLabel } from "./Cases.js";
@@ -138,7 +138,9 @@ function stubCaseFetch(options?: {
       return { ok: true, json: async () => ({ contributions: [] }) };
     }
     if (url.endsWith("/experiments") || url.endsWith("/export/inventory")) {
-      return { ok: true, json: async () => ({ experiments: [], items: [] }) };
+      return { ok: true, json: async () => url.endsWith("/export/inventory")
+        ? { schemaId: "cd-collab.export_inventory.v1", caseId: url.split("/")[3], items: [] }
+        : { experiments: [], items: [] } };
     }
     if (url.includes("/workbench")) {
       return { ok: true, json: async () => ({ items: [], views: [], bookmarks: [], candidateCount: 0 }) };
@@ -3277,5 +3279,58 @@ describe("War Room collection-query browse", () => {
     expect(nextPage).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("eyJwYWdlIjoyfQ")).toBeNull();
     expect(stub).toHaveBeenCalled();
+  });
+});
+
+
+describe("mounted export handoff scope", () => {
+  it("revokes the old mounted result and callbacks across identity and lifecycle changes", async () => {
+    const envelope = {
+      schemaId: "cd-collab.export_envelope.v1", kind: "brief", privacyClass: "owner_only",
+      exportedAt: "2026-09-09T12:00:00.000Z", markdown: "# Synthetic brief\n",
+      payload: { schemaId: "cd-collab.brief.v1", privacyClass: "owner_only",
+        header: { caseId: "c1", title: "Synthetic", severity: "high", status: "open", legalHold: false, retentionClass: "standard" },
+        timeline: [], hypotheses: [], actions: [], evidence: [], attributions: [], importedRuns: [] },
+    };
+    const stub = stubCaseFetch({ onRequest: (url) => url === "/api/cases/c1/export/brief"
+      ? Promise.resolve({ ok: true, status: 200, json: async () => envelope }) : null });
+    const createObjectURL = vi.fn(() => "blob:stale");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    const applyAction = vi.fn(async (action: LifecycleAction) => lifecycleSuccess(action));
+    const props = {
+      roles: ["case-lead"], capabilities: ["investigation:read", "export:create", "evidence:private:read"],
+      identityKey: "A", authorityKey: "grant-A", view: "investigations" as const,
+      lifecycleBinding: lifecycleBinding("archive", applyAction),
+    };
+    const view = render(<Cases {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    const stages = await screen.findByRole("navigation", { name: "Investigation stages" });
+    fireEvent.click(within(stages).getByRole("button", { name: /Decide/ }));
+    fireEvent.click(screen.getByText("Case export tools"));
+    const panel = document.querySelector("section.export")!;
+    fireEvent.click(within(panel as HTMLElement).getByRole("button", { name: "Export triage brief" }));
+    const download = await within(panel as HTMLElement).findByRole("button", { name: "Download JSON" });
+    const form = within(panel as HTMLElement).getByRole("form", { name: "Export triage brief" });
+    const retained = (element: Element, handler: "onClick" | "onSubmit") => {
+      const key = Object.keys(element).find((candidate) => candidate.startsWith("__reactProps$"));
+      expect(key).toBeTruthy();
+      return (element as unknown as Record<string, Record<string, (event: { preventDefault: () => void }) => void>>)[key!]![handler]!;
+    };
+    const oldDownload = retained(download, "onClick");
+    const oldSubmit = retained(form, "onSubmit");
+    const briefPosts = () => stub.mock.calls.filter(([input]) => String(input) === "/api/cases/c1/export/brief").length;
+    expect(briefPosts()).toBe(1);
+
+    view.rerender(<Cases {...props} identityKey="B" authorityKey="grant-B" />);
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    await act(async () => { oldDownload({ preventDefault() {} }); oldSubmit({ preventDefault() {} }); });
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(briefPosts()).toBe(1);
+
+    view.rerender(<Cases {...props} />);
+    expect(screen.queryByRole("button", { name: "Download JSON" })).toBeNull();
+    view.rerender(<Cases {...props} lifecycleBinding={lifecycleBinding("restore", applyAction)} />);
+    expect(document.querySelector("section.export")).toBeNull();
+    expect(briefPosts()).toBe(1);
   });
 });

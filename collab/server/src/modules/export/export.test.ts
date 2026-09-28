@@ -503,7 +503,7 @@ describe("triage brief and prompt-package export", () => {
       expect(packageA.snapshotIdentity).toBe(packageB.snapshotIdentity);
       expect(canonicalJson(packageA)).toBe(canonicalJson(packageB));
       expect(pkgA.markdown).toBe(pkgB.markdown);
-      expect(packageA.manifest.excludedByDefault).toEqual(["corroboration", "resolution"]);
+      expect(packageA.manifest.excludedByDefault).toEqual(["external_run", "corroboration", "resolution"]);
       expect(canonicalJson(packageA)).not.toContain("corroborationState");
       expect(canonicalJson(packageA)).not.toContain("run_corroboration");
       expect(packageA.excerpts.some((e) => e.kind === "contribution" && e.id === fx.importedId)).toBe(
@@ -731,6 +731,37 @@ describe("triage brief and prompt-package export", () => {
       expect(get).not.toHaveBeenCalled();
       expect(head).not.toHaveBeenCalled();
       expect(openRead).not.toHaveBeenCalled();
+    });
+  });
+
+  it("exports a sparse file-server reference without inventing a hash or body", async () => {
+    await withApp(async ({ app }) => {
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const created = await app.inject({
+        method: "POST", url: "/api/cases", headers: { cookie: dave },
+        payload: { title: "Sparse reference export" },
+      });
+      expect(created.statusCode).toBe(200);
+      const caseId = (JSON.parse(created.body) as { id: string }).id;
+      const uploaded = await app.inject({
+        method: "POST", url: `/api/cases/${caseId}/evidence`, headers: { cookie: dave },
+        payload: {
+          kind: "file_server_ref", uri: "https://files.example.test/synthetic/ref.bin",
+          summary: "Synthetic reference with no expected hash", privacyClass: "share_safe",
+        },
+      });
+      expect(uploaded.statusCode).toBe(200);
+      const id = (JSON.parse(uploaded.body) as { artifact: { id: string } }).artifact.id;
+      const response = await app.inject({
+        method: "POST", url: `/api/cases/${caseId}/export/package`, headers: { cookie: dave },
+        payload: { variant: "share_safe", selection: [{ kind: "artifact", id }] },
+      });
+      expect(response.statusCode).toBe(200);
+      const envelope = parseExportEnvelope(JSON.parse(response.body) as unknown);
+      const pkg = parsePromptPackage(envelope.payload);
+      expect(pkg.manifest.items).toEqual([{ kind: "artifact", id, contentHash: "", privacyClass: "share_safe" }]);
+      expect(pkg.excerpts).toMatchObject([{ id, contentHash: "", content: null, bodyIncluded: false }]);
+      expect(envelope.markdown).toContain(`artifact:${id} hash=none`);
     });
   });
 });

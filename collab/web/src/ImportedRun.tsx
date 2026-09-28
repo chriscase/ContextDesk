@@ -70,7 +70,7 @@ export function ImportedRun(props: {
           <summary>Prompt and import details</summary>
           <p className="catalog__meta">
             Evidence access: {run.evidenceVisibility === "unknown" ? "not recorded" : "described by the importer"}
-            {run.snapshotBinding ? " · tied to a frozen evidence set" : " · no frozen evidence set recorded"}
+            {run.snapshotBinding ? " · importer-reported package snapshot" : " · no package snapshot reported"}
           </p>
           {run.promptText === null ? (
             <p className="catalog__meta">Original prompt was not recorded.</p>

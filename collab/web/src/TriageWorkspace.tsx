@@ -465,12 +465,15 @@ export function TriageWorkspace(props: {
                       className="login__input"
                       name="snapshotBinding"
                       aria-label="Package snapshot identity"
+                      aria-describedby="package-snapshot-help"
                       placeholder="Package snapshot identity"
                     />
                   </label>
-                  <p className="triage-capture__hint">
-                    Leave these fields alone unless the source provides them. Unknown details stay
-                    unknown rather than being guessed.
+                  <p className="triage-capture__hint" id="package-snapshot-help">
+                    If you used a downloaded prompt package, copy its recorded snapshot identity here
+                    and choose importer-described visibility. This records your report; it does not
+                    prove what the outside tool saw or whether its answer is correct. Leave unknown
+                    details blank rather than guessing.
                   </p>
                 </details>
                 <button

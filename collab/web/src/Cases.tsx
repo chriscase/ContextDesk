@@ -755,6 +755,8 @@ export function Cases(props: {
   capabilities?: readonly string[];
   readOnly?: boolean;
   participant?: { username: string; roles: string[] };
+  identityKey?: string;
+  authorityKey?: string;
   view?: "overview" | "investigations";
   focusCaseId?: string | null;
   stage?: StageId;
@@ -2916,14 +2918,37 @@ export function Cases(props: {
                   onChanged={() => Promise.all([refresh(), refreshActivity()]).then(() => undefined)}
                 />
               ) : null}
-              {!readOnly ? (
+              {!readOnly && current.status !== "archived" &&
+               ((capabilitySet?.has("export:create") ?? canLead) ||
+                (capabilitySet?.has("portable:restore") ?? canLead)) &&
+               (props.lifecycleBinding === undefined ||
+                (props.lifecycleBinding.lifecycle.status === "ready" &&
+                 props.lifecycleBinding.lifecycle.value.investigationId === current.id &&
+                 props.lifecycleBinding.lifecycle.value.status !== "archived")) ? (
                 <details className="case-view__support">
                   <summary>Case export tools</summary>
-                  <ExportPanel caseId={current.id} canWrite={canWrite} canLead={canLead} />
+                  <ExportPanel
+                    key={JSON.stringify([current.id, props.identityKey, props.authorityKey,
+                      current.status, canRead, canReadPrivate,
+                      capabilitySet?.has("export:create") ?? canLead,
+                      capabilitySet?.has("portable:restore") ?? canLead])}
+                    caseId={current.id}
+                    identityKey={props.identityKey ?? props.participant?.username ?? "legacy"}
+                    authorityKey={props.authorityKey ?? "legacy"}
+                    canRead={canRead}
+                    canExport={capabilitySet?.has("export:create") ?? canLead}
+                    canReadPrivate={canReadPrivate}
+                    canWrite={canWrite}
+                    canLead={capabilitySet?.has("portable:restore") ?? canLead}
+                  />
                 </details>
               ) : (
                 <p className="triage-step__note" role="status">
-                  Static read-only view: status changes and exports are unavailable.
+                  {readOnly
+                    ? "Static read-only view: status changes and exports are unavailable."
+                    : current.status === "archived"
+                      ? "Archived investigation: exports are unavailable until it is restored."
+                      : "Export tools are unavailable for this account or lifecycle state."}
                 </p>
               )}
             </div>

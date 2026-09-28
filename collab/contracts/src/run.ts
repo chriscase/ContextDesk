@@ -16,6 +16,10 @@ import {
 } from "./source.js";
 import { isIsoInstant } from "./temporal.js";
 import { hasDangerousUnicode } from "./user-profile.js";
+import { CORROBORATION_STATES, type CorroborationState } from "./corroboration.js";
+
+export { CORROBORATION_STATES } from "./corroboration.js";
+export type { CorroborationState } from "./corroboration.js";
 
 /** Aligns with #878 completeness vocabulary. Collab copies the words only. */
 export const COMPLETENESS = ["exact", "partial", "unknown"] as const;
@@ -23,9 +27,6 @@ export type Completeness = (typeof COMPLETENESS)[number];
 
 export const EVIDENCE_VISIBILITY = ["unknown", "importer_described"] as const;
 export type EvidenceVisibility = (typeof EVIDENCE_VISIBILITY)[number];
-
-export const CORROBORATION_STATES = ["unverified", "corroborated", "contradicted"] as const;
-export type CorroborationState = (typeof CORROBORATION_STATES)[number];
 
 export const EXTERNAL_RUN_SCHEMA_ID = "cd-collab.external_run.v1" as const;
 export const EXTERNAL_RUN_IMPORT_REQUEST_SCHEMA_ID =

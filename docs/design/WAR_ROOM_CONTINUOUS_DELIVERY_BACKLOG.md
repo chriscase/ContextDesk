@@ -7,10 +7,9 @@ already shipped, rechecks dependencies and risks, selects the highest-value
 ready slice, freezes its exact base, and starts that slice when it does not
 conflict with protected work.
 
-Baseline for this reconciliation: `main`
-`c5de75d1e40a3de8ddfceda2ce3d216a5e19644d` (Goal 1 through #1181, desktop
-synchronization through #1182, and Activity Center scope safety through #1183
-are on main).
+Baseline for Goal 06: `main` `10b4c4f54f7d849124ec16a70ea7435cdc76dc00`,
+tree `bde6ee328ce2dca7fbff7fa452ddb9011fc27806`. Goal 01 and Goal 04,
+desktop synchronization, Activity Center safety, and Goal 05 are on main.
 
 ## Delivery loop
 
@@ -80,24 +79,31 @@ The browser contract exports activity DTOs and parsers without Node crypto or
 cursor decoding. Cursor generation, fingerprinting, and request validation
 remain server-only.
 
-## Active unmerged slice — trustworthy S3 evidence upload recovery
+## Active unmerged slice — trusted export and external-response handoff
 
-Goal 05 is in draft [PR #1184](https://github.com/chriscase/ContextDesk/pull/1184),
-not shipped on main. It preserves uncertain S3 promotion, suppresses hidden
-copy replay, and adds frozen-intent reconciliation in Investigation First and
-Beacon. The [frozen contract](../goals/05-S3-EVIDENCE-RECONCILIATION.md) and
-[receipt](../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md) own acceptance and
-qualification limits. Activity Center implementation remains accepted. No
-successor is launched by this draft checkpoint.
+Goal 05 is shipped through merged [PR #1184](https://github.com/chriscase/ContextDesk/pull/1184).
+Its [frozen contract](../goals/05-S3-EVIDENCE-RECONCILIATION.md) and
+[receipt](../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md) retain their qualification
+limits. Historical #1159, #1166, #1168, #1170, and #1173 are closed
+superseded sources, not open prerequisites. The old duplicate-push Software
+Impact caption observation remains separate reliability evidence.
+
+Goal 06 is the current unmerged slice. It makes the existing Decide export
+support usable for deliberate, validated JSON and Markdown delivery and manual
+Capture import of a synthetic outside response with an importer-reported
+package snapshot identity. See its [frozen contract](../goals/06-TRUSTED-EXPORT-HANDOFF.md)
+and [receipt](../goals/TRUSTED_EXPORT_HANDOFF_RECEIPT.md). The prompt package,
+brief and portable archive have different meanings. Historical PRs #1177 and
+#1179 are source material only; this slice does not merge or close them.
 
 ## Deferred successor queue
 
 Trusted Investigation Discovery shipped through merged PR #1181. The desktop
 investigation-team save-status synchronization shipped through merged PR #1182.
-Activity Center first-frame scope safety shipped through #1183. Unmerged
-historical branches, including #1165 and #1167, remain source material. S3
-reconciliation is the active unmerged Goal 05 above. The candidates below and
-#1158 remain deferred; this checkpoint does not authorize their implementation.
+Activity Center first-frame scope safety shipped through #1183. S3 recovery
+shipped through #1184. Unmerged historical branches remain source material.
+Goal 06 is the active unmerged slice above; the candidates below and #1158
+remain deferred and are not authorized by this checkpoint.
 
 1. **Evidence annotation workspace and safe bulk metadata.** Build on the
    shipped append-only annotation contract: compact review, structured tags or

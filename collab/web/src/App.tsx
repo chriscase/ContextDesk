@@ -123,6 +123,8 @@ interface WarRoomStrategyBindings {
   readonly capabilities: readonly string[];
   readonly readOnly: boolean;
   readonly participant: { username: string; roles: string[] };
+  readonly identityKey: string;
+  readonly authorityKey: string;
   readonly onStageChange: (stage: WorkLocation["stage"]) => void;
   readonly onDeepNavigate: (stage: WorkLocation["stage"], focus: NonNullable<WorkLocation["focus"]>) => void;
   readonly onActivityOpen: (
@@ -151,6 +153,8 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
         capabilities={bindings.capabilities}
         readOnly={bindings.readOnly}
         participant={bindings.participant}
+        identityKey={bindings.identityKey}
+        authorityKey={bindings.authorityKey}
         view={props.view}
         focusCaseId={props.focusCaseId}
         stage={props.stage}
@@ -980,6 +984,8 @@ export function App() {
     capabilities,
     readOnly: staticReadOnly,
     participant: { username: session.username, roles },
+    identityKey: session.identityId,
+    authorityKey: investigationAuthorityKey(session, staticReadOnly),
     onStageChange: (stage) =>
       isWorkLocation(locationRef.current) && locationRef.current.caseId
         ? navigate({
