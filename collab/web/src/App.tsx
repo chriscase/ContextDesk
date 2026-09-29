@@ -64,6 +64,7 @@ import { BrandMark } from "./graphics.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
 import {
   InvestigationRuntimeProvider,
+  selectResourceView,
   useInvestigationRuntime,
 } from "./investigations/runtime/public.js";
 import { RuntimeHandoffPanel } from "./investigations/strategies/runtime-handoff.js";
@@ -164,12 +165,14 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
   return (
     <>
       <Cases
+        key={runtime.presentationScopeKey}
         roles={bindings.roles}
         capabilities={bindings.capabilities}
         readOnly={bindings.readOnly}
         participant={bindings.participant}
         identityKey={bindings.identityKey}
         authorityKey={bindings.authorityKey}
+        recordedContextView={selectResourceView(runtime.resources.investigations)}
         view={props.view}
         focusCaseId={props.focusCaseId}
         stage={props.stage}

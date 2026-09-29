@@ -248,7 +248,7 @@ describe("war room overview", () => {
     });
     render(<Cases roles={["contributor"]} view="investigations" />);
     const product = await screen.findByRole("combobox", { name: "Investigation context: Software or product" });
-    const list = document.getElementById("investigation-context-options-productName");
+    const list = document.getElementById(product.getAttribute("list") ?? "");
     expect(list?.querySelector('option[value="Fixture Desk"]')).toBeTruthy();
 
     fireEvent.change(product, { target: { value: "A brand-new product label" } });

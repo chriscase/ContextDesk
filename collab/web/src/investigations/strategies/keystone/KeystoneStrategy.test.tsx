@@ -1,5 +1,6 @@
 import type { ContributionV1 } from "@cd-collab/contracts/investigation-runtime";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useEffect, useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InvestigationRuntimeProvider,
@@ -375,6 +376,86 @@ describe("Keystone engineer strategy", () => {
     mounted.rerender({}, { id: "ravi", username: "ravi", displayName: "Ravi Shah" });
     await waitFor(() => expect(screen.getByText("No evidence selected")).toBeTruthy());
     expect((screen.getByRole("checkbox", { name: "Add checkout-timeout.log to working set" }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("rejects a retained tuple callback across a real Runtime and editor A to B to A transition", async () => {
+    const gateway = createInvestigationGatewayDouble();
+    const BOB: InvestigationRuntimeIdentity = { id: "bob", username: "bob", displayName: "Bob Chen" };
+    let oldApply: (() => void) | null = null;
+    let callbackInvocations = 0;
+    let observedDraftChanges = 0;
+    let passiveCleanups = 0;
+    let cleanupAtReplacement = -1;
+    const requestCount = () => [
+      gateway.listInvestigations, gateway.getInvestigation, gateway.listEvidence,
+      gateway.listContributions, gateway.createInvestigation, gateway.updateSituation!,
+    ].reduce((sum, method) => sum + vi.mocked(method).mock.calls.length, 0);
+    function invokeRetained() {
+      const input = screen.queryByRole("combobox", { name: "Product or software" }) as HTMLInputElement | null;
+      const before = input?.value;
+      callbackInvocations += 1;
+      oldApply?.();
+      if (input && input.value !== before) observedDraftChanges += 1;
+    }
+    function Wrapper({ identity }: { readonly identity: InvestigationRuntimeIdentity }) {
+      useEffect(() => () => { passiveCleanups += 1; }, [identity.id]);
+      useLayoutEffect(() => {
+        if (identity.id === "bob") {
+          cleanupAtReplacement = passiveCleanups;
+          invokeRetained();
+        }
+      }, [identity.id]);
+      return <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider identityKey={identity.id} identity={identity}
+          authorityKey={`${identity.id}-authority`} capabilities={FULL_CAPABILITIES}
+          readOnly={false} active focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+          isInvestigationLocation onOpenCreated={vi.fn()}>
+          <KeystoneStrategy {...SHELL} focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase} />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>;
+    }
+    const view = render(<Wrapper identity={ALICE} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit situation" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }),
+      { target: { value: "Manual Alice draft" } });
+    const chooser = screen.getByRole("combobox", { name: "Recorded product / version / build combination" });
+    const firstOption = Array.from((chooser as HTMLSelectElement).options).find((option) => option.value !== "");
+    expect(firstOption).toBeDefined();
+    fireEvent.change(chooser, { target: { value: firstOption!.value } });
+    const apply = screen.getByRole("button", { name: "Apply combination to draft" });
+    const reactKey = Object.keys(apply).find((key) => key.startsWith("__reactProps$"));
+    expect(reactKey).toBeDefined();
+    oldApply = (apply as unknown as Record<string, { onClick: () => void }>)[reactKey!]!.onClick;
+
+    view.rerender(<Wrapper identity={BOB} />);
+    expect(cleanupAtReplacement).toBe(0);
+    expect(callbackInvocations).toBe(1);
+    expect(observedDraftChanges).toBe(0);
+    expect(screen.queryByText("Manual Alice draft")).toBeNull();
+    expect((gateway.updateSituation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit situation" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }),
+      { target: { value: "Manual Bob draft" } });
+    const requestsBeforeBobCallback = requestCount();
+    act(() => invokeRetained());
+    expect((screen.getByRole("combobox", { name: "Product or software" }) as HTMLInputElement).value)
+      .toBe("Manual Bob draft");
+    expect(requestCount()).toBe(requestsBeforeBobCallback);
+
+    view.rerender(<Wrapper identity={ALICE} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit situation" }));
+    const original = makePopulatedCase().investigationContext!.productName;
+    expect((screen.getByRole("combobox", { name: "Product or software" }) as HTMLInputElement).value)
+      .toBe(original);
+    const requestsBeforeAliceCallback = requestCount();
+    act(() => invokeRetained());
+    expect((screen.getByRole("combobox", { name: "Product or software" }) as HTMLInputElement).value)
+      .toBe(original);
+    expect(callbackInvocations).toBe(3);
+    expect(observedDraftChanges).toBe(0);
+    expect((gateway.updateSituation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+    expect(requestCount()).toBe(requestsBeforeAliceCallback);
+    expect(passiveCleanups).toBe(2);
   });
 
   it("keeps evidence usable when contribution annotations fail independently", async () => {

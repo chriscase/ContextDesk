@@ -208,9 +208,9 @@ describe("Beacon rapid-intake strategy", () => {
     await screen.findByRole("heading", { name: "Recent signals" });
     fireEvent.click(screen.getByText("Optional technical context"));
     fireEvent.change(screen.getByRole("combobox", { name: "Product" }), { target: { value: "ContextDesk Storefront" } });
-    expect(screen.getByText("Existing recorded value selected.")).toBeTruthy();
+    expect(screen.getByText(/Matches a value in the loaded investigation records/)).toBeTruthy();
     fireEvent.change(screen.getByRole("combobox", { name: "Build" }), { target: { value: "new-build-2026.09" } });
-    expect(screen.getByText("New value; it will be recorded exactly as entered.")).toBeTruthy();
+    expect(screen.getByText(/Not found among the loaded suggestions; manual entry is still available/)).toBeTruthy();
     fireEvent.change(screen.getByRole("textbox", { name: "Investigation title" }), { target: { value: created.title } });
     fireEvent.change(screen.getByRole("textbox", { name: "What did you observe?" }), { target: { value: created.problemStatement } });
     fireEvent.click(screen.getByRole("button", { name: "Create and open" }));

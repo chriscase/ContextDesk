@@ -299,14 +299,14 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         steps: [
           "Select Start investigation in the top bar (or use the form under the investigation list).",
           "Enter a title and the Situation context you know now: the observed problem, affected people or systems, impact, scope, one open question per line, and any structured software or product context. Blank fields remain visibly not recorded.",
-          "Use the structured context suggestions when one matches, or enter a new value when it does not. The display value you enter is kept as written; flexible tags are a later extension.",
+          "Suggestions come only from investigation records already loaded for your current access and may omit records outside this view. Type a value manually when it is not among those suggestions. Choose a recorded product/version/build combination and select Apply combination to draft only when you want to replace those three local fields; Create or Save is still separate.",
           "Create the investigation — it opens on Situation, where an authorized member can refine those fields as the investigation develops.",
           "To find existing work, use the list's search field or the status filter.",
         ],
         recorded:
           "Creation records who opened the case and when. Situation edits and status changes are recorded. Contributors, case leads, and admins can edit Situation on a case they can access; only a case lead can change status.",
         limits:
-          "Creating requires the investigation:write capability (the contributor, case-lead, and admin roles include it; a local grant can add it to a viewer). Severity starts at medium; this build does not offer a severity picker at creation. Empty Situation fields mean not recorded — they are never filled from model guesses. Suggestions are existing recorded values, not a controlled vocabulary.",
+          "Creating requires the investigation:write capability (the contributor, case-lead, and admin roles include it; a local grant can add it to a viewer). Severity starts at medium; this build does not offer a severity picker at creation. Empty Situation fields mean not recorded — they are never filled from model guesses. Suggestions show at most 100 values or combinations from already loaded authorized records, not a complete catalog or software-impact verdict. Manual entry remains valid when suggestions are unavailable. Investigation First removes outer whitespace on save; War Room, Beacon, and Keystone retain nonblank field text as entered, subject to server validation.",
         actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
       },
     ],

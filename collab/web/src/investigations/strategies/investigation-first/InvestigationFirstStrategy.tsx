@@ -21,6 +21,7 @@ import {
   useInvestigationCollectionQuery,
 } from "../collection-query.js";
 import { CollectionPagination } from "../shared/index.js";
+import { RecordedContextFields, recordedContextCatalogFromView } from "../shared/index.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
@@ -137,40 +138,6 @@ function failureCopy(error: RuntimeFailure, subject: "list" | "detail" | "eviden
   return `${labels[subject]} could not be processed safely. Try again.`;
 }
 
-/** Whether the recorded-value catalog behind the combo fields can be trusted. */
-type CatalogState = "available" | "empty" | "loading" | "unavailable";
-
-function comboHint(catalog: CatalogState, value: string, options: readonly string[]): string {
-  // A comparison against a catalog that was never read is not a fact. Say what
-  // is actually known instead of calling an unchecked value new. Context
-  // payloads and catalog options share the same outer-whitespace normalization,
-  // so the comparison copy also names that behavior explicitly.
-  if (catalog === "loading") return "Recorded values are still loading, so this cannot be compared yet. Outer whitespace will be removed when it is saved.";
-  if (catalog === "unavailable") return "Recorded values are unavailable, so this cannot be compared. Outer whitespace will be removed when it is saved.";
-  const submittedLiteral = text(value);
-  if (catalog === "empty" || options.length === 0) {
-    return submittedLiteral
-      ? "No recorded values yet. This will be saved as a new value after removing outer whitespace."
-      : "No recorded values yet; enter a new value. Outer whitespace will be removed when saved.";
-  }
-  if (!submittedLiteral) return "Choose a recorded value or enter a new one. Outer whitespace will be removed when saved.";
-  return options.some((option) => option === submittedLiteral)
-    ? "Matches a recorded value after removing outer whitespace; that value will be reused."
-    : "No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.";
-}
-
-/**
- * A native `input[list]`, deliberately without an authored combobox role. The
- * datalist popup is not scriptable, so expanded state, option ownership, and
- * selection belong to the browser; declaring them here would promise assistive
- * technology semantics this markup cannot keep.
- */
-function ComboField(props: { field: keyof InvestigationContext; label: string; value: string; options: readonly string[]; catalog: CatalogState; onChange: (value: string) => void }) {
-  const listId = `investigation-first-${props.field}-options`;
-  const hintId = `${listId}-hint`;
-  return <label className="investigation-first__field"><span>{props.label}</span><input className="login__input" type="text" aria-label={props.label} aria-describedby={hintId} list={listId} value={props.value} onChange={(event) => props.onChange(event.target.value)} /><datalist id={listId}>{props.options.map((option) => <option key={option} value={option} />)}</datalist><small id={hintId} aria-live="polite">{comboHint(props.catalog, props.value, props.options)}</small></label>;
-}
-
 function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
   const runtime = useInvestigationRuntime();
   const lifecycle = selectResourceView(runtime.resources.lifecycle);
@@ -254,7 +221,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const browseHeadingRef = useRef<HTMLHeadingElement>(null);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
   const focusedArrival = useRef<string | null>(null);
-  const draftOwnerKey = `${runtime.identity.id}\u0000${runtime.identity.username}`;
+  const draftOwnerKey = runtime.presentationScopeKey;
   const priorDraftOwnerKey = useRef(draftOwnerKey);
   const legacyCases = investigations.availability === "available" ? investigations.value : [];
   const cases = collection.enabled
@@ -288,19 +255,10 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           ? `available:${props.focusCaseId}`
           : null;
   const listView = collection.enabled ? collectionView : investigations;
-  const catalog: CatalogState = investigations.availability === "available"
-    ? legacyCases.length > 0 ? "available" : "empty"
-    : investigations.availability === "unavailable"
-      ? "unavailable"
-      : "loading";
+  const catalog = recordedContextCatalogFromView(investigations, runtime.capabilities.canRead);
   const evidenceSelectionKey = evidenceInventory.inventory.availability === "available"
     ? evidenceInventory.inventory.value.map(({ evidence }) => evidence.id).join("\u0000")
     : "";
-  const contextOptions = useMemo(() => {
-    const result: Record<keyof InvestigationContext, string[]> = { productName: [], version: [], build: [], component: [], environment: [], organization: [] };
-    for (const row of legacyCases) for (const [field] of CONTEXT_FIELDS) { const value = text(row.investigationContext?.[field]); if (value && !result[field].includes(value)) result[field].push(value); }
-    return result;
-  }, [legacyCases]);
   const filteredCases = useMemo(() => {
     if (collection.enabled) return cases;
     const normalized = query.trim().toLocaleLowerCase();
@@ -429,9 +387,16 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         <label className="investigation-first__field"><span>Who or what is affected?</span><textarea value={situation.affectedParties} onChange={(event) => setSituation((current) => ({ ...current, affectedParties: event.target.value }))} placeholder="People, services, or customers" rows={2} /></label>
         <label className="investigation-first__field"><span>What is the impact?</span><textarea value={situation.impact} onChange={(event) => setSituation((current) => ({ ...current, impact: event.target.value }))} placeholder="The recorded operational impact" rows={2} /></label>
       </div><details key={draftOwnerKey} className="investigation-first__advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}><summary>Advanced context <span>Product, build, timing, scope, and open questions</span></summary>
-      {catalog === "unavailable" ? <div className="investigation-first__muted investigation-first__create-status" role="status"><p>Recorded values could not be loaded, so nothing entered below can be compared with them. Creating an investigation still works.</p><button type="button" onClick={runtime.refresh.investigations}>Retry recorded values</button></div> : null}
+      {catalog.status === "unavailable" ? <div className="investigation-first__muted investigation-first__create-status" role="status"><p>Loaded investigation suggestions could not be read. Manual creation still works.</p><button type="button" onClick={runtime.refresh.investigations}>Retry recorded values</button></div> : null}
       <div className="investigation-first__form-grid">
-        {CONTEXT_FIELDS.map(([field, label]) => <ComboField key={field} field={field} label={label} value={situation.investigationContext[field]} options={contextOptions[field]} catalog={catalog} onChange={(value) => setSituation((current) => ({ ...current, investigationContext: { ...current.investigationContext, [field]: value } }))} />)}
+        <RecordedContextFields scopeKey={`${draftOwnerKey}:create`} draft={situation.investigationContext}
+          catalog={catalog} labels={Object.fromEntries(CONTEXT_FIELDS) as Partial<Record<keyof InvestigationContext, string>>}
+          fieldClassName="investigation-first__field" inputClassName="login__input"
+          tupleClassName="recorded-context__tuple investigation-first__field--wide" normalizesOuterWhitespace
+          onFieldChange={(field, value) => setSituation((current) => ({ ...current, investigationContext: { ...current.investigationContext, [field]: value } }))}
+          onTupleApply={(tuple) => setSituation((current) => ({ ...current, investigationContext: {
+            ...current.investigationContext, productName: tuple.productName, version: tuple.version, build: tuple.build,
+          } }))} />
         <label className="investigation-first__field"><span>When did it happen? <small>optional</small></span><input className="login__input" aria-describedby="investigation-first-occurred-at-hint" value={situation.occurredAt} onChange={(event) => setSituation((current) => ({ ...current, occurredAt: event.target.value }))} placeholder="2026-08-29 or 2026-08-29T14:30:00-05:00" /><small id="investigation-first-occurred-at-hint">Use YYYY-MM-DD for a known date, or an ISO 8601 date-time with an offset when the local time is known. The server validates this value when you create the investigation.</small></label>
         <label className="investigation-first__field"><span>Scope</span><input className="login__input" value={situation.scope} onChange={(event) => setSituation((current) => ({ ...current, scope: event.target.value }))} placeholder="What is in or out of scope?" /></label>
         <label className="investigation-first__field investigation-first__field--wide"><span>Open questions <small>one per line</small></span><textarea value={situation.openQuestions} onChange={(event) => setSituation((current) => ({ ...current, openQuestions: event.target.value }))} placeholder="What still needs to be learned?" rows={3} /></label>

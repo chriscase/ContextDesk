@@ -138,8 +138,8 @@ async function createWithKeyboard(page: Page, title: string): Promise<string> {
   await advanced.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator(".investigation-first__advanced")).toHaveAttribute("open", "");
-  const product = page.getByRole("combobox", { name: "Product or software" });
-  const build = page.getByRole("combobox", { name: "Build" });
+  const product = page.getByRole("combobox", { name: "Product or software", exact: true });
+  const build = page.getByRole("combobox", { name: "Build", exact: true });
   await product.focus();
   await page.keyboard.type("Fixture Storefront");
   await build.focus();
@@ -370,8 +370,8 @@ test.describe("Investigation First accessibility and browser conformance", () =>
         await advancedSummary.click();
         await expect(page.locator(".investigation-first__advanced")).toHaveAttribute("open", "");
         observed.push(`open advanced context: ${await expectReflow(page, requirement, [
-          page.getByRole("combobox", { name: "Product or software" }),
-          page.getByRole("combobox", { name: "Build" }),
+          page.getByRole("combobox", { name: "Product or software", exact: true }),
+          page.getByRole("combobox", { name: "Build", exact: true }),
           page.getByLabel(/When did it happen/u),
           page.getByPlaceholder("What is in or out of scope?"),
           page.getByPlaceholder("What still needs to be learned?"),
