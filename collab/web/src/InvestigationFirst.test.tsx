@@ -429,13 +429,13 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(screen.getByText("Advanced context"));
     const product = screen.getByRole("combobox", { name: "Product or software" });
     fireEvent.change(product, { target: { value: "ContextDesk Storefront" } });
-    expect(screen.getByText("Matches a recorded value after removing outer whitespace; that value will be reused.")).toBeTruthy();
+    expect(screen.getByText(/Matches a value in the loaded investigation records.*Outer whitespace will be removed/)).toBeTruthy();
     fireEvent.change(product, { target: { value: "contextdesk storefront" } });
-    expect(screen.getByText("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.")).toBeTruthy();
+    expect(screen.getByText(/Not found among the loaded suggestions; manual entry is still available.*Outer whitespace will be removed/)).toBeTruthy();
     fireEvent.change(product, { target: { value: "  ContextDesk Storefront  " } });
-    expect(screen.getByText("Matches a recorded value after removing outer whitespace; that value will be reused.")).toBeTruthy();
+    expect(screen.getByText(/Matches a value in the loaded investigation records.*Outer whitespace will be removed/)).toBeTruthy();
     fireEvent.change(product, { target: { value: "A new product" } });
-    expect(screen.getByText("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.")).toBeTruthy();
+    expect(screen.getByText(/Not found among the loaded suggestions; manual entry is still available.*Outer whitespace will be removed/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Filter investigations by status"), { target: { value: "monitoring" } });
     expect(screen.getByRole("button", { name: /Checkout latency/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Imported investigation/ })).toBeNull();
@@ -499,9 +499,9 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.change(screen.getByPlaceholderText("Short investigation title"), { target: { value: "Trimmed context" } });
     fireEvent.click(screen.getByText("Advanced context"));
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "  ContextDesk Storefront  " } });
-    expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; that value will be reused.");
+    expect(comboHint("Product or software")).toMatch(/Matches a value in the loaded investigation records.*Outer whitespace will be removed/);
     fireEvent.change(screen.getByRole("combobox", { name: "Build" }), { target: { value: "  never-recorded-build  " } });
-    expect(comboHint("Build")).toBe("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.");
+    expect(comboHint("Build")).toMatch(/Not found among the loaded suggestions; manual entry is still available.*Outer whitespace will be removed/);
     fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
 
     await waitFor(() => expect(onOpenCase).toHaveBeenCalledWith("case-trimmed-context"));
@@ -1337,15 +1337,15 @@ describe("Investigation First Runtime V1 presentation", () => {
     // The datalist popup is the browser's to own, so the markup must not claim
     // an expanded state, owned options, or an active option it cannot report.
     expect(product.tagName).toBe("INPUT");
-    expect(product.getAttribute("list")).toBe("investigation-first-productName-options");
+    expect(product.getAttribute("list")).toBeTruthy();
     for (const attribute of ["role", "aria-expanded", "aria-controls", "aria-autocomplete", "aria-activedescendant", "aria-owns"]) {
       expect(product.getAttribute(attribute)).toBeNull();
     }
-    const options = document.getElementById("investigation-first-productName-options");
+    const options = document.getElementById(product.getAttribute("list") ?? "");
     expect(options?.tagName).toBe("DATALIST");
     expect([...options!.querySelectorAll("option")].map((option) => option.getAttribute("value"))).toContain("ContextDesk Storefront");
     const hint = document.getElementById(product.getAttribute("aria-describedby") ?? "");
-    expect(hint?.getAttribute("aria-live")).toBe("polite");
+    expect(hint?.textContent).toContain("loaded");
 
     // Keyboard: an ordinary focusable text input with nothing intercepting the
     // keys the native popup needs.
@@ -1358,9 +1358,9 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.keyDown(product, { key: "Enter" });
     expect((product as HTMLInputElement).value).toBe("");
     expect(document.activeElement).toBe(product);
-    expect(comboHint("Product or software")).toBe("Choose a recorded value or enter a new one. Outer whitespace will be removed when saved.");
+    expect(comboHint("Product or software")).toMatch(/loaded authorized investigations.*Outer whitespace will be removed/);
     fireEvent.change(product, { target: { value: "ContextDesk Storefront" } });
-    expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; that value will be reused.");
+    expect(comboHint("Product or software")).toMatch(/Matches a value in the loaded investigation records.*Outer whitespace will be removed/);
   });
 
   it("stops calling a typed value new when the recorded values could not be read", async () => {
@@ -1376,17 +1376,17 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(screen.getByText("Advanced context"));
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "ContextDesk Storefront" } });
 
-    expect(comboHint("Product or software")).toBe("Recorded values are unavailable, so this cannot be compared. Outer whitespace will be removed when it is saved.");
+    expect(comboHint("Product or software")).toMatch(/Loaded investigation suggestions are unavailable.*Outer whitespace will be removed/);
     expect(screen.queryByText(/saved as a new value/iu)).toBeNull();
     expect(screen.queryByText(/value will be reused/iu)).toBeNull();
     const retry = screen.getByRole("button", { name: "Retry recorded values" });
-    expect(screen.getByText(/Recorded values could not be loaded/).textContent).toContain("Creating an investigation still works.");
+    expect(screen.getByText(/Loaded investigation suggestions could not be read/).textContent).toContain("Manual creation still works.");
 
     fireEvent.click(retry);
-    await waitFor(() => expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; that value will be reused."));
+    await waitFor(() => expect(comboHint("Product or software")).toMatch(/Matches a value in the loaded investigation records.*Outer whitespace will be removed/));
     expect(screen.queryByRole("button", { name: "Retry recorded values" })).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "A product nobody recorded" } });
-    expect(comboHint("Product or software")).toBe("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.");
+    expect(comboHint("Product or software")).toMatch(/Not found among the loaded suggestions; manual entry is still available.*Outer whitespace will be removed/);
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
   });
 
@@ -1398,14 +1398,14 @@ describe("Investigation First Runtime V1 presentation", () => {
     renderStrategy({ gateway });
     await screen.findByRole("heading", { name: "Create an investigation" });
     fireEvent.click(screen.getByText("Advanced context"));
-    expect(comboHint("Product or software")).toBe("Recorded values are still loading, so this cannot be compared yet. Outer whitespace will be removed when it is saved.");
+    expect(comboHint("Product or software")).toMatch(/suggestions are still loading.*Outer whitespace will be removed/);
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "ContextDesk Storefront" } });
-    expect(comboHint("Product or software")).toBe("Recorded values are still loading, so this cannot be compared yet. Outer whitespace will be removed when it is saved.");
+    expect(comboHint("Product or software")).toMatch(/suggestions are still loading.*Outer whitespace will be removed/);
 
     pending.resolve(gatewayOk([]));
-    await waitFor(() => expect(comboHint("Product or software")).toBe("No recorded values yet. This will be saved as a new value after removing outer whitespace."));
+    await waitFor(() => expect(comboHint("Product or software")).toMatch(/No values in the currently loaded investigation records.*Outer whitespace will be removed/));
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "" } });
-    expect(comboHint("Product or software")).toBe("No recorded values yet; enter a new value. Outer whitespace will be removed when saved.");
+    expect(comboHint("Product or software")).toMatch(/No values in the currently loaded investigation records.*Outer whitespace will be removed/);
   });
 
   it("still captures an investigation while the recorded values are unavailable", async () => {

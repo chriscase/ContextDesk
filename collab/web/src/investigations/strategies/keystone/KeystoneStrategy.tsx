@@ -27,6 +27,7 @@ import { KeystoneEvidenceGrid } from "./KeystoneEvidenceGrid.js";
 import { KeystoneHypothesisComposer } from "./KeystoneHypothesisComposer.js";
 import { KeystoneInspector } from "./KeystoneInspector.js";
 import { KeystoneSituationEditor } from "./KeystoneSituationEditor.js";
+import { recordedContextCatalogFromView } from "../shared/index.js";
 import {
   filterEvidence,
   filterInvestigations,
@@ -134,11 +135,13 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   );
   const identityScopeKey = JSON.stringify([
     "keystone-identity-v1",
+    runtime.presentationScopeKey,
     runtime.identity.id,
     runtime.identity.username,
   ]);
   const scope = JSON.stringify([
     "keystone-case-v1",
+    runtime.presentationScopeKey,
     runtime.identity.id,
     runtime.identity.username,
     props.focusCaseId,
@@ -609,6 +612,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
               <KeystoneSituationEditor
                 identityKey={identityScopeKey}
                 investigation={investigationValue}
+                recordedContextCatalog={recordedContextCatalogFromView(investigations, runtime.capabilities.canRead)}
                 updateSituation={runtime.commands.updateSituation}
                 mutation={runtime.mutations.updateSituation}
               />

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
 import {
   selectResourceView,
   useInvestigationRuntime,
@@ -26,6 +26,7 @@ import {
   StrategyStateNotice,
   StrategySurface,
 } from "../shared/index.js";
+import { RecordedContextFields, recordedContextCatalogFromView, type RecordedContextDraft } from "../shared/index.js";
 
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
 
@@ -65,28 +66,9 @@ function contributionLabel(contribution: ContributionV1): string {
   return "Observation";
 }
 
-function PriorValueField(props: {
-  readonly id: string;
-  readonly label: string;
-  readonly value: string;
-  readonly options: readonly string[];
-  readonly onChange: (value: string) => void;
-}) {
-  const normalized = props.value.trim().toLocaleLowerCase();
-  const existing = normalized !== "" && props.options.some((option) => option.toLocaleLowerCase() === normalized);
-  const hintId = `${props.id}-hint`;
-  return <div className="beacon__field"><label htmlFor={props.id}>{props.label}</label>
-    <input
-      id={props.id}
-      value={props.value}
-      list={`${props.id}-options`}
-      aria-describedby={hintId}
-      onChange={(event) => props.onChange(event.target.value)}
-    />
-    <datalist id={`${props.id}-options`}>{props.options.map((option) => <option key={option} value={option} />)}</datalist>
-    <small id={hintId} aria-live="polite">{props.value.trim() ? existing ? "Existing recorded value selected." : "New value; it will be recorded exactly as entered." : "Choose a prior value or enter a new one."}</small>
-  </div>;
-}
+const EMPTY_CONTEXT: RecordedContextDraft = {
+  productName: "", version: "", build: "", component: "", environment: "", organization: "",
+};
 
 function CreateCard({ startSignal }: { readonly startSignal?: number }) {
   const runtime = useInvestigationRuntime();
@@ -95,17 +77,14 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
   const [observation, setObservation] = useState("");
   const [affected, setAffected] = useState("");
   const [impact, setImpact] = useState("");
-  const [product, setProduct] = useState("");
-  const [build, setBuild] = useState("");
+  const [context, setContext] = useState<RecordedContextDraft>(EMPTY_CONTEXT);
   const investigations = selectResourceView(runtime.resources.investigations);
-  const priorValues = useMemo(() => {
-    const cases = investigations.availability === "available" ? investigations.value : [];
-    const unique = (values: readonly (string | null | undefined)[]) => [...new Set(values.flatMap((value) => value?.trim() ? [value.trim()] : []))].sort((left, right) => left.localeCompare(right));
-    return {
-      products: unique(cases.map((item) => item.investigationContext?.productName)),
-      builds: unique(cases.map((item) => item.investigationContext?.build)),
-    };
-  }, [investigations]);
+  const catalog = recordedContextCatalogFromView(investigations, runtime.capabilities.canRead);
+  const scopeKey = runtime.presentationScopeKey;
+
+  useLayoutEffect(() => {
+    setTitle(""); setObservation(""); setAffected(""); setImpact(""); setContext(EMPTY_CONTEXT);
+  }, [scopeKey]);
 
   useEffect(() => { if (startSignal) titleRef.current?.focus(); }, [startSignal]);
 
@@ -118,17 +97,10 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
       problemStatement: observation,
       affectedParties: affected,
       impact,
-      investigationContext: product.trim() || build.trim() ? {
-        productName: product,
-        version: "",
-        build,
-        component: "",
-        environment: "",
-        organization: "",
-      } : null,
+      investigationContext: Object.values(context).some((value) => value.trim()) ? context : null,
     });
     if (result.status === "succeeded") {
-      setTitle(""); setObservation(""); setAffected(""); setImpact(""); setProduct(""); setBuild("");
+      setTitle(""); setObservation(""); setAffected(""); setImpact(""); setContext(EMPTY_CONTEXT);
     }
   }
 
@@ -152,7 +124,14 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
         <label className="beacon__field beacon__field--wide"><span>What did you observe?</span><textarea value={observation} onChange={(event) => setObservation(event.target.value)} rows={3} placeholder="Record the signal without guessing at the cause" /></label>
         <label className="beacon__field"><span>Who or what is affected?</span><input value={affected} onChange={(event) => setAffected(event.target.value)} /></label>
         <label className="beacon__field"><span>Recorded impact</span><input value={impact} onChange={(event) => setImpact(event.target.value)} /></label>
-        <details className="beacon__advanced beacon__field--wide"><summary>Optional technical context</summary><div className="beacon__advanced-grid"><PriorValueField id="beacon-product" label="Product" value={product} options={priorValues.products} onChange={setProduct} /><PriorValueField id="beacon-build" label="Build" value={build} options={priorValues.builds} onChange={setBuild} /></div></details>
+        <details className="beacon__advanced beacon__field--wide"><summary>Optional technical context</summary><div className="beacon__advanced-grid">
+          <RecordedContextFields scopeKey={`${scopeKey}:create`} draft={context} catalog={catalog}
+            fieldClassName="beacon__field" tupleClassName="recorded-context__tuple beacon__field--wide"
+            labels={{ productName: "Product" }}
+            onFieldChange={(field, value) => setContext((current) => ({ ...current, [field]: value }))}
+            onTupleApply={(tuple) => setContext((current) => ({ ...current,
+              productName: tuple.productName, version: tuple.version, build: tuple.build }))} />
+        </div></details>
         <div className="beacon__submit beacon__field--wide"><button type="submit" disabled={running || !runtime.commands.createInvestigation}>{running ? "Creating…" : runtime.commands.createInvestigation ? "Create and open" : "Preparing create…"}</button><span>Blank values remain explicitly not recorded.</span></div>
       </form>
     </StrategyPanel>
@@ -396,7 +375,9 @@ function Detail(props: InvestigationStrategyShellProps) {
           <RuntimeHandoffPanel investigation={selected} />
         </div>
         <aside className="beacon__side">
-          <StrategyPanel title="Current Situation" titleId="beacon-situation-title"><dl className="beacon__facts"><div><dt>Observed problem</dt><dd>{recorded(selected.problemStatement)}</dd></div><div><dt>Affected</dt><dd>{recorded(selected.affectedParties)}</dd></div><div><dt>Impact</dt><dd>{recorded(selected.impact)}</dd></div><div><dt>Product / build</dt><dd>{[selected.investigationContext?.productName, selected.investigationContext?.build].filter(Boolean).join(" · ") || "Not recorded"}</dd></div></dl></StrategyPanel>
+          <StrategyPanel title="Current Situation" titleId="beacon-situation-title"><dl className="beacon__facts"><div><dt>Observed problem</dt><dd>{recorded(selected.problemStatement)}</dd></div><div><dt>Affected</dt><dd>{recorded(selected.affectedParties)}</dd></div><div><dt>Impact</dt><dd>{recorded(selected.impact)}</dd></div><div><dt>Product / build</dt><dd>{[selected.investigationContext?.productName, selected.investigationContext?.build].filter(Boolean).join(" · ") || "Not recorded"}</dd></div>
+            {(["productName", "version", "build", "component", "environment", "organization"] as const).map((field) => <div key={field}><dt>{{ productName: "Product", version: "Version", build: "Build", component: "Component", environment: "Environment", organization: "Organization" }[field]}</dt><dd>{recorded(selected.investigationContext?.[field])}</dd></div>)}
+          </dl></StrategyPanel>
           <PromoteCard investigation={selected} contributions={entries} />
         </aside>
       </div>
