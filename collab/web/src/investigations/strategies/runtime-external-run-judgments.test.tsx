@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -30,6 +30,12 @@ const RUN_B = "33333333-3333-4333-8333-333333333333";
 const ARTIFACT_ID = "44444444-4444-4444-8444-444444444444";
 const NOTE_ID = "55555555-5555-4555-8555-555555555555";
 const TOMBSTONE_ID = "66666666-6666-4666-8666-666666666666";
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 function idle<T>(): ResourceState<T> {
   return { status: "idle" };
@@ -91,6 +97,7 @@ function list(overrides: Partial<ExternalRunJudgmentListV1> = {}): ExternalRunJu
 function makeRuntime(overrides: Partial<{
   presentationScopeKey: string;
   runId: string | null;
+  readCompletion: number | null;
   judgments: ResourceState<ExternalRunJudgmentListV1>;
   evidence: ResourceState<readonly ArtifactV1[]>;
   contributions: ResourceState<readonly ContributionV1[]>;
@@ -98,7 +105,7 @@ function makeRuntime(overrides: Partial<{
   contributionMutation: InvestigationRuntime["mutations"]["createContribution"];
   query: ((runId: string) => void) | null;
   create: InvestigationRuntime["commands"]["createExternalRunJudgment"];
-  refresh: () => void;
+  refresh: () => number | void;
   otherRefresh: () => void;
 }> = {}): InvestigationRuntime {
   const idleMutation = { status: "idle" as const };
@@ -139,6 +146,7 @@ function makeRuntime(overrides: Partial<{
       artifactAnnotations: idle(),
       externalRunJudgments: overrides.judgments ?? idle(),
       externalRunJudgmentsRunId: overrides.runId === undefined ? RUN_A : overrides.runId,
+      externalRunJudgmentsCompletedReadGeneration: overrides.readCompletion ?? null,
     },
     mutations: {
       create: idleMutation,
@@ -206,6 +214,59 @@ afterEach(() => {
 });
 
 describe("runtime external run judgments adapter", () => {
+  it("requires a read after the latest unknown retry across the panel and public Runtime seam", async () => {
+    const unknown = {
+      status: "failed" as const,
+      error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
+    };
+    const pendingB = createDeferred<typeof unknown>();
+    const create = vi.fn()
+      .mockResolvedValueOnce(unknown)
+      .mockImplementationOnce(() => pendingB.promise)
+      .mockResolvedValue(unknown);
+    let generation = 0;
+    const refresh = vi.fn(() => ++generation);
+    const query = vi.fn();
+    const currentList = list();
+    const runtimeAt = (completion: number, status: "ready" | "loading" = "ready") => makeRuntime({
+      runId: RUN_A,
+      readCompletion: completion,
+      judgments: status === "ready"
+        ? { status: "ready", value: currentList }
+        : { status: "loading", previous: currentList },
+      create, refresh, query,
+    });
+    const view = renderFor(RUN_A, runtimeAt(0));
+    fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh recorded assessments" }));
+    runtimeRef.current = runtimeAt(1);
+    view.rerender(<RuntimeExternalRunJudgments caseId={CASE_ID} runId={RUN_A} />);
+    const retry = screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement;
+    await waitFor(() => expect(retry.disabled).toBe(false));
+    const reactKey = Object.keys(retry).find((key) => key.startsWith("__reactProps$"));
+    if (!reactKey) throw new Error("React retry callback is unavailable");
+    const earlierRetry = (retry as unknown as Record<string, { onClick: () => void }>)[reactKey]!.onClick;
+
+    fireEvent.click(retry);
+    expect(create).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh recorded assessments" }));
+    expect(refresh).toHaveBeenCalledTimes(2);
+    runtimeRef.current = runtimeAt(1, "loading");
+    view.rerender(<RuntimeExternalRunJudgments caseId={CASE_ID} runId={RUN_A} />);
+    await act(async () => {
+      pendingB.resolve(unknown);
+      await pendingB.promise;
+    });
+    runtimeRef.current = runtimeAt(2);
+    view.rerender(<RuntimeExternalRunJudgments caseId={CASE_ID} runId={RUN_A} />);
+    expect(retry.disabled).toBe(true);
+    earlierRetry();
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
   it("opens only currently authorized citation targets and keeps unavailable links recorded", () => {
     const navigate = vi.fn();
     const judgment = list({

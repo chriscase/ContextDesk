@@ -484,6 +484,80 @@ describe("shared human assessments panel", () => {
     expect(createAssessment).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["commit_outcome_unknown", "conflict"] as const)(
+    "does not let a read begun during retry B authorize retry C after B becomes %s",
+    async (error) => {
+      const unknown = { status: "failed" as const, error: "commit_outcome_unknown" as const };
+      const bOutcome = { status: "failed" as const, error };
+      const pendingB = createDeferred<typeof bOutcome>();
+      const createAssessment = vi.fn()
+        .mockResolvedValueOnce(unknown)
+        .mockImplementationOnce(() => pendingB.promise)
+        .mockResolvedValue(unknown);
+      let generation = 0;
+      const refresh = vi.fn(() => ++generation);
+      const view = mount({ createAssessment, refresh });
+      fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+      fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
+      await screen.findByRole("alert");
+      fireEvent.click(screen.getByRole("button", { name: "Refresh recorded assessments" }));
+      view.rerender(<HumanAssessmentsPanel
+        {...view.props} resource={{ status: "ready", value: [] }} readCompletion={1}
+      />);
+      const retry = screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement;
+      await waitFor(() => expect(retry.disabled).toBe(false));
+
+      fireEvent.click(retry);
+      expect(createAssessment).toHaveBeenCalledTimes(2);
+      expect(commandInput(createAssessment, 1)).toEqual(commandInput(createAssessment, 0));
+      fireEvent.click(screen.getByRole("button", { name: "Refresh recorded assessments" }));
+      expect(refresh).toHaveBeenCalledTimes(2);
+      view.rerender(<HumanAssessmentsPanel
+        {...view.props} resource={{ status: "loading", previous: [] }} readCompletion={1}
+      />);
+      await act(async () => {
+        pendingB.resolve(bOutcome);
+        await pendingB.promise;
+      });
+      view.rerender(<HumanAssessmentsPanel
+        {...view.props} resource={{ status: "ready", value: [] }} readCompletion={2}
+      />);
+      expect(retry.disabled).toBe(true);
+      fireEvent.click(retry);
+      expect(createAssessment).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("rejects an earlier enabled retry callback after retry B becomes unknown", async () => {
+    const unknown = { status: "failed" as const, error: "commit_outcome_unknown" as const };
+    const pendingB = createDeferred<typeof unknown>();
+    const createAssessment = vi.fn()
+      .mockResolvedValueOnce(unknown)
+      .mockImplementationOnce(() => pendingB.promise)
+      .mockResolvedValue(unknown);
+    const view = mount({ createAssessment, refresh: vi.fn(() => 1) });
+    fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Record assessment" }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh recorded assessments" }));
+    view.rerender(<HumanAssessmentsPanel
+      {...view.props} resource={{ status: "ready", value: [] }} readCompletion={1}
+    />);
+    const retry = screen.getByRole("button", { name: "Retry unchanged assessment" }) as HTMLButtonElement;
+    await waitFor(() => expect(retry.disabled).toBe(false));
+    const reactKey = Object.keys(retry).find((key) => key.startsWith("__reactProps$"));
+    if (!reactKey) throw new Error("React retry callback is unavailable");
+    const earlierRetry = (retry as unknown as Record<string, { onClick: () => void }>)[reactKey]!.onClick;
+    fireEvent.click(retry);
+    expect(createAssessment).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      pendingB.resolve(unknown);
+      await pendingB.promise;
+    });
+    earlierRetry();
+    expect(createAssessment).toHaveBeenCalledTimes(2);
+  });
+
   it("settles an exact replay from its applied record even when history content is unchanged", async () => {
     const applied = record({ seq: 1, rationale: "Earlier committed reading." });
     const createAssessment = vi.fn(async () => ({

@@ -328,6 +328,9 @@ export function HumanAssessmentsPanel({
   const focusedFailureRef = useRef<string | null>(null);
   const submittingRef = useRef(false);
   const intentRef = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
+  const attemptRef = useRef(0);
+  const retryPermitRef = useRef<number | null>(null);
+  const awaitedReadRef = useRef<{ attempt: number; generation: number } | null>(null);
   const [awaitedReadGeneration, setAwaitedReadGeneration] = useState<number | null>(null);
   const [judgment, setJudgment] = useState<HumanAssessmentValue | "">("");
   const [selected, setSelected] = useState<HumanAssessmentCitationChoice[]>([]);
@@ -387,17 +390,24 @@ export function HumanAssessmentsPanel({
 
   useEffect(() => {
     if (frozen === null) {
+      retryPermitRef.current = null;
+      awaitedReadRef.current = null;
       setAwaitedReadGeneration(null);
       setAwaitingHistoryReview(false);
       return;
     }
+    const awaited = awaitedReadRef.current;
     if (
       awaitingHistoryReview
       && awaitedReadGeneration !== null
+      && awaited?.attempt === attemptRef.current
+      && awaited.generation === awaitedReadGeneration
       && readCompletion !== null
       && readCompletion >= awaitedReadGeneration
       && resource.status === "ready"
     ) {
+      retryPermitRef.current = attemptRef.current;
+      awaitedReadRef.current = null;
       setAwaitedReadGeneration(null);
       setAwaitingHistoryReview(false);
       setHistoryReviewed(true);
@@ -452,6 +462,14 @@ export function HumanAssessmentsPanel({
     return next;
   }
 
+  function revokeRetryPermission() {
+    retryPermitRef.current = null;
+    awaitedReadRef.current = null;
+    setHistoryReviewed(false);
+    setAwaitedReadGeneration(null);
+    setAwaitingHistoryReview(false);
+  }
+
   async function applyOutcome(
     outcome: HumanAssessmentCreateResult,
     intent: { fingerprint: string; idempotencyKey: string },
@@ -479,11 +497,11 @@ export function HumanAssessmentsPanel({
       return;
     }
     if (outcome.error === "commit_outcome_unknown" || outcome.error === "conflict") {
+      revokeRetryPermission();
       const frozenLinks = Object.freeze(draft.links.map((link) => Object.freeze({ ...link })));
       setFrozen(Object.freeze({ ...draft, links: frozenLinks }));
       setSelected([...frozenLinks]);
       setRationale(draft.rationale);
-      setHistoryReviewed(false);
       intentRef.current = {
         fingerprint: intent.fingerprint,
         idempotencyKey: draft.idempotencyKey,
@@ -537,6 +555,8 @@ export function HumanAssessmentsPanel({
       rationale: trimmed,
       idempotencyKey: intent.idempotencyKey,
     };
+    attemptRef.current += 1;
+    revokeRetryPermission();
     submittingRef.current = true;
     setSubmitting(true);
     setFeedback(null);
@@ -558,7 +578,14 @@ export function HumanAssessmentsPanel({
   }
 
   async function retryFrozen() {
-    if (frozen === null || !historyReviewed || submittingRef.current || running || createAssessment === null) {
+    if (
+      frozen === null
+      || !historyReviewed
+      || retryPermitRef.current !== attemptRef.current
+      || submittingRef.current
+      || running
+      || createAssessment === null
+    ) {
       return;
     }
     const trimmed = frozen.rationale.trim();
@@ -566,6 +593,8 @@ export function HumanAssessmentsPanel({
       fingerprint: fingerprintOf(frozen.judgment, frozen.links, frozen.rationale),
       idempotencyKey: frozen.idempotencyKey,
     };
+    attemptRef.current += 1;
+    revokeRetryPermission();
     submittingRef.current = true;
     setSubmitting(true);
     setFeedback(null);
@@ -588,10 +617,15 @@ export function HumanAssessmentsPanel({
 
   function refreshHistory() {
     if (frozen !== null) {
+      retryPermitRef.current = null;
+      awaitedReadRef.current = null;
       setHistoryReviewed(false);
     }
     const generation = refresh();
     if (frozen !== null) {
+      awaitedReadRef.current = typeof generation === "number"
+        ? { attempt: attemptRef.current, generation }
+        : null;
       setAwaitedReadGeneration(typeof generation === "number" ? generation : null);
       setAwaitingHistoryReview(typeof generation === "number");
     }

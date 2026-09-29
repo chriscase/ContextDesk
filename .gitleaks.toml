@@ -66,3 +66,14 @@ id = "generic-api-key"
   regexTarget = "line"
   regexes = ['''token issued subject=svc-[0-9a-f]{8} ttl=\d+''']
   paths = ['''^fixtures/log-lab/scenarios/retrieval-ablation/cases/rb14-secrets-malformed/import/auth/tokens\.jsonl$''']
+
+  # Seven historical generic-api-key hits in the first Goal 07 implementation
+  # commit are literal request idempotency identifiers, not credentials. Match
+  # only these six exact synthetic values (one occurs twice) in the one unit
+  # test file; other keys, values, and paths remain scanned.
+  [[rules.allowlists]]
+  description = "Historical synthetic judgment idempotency identifiers in unit tests"
+  condition = "AND"
+  regexTarget = "line"
+  regexes = ['''idempotencyKey: "(?:judgment-key-0001|judgment-key-0002|judgment-empty-contradicts-01|judgment-held-0001|judgment-owner-positive-01|judgment-at-cap-0001)"''']
+  paths = ['''^collab/server/src/modules/import/judgment\.test\.ts$''']
