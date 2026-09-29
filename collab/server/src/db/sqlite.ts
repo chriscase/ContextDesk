@@ -407,7 +407,14 @@ export function createSqliteRuntime(
     state,
     "runs",
     rawRuns,
-    new Set(["insert", "appendCorroboration", "insertImportSuccessIntent", "restore"]),
+    new Set([
+      "insert",
+      "appendCorroboration",
+      "appendJudgment",
+      "insertImportSuccessIntent",
+      "insertJudgmentSuccessIntent",
+      "restore",
+    ]),
   );
   const rawExperiments = new MemoryExperimentStore();
   const experiments = persistentMemoryStore(

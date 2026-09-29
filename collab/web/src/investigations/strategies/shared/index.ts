@@ -59,3 +59,18 @@ export type { CollectionPageView, CollectionPaginationProps } from "./Collection
 
 export { EvidenceUploadReconciliationForm } from "./EvidenceUploadReconciliationForm.js";
 export type { EvidenceUploadReconciliationFormProps } from "./EvidenceUploadReconciliationForm.js";
+export { HumanAssessmentsPanel } from "./HumanAssessmentsPanel.js";
+export type {
+  HumanAssessmentCitationChoice,
+  HumanAssessmentCreateCommand,
+  HumanAssessmentCreateInput,
+  HumanAssessmentCreateResult,
+  HumanAssessmentLink,
+  HumanAssessmentRecord,
+  HumanAssessmentValue,
+  HumanAssessmentsMutationState,
+  HumanAssessmentsPanelProps,
+  HumanAssessmentsReadError,
+  HumanAssessmentsResourceState,
+  HumanAssessmentsWriteError,
+} from "./HumanAssessmentsPanel.js";

@@ -17,6 +17,7 @@ describe("investigation runtime capability projection", () => {
       canManageLifecycle: true,
       canCoordinateSelf: true,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: true,
     });
   });
 
@@ -36,6 +37,7 @@ describe("investigation runtime capability projection", () => {
       canManageLifecycle: false,
       canCoordinateSelf: true,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: true,
     });
     expect(projectInvestigationCapabilities(["run:strategies"], false)).toEqual({
       canRead: false,
@@ -47,6 +49,7 @@ describe("investigation runtime capability projection", () => {
       canManageLifecycle: true,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
   });
 
@@ -65,6 +68,7 @@ describe("investigation runtime capability projection", () => {
       canManageLifecycle: false,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
   });
 
@@ -84,6 +88,7 @@ describe("investigation runtime capability projection", () => {
       canManageLifecycle: false,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
   });
 
@@ -98,6 +103,7 @@ describe("investigation runtime capability projection", () => {
       canManageLifecycle: false,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
     expect(projectInvestigationCapabilities([
       "investigation:read",
@@ -112,6 +118,7 @@ describe("investigation runtime capability projection", () => {
       canManageLifecycle: true,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
   });
 
@@ -147,6 +154,7 @@ describe("investigation runtime capability projection", () => {
       "canManageLifecycle",
       "canRead",
       "canReadPrivate",
+      "canRecordRunJudgment",
       "canUpload",
     ]);
     expect(Object.values(projected).every((value) => typeof value === "boolean")).toBe(true);
@@ -173,6 +181,7 @@ describe("investigation runtime capability projection", () => {
       canManageLifecycle: false,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
   });
 
@@ -192,6 +201,7 @@ describe("investigation runtime capability projection", () => {
       canManageLifecycle: false,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
   });
 });

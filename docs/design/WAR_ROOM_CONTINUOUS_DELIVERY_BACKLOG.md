@@ -7,9 +7,9 @@ already shipped, rechecks dependencies and risks, selects the highest-value
 ready slice, freezes its exact base, and starts that slice when it does not
 conflict with protected work.
 
-Baseline for Goal 06: `main` `10b4c4f54f7d849124ec16a70ea7435cdc76dc00`,
-tree `bde6ee328ce2dca7fbff7fa452ddb9011fc27806`. Goal 01 and Goal 04,
-desktop synchronization, Activity Center safety, and Goal 05 are on main.
+Baseline for Goal 07: `main` `0d6d592c5b9cca6b041a7f5eb7f5ef86442e5d11`,
+tree `92ee16477790bfd45f9729153c4a2c4bec2fe66a`. Goal 06 joined the
+earlier foundations on main through merged PR #1185.
 
 ## Delivery loop
 
@@ -79,7 +79,7 @@ The browser contract exports activity DTOs and parsers without Node crypto or
 cursor decoding. Cursor generation, fingerprinting, and request validation
 remain server-only.
 
-## Active unmerged slice — trusted export and external-response handoff
+## Active unmerged slice — trusted human review of imported responses
 
 Goal 05 is shipped through merged [PR #1184](https://github.com/chriscase/ContextDesk/pull/1184).
 Its [frozen contract](../goals/05-S3-EVIDENCE-RECONCILIATION.md) and
@@ -88,13 +88,20 @@ limits. Historical #1159, #1166, #1168, #1170, and #1173 are closed
 superseded sources, not open prerequisites. The old duplicate-push Software
 Impact caption observation remains separate reliability evidence.
 
-Goal 06 is the current unmerged slice. It makes the existing Decide export
-support usable for deliberate, validated JSON and Markdown delivery and manual
-Capture import of a synthetic outside response with an importer-reported
-package snapshot identity. See its [frozen contract](../goals/06-TRUSTED-EXPORT-HANDOFF.md)
-and [receipt](../goals/TRUSTED_EXPORT_HANDOFF_RECEIPT.md). The prompt package,
-brief and portable archive have different meanings. Historical PRs #1177 and
-#1179 are source material only; this slice does not merge or close them.
+Goal 06 shipped through merged [PR #1185](https://github.com/chriscase/ContextDesk/pull/1185).
+Its [contract](../goals/06-TRUSTED-EXPORT-HANDOFF.md) and
+[receipt](../goals/TRUSTED_EXPORT_HANDOFF_RECEIPT.md) preserve the export and
+manual-import evidence. Historical #1177 and #1179 remain source material.
+
+Goal 07 is the current local draft. It adds a focused, append-only human
+assessment history for a manually imported response while preserving the
+separate legacy Save review status and resolution. The authoritative server
+records actor, time, citations, sequence, audit and replay intent; War Room
+Capture presents provenance, disagreement and deliberate reconciliation after
+an uncertain response. The [frozen contract](../goals/07-TRUSTED-HUMAN-REVIEW.md)
+defines the exact review gates. Assessment rows remain outside the portable
+archive schema, so affected exact operations must refuse rather than drop
+history. This draft is not merged or a claim of measured triage quality.
 
 ## Deferred successor queue
 
@@ -102,7 +109,7 @@ Trusted Investigation Discovery shipped through merged PR #1181. The desktop
 investigation-team save-status synchronization shipped through merged PR #1182.
 Activity Center first-frame scope safety shipped through #1183. S3 recovery
 shipped through #1184. Unmerged historical branches remain source material.
-Goal 06 is the active unmerged slice above; the candidates below and #1158
+Goal 07 is the active unmerged slice above; the candidates below and #1158
 remain deferred and are not authorized by this checkpoint.
 
 1. **Evidence annotation workspace and safe bulk metadata.** Build on the
@@ -121,9 +128,13 @@ remain deferred and are not authorized by this checkpoint.
 5. **Additional UI strategy only when differentiated.** A fifth strategy must
    pass a measured task comparison against the four shipped choices and use
    public runtime seams only. Novel appearance is not enough.
-6. **Portable and administrative depth.** Extend archive/export and policy
-   surfaces only where shipped investigation or storage data cannot yet be
-   operated safely.
+6. **Portable and administrative depth.** Represent human assessments in a
+   future versioned archive only after an exact, privacy-preserving round trip
+   is designed and qualified. Extend other archive/export and policy surfaces
+   only where shipped investigation or storage data cannot yet be operated safely.
+7. **Measured review quality.** Compare whether cited human review improves
+   triage decisions with a separately authorized evaluation; this goal records
+   assessments but makes no benchmark or automatic correctness claim.
 
 ## Ranking rules
 

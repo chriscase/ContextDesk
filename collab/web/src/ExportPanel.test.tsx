@@ -667,6 +667,32 @@ describe("export panel", () => {
     vi.useRealTimers();
   });
 
+  it("explains unsupported assessment history when the server refuses a portable download", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/case-safe/export/inventory") {
+        return jsonResponse(true, { caseId: "case-safe", items: [] });
+      }
+      if (url === "/api/portable-investigations/capabilities") {
+        return jsonResponse(true, PORTABLE_CAPABILITIES);
+      }
+      if (url === "/api/cases/case-safe/portable-archive") {
+        return jsonResponse(false, { error: "unsupported_state" }, 422);
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const createObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    render(<ExportPanel caseId="case-safe" canWrite canLead />);
+    const button = await screen.findByRole("button", { name: "Download portable investigation archive" });
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByText(/Human assessment rows are not represented/)).toBeTruthy();
+    fireEvent.click(button);
+    expect(await screen.findByText(/Human assessments are one possible cause/)).toBeTruthy();
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
   it("preflights an archive with attribution-only identities and deterministic remaps", async () => {
     const bodies: unknown[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {

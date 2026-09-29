@@ -917,8 +917,11 @@
 
 .imported-run {
   border: 1px solid var(--border);
-  padding: 0.75rem;
+  border-radius: 0.75rem;
+  padding: 0.85rem;
   margin: 0.75rem 0;
+  background: var(--surface);
+  min-width: 0;
 }
 
 .imported-run--contradicted {
@@ -939,6 +942,152 @@
   color: #9ece6a;
 }
 
+.imported-run__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.imported-run__head > div {
+  min-width: 0;
+}
+
+.imported-run__eyebrow,
+.imported-run__title,
+.imported-run__caveat,
+.imported-run__guidance,
+.imported-run__note,
+.imported-run__trace-section h6,
+.imported-run__trace-section p,
+.imported-run__prompt h6,
+.imported-run__output h6 {
+  margin: 0;
+}
+
+.imported-run__eyebrow {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.imported-run__title {
+  margin-top: 0.15rem;
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+}
+
+.imported-run__privacy {
+  flex: 0 0 auto;
+  max-width: 45%;
+  padding: 0.22rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.imported-run__caveat,
+.imported-run__guidance,
+.imported-run__note,
+.imported-run__trace-section p {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.imported-run__caveat {
+  margin-bottom: 0.65rem;
+}
+
+.imported-run__technical {
+  margin: 0.7rem 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--surface-deep);
+}
+
+.imported-run__technical > summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.imported-run__technical > summary:focus-visible,
+.imported-run :where(select, button):focus-visible {
+  outline: 0.18rem solid var(--accent);
+  outline-offset: 0.14rem;
+}
+
+.imported-run__guidance {
+  margin-top: 0.65rem;
+}
+
+.imported-run__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.imported-run__facts > div {
+  min-width: 0;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+}
+
+.imported-run__facts dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.imported-run__facts dd {
+  margin: 0.2rem 0 0;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.imported-run__note + .imported-run__note {
+  margin-top: 0.4rem;
+}
+
+.imported-run__trace-section,
+.imported-run__prompt,
+.imported-run__output {
+  min-width: 0;
+  margin-top: 0.75rem;
+}
+
+.imported-run__traces {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.imported-run__traces li {
+  overflow-wrap: anywhere;
+}
+
+.imported-run[data-focused="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.imported-run[data-focused="true"] + .strategy-kit__human-assessments {
+  margin-top: -0.1rem;
+  margin-bottom: 1rem;
+}
+
 .imported-run__text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -949,6 +1098,59 @@
   border: 0;
   padding: 0;
   margin: 0.35rem 0;
+}
+
+@media (max-width: 560px) {
+  .imported-run__head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .imported-run__privacy {
+    max-width: 100%;
+    justify-self: start;
+  }
+
+  .imported-run__facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (forced-colors: active) {
+  .imported-run,
+  .imported-run--contradicted,
+  .imported-run__privacy,
+  .imported-run__technical,
+  .imported-run__facts > div {
+    border-color: CanvasText;
+    forced-color-adjust: auto;
+  }
+
+  .imported-run__banner,
+  .imported-run__banner--contradicted,
+  .imported-run__banner--ok,
+  .imported-run__facts dt {
+    color: CanvasText;
+  }
+
+  .imported-run[data-focused="true"] {
+    border-color: Highlight;
+    box-shadow: none;
+  }
+
+  .imported-run__technical > summary:focus-visible,
+  .imported-run :where(select, button):focus-visible {
+    outline-color: Highlight;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .imported-run,
+  .imported-run * {
+    animation: none !important;
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
 }
 
 .import-warn {

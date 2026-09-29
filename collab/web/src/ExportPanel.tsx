@@ -204,10 +204,13 @@ function portableActors(value: unknown): PortableActor[] | null {
   );
 }
 
-function portableErrorMessage(status: number): string {
+function portableErrorMessage(status: number, code: string | null = null): string {
   if (status === 413) return "This archive is larger than this War Room accepts.";
   if (status === 401 || status === 403) {
     return "Your current account is not authorized to check portable investigation archives.";
+  }
+  if (code === "unsupported_state") {
+    return "This investigation contains state the portable archive cannot represent exactly. Human assessments are one possible cause. No archive was prepared.";
   }
   return "This archive could not be checked. It may be malformed, incomplete, or incompatible.";
 }
@@ -560,7 +563,10 @@ export function ExportPanel(props: {
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/portable-archive`);
       if (!isCurrentScope()) return;
       if (!response.ok) {
-        setPortableError(portableErrorMessage(response.status));
+        const body = await response.json().catch(() => null) as { error?: unknown } | null;
+        if (!isCurrentScope()) return;
+        setPortableError(portableErrorMessage(response.status,
+          typeof body?.error === "string" ? body.error : null));
         return;
       }
       const archive = await response.json();
@@ -642,7 +648,10 @@ export function ExportPanel(props: {
       });
       if (!isCurrentScope()) return;
       if (!response.ok) {
-        setPortableError(portableErrorMessage(response.status));
+        const body = await response.json().catch(() => null) as { error?: unknown } | null;
+        if (!isCurrentScope()) return;
+        setPortableError(portableErrorMessage(response.status,
+          typeof body?.error === "string" ? body.error : null));
         return;
       }
       const result = (await response.json()) as PortablePreflightResult;
@@ -731,6 +740,10 @@ export function ExportPanel(props: {
       <p className="export__copy">
         Projection only — export never edits the case. <code>share_safe</code> is
         default-deny for raw owner-only artifacts and must pass a privacy scan.
+      </p>
+      <p className="export__copy">
+        The triage brief and selected-evidence prompt package do not carry human assessment
+        history. They are partial handoffs, not complete backups of a reviewed imported response.
       </p>
       <form
         className="composer"
@@ -982,6 +995,12 @@ export function ExportPanel(props: {
           Download the supported portable record for safekeeping or transfer. Unlike the
           selected-evidence package above, this archive can include investigation fields and
           evidence that the dry-run checker knows how to reconstruct exactly.
+        </p>
+        <p className="export__portable-warning">
+          Human assessment rows are not represented by this archive version. An investigation
+          with assessments cannot be downloaded as an exact portable archive; dry-run and restore
+          also refuse archives that would lose unsupported review history. Existing destination
+          assessments are never erased by applying an older archive.
         </p>
         <div className="export__portable-grid">
           <article className="export__portable-card">

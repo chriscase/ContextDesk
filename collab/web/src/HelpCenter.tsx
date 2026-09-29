@@ -340,10 +340,10 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         id: "import-external-run",
         title: "Import output from an outside tool",
         summary:
-          "Paste a run from another AI tool with its provenance stated honestly — unknown stays unknown, and a human later corroborates or contradicts it.",
+          "Paste output from another tool with its provenance stated honestly. The existing Save review status and append-only human assessments are separate records.",
         keywords: ["imported run", "paste", "external", "operator", "provenance", "corroborate", "contradict", "visibility", "snapshot binding"],
         what:
-          "An imported run is output pasted from a tool outside ContextDesk. You attribute it to a registered source, name the operator who ran it, and state what evidence the tool could see — \"unknown\" is a permanent, valid answer. Imported runs land on the timeline as unverified until a person records a judgment that links supporting or contradicting case material.",
+          "An imported run is output pasted from a tool outside ContextDesk. You attribute it to a registered source, name the operator who ran it, and state what evidence the tool could see — \"unknown\" is a permanent, valid answer. The existing Save review control changes the legacy run-review banner; separate append-only human assessments do not change it.",
         when:
           "Use it when a teammate ran something elsewhere (another assistant, a vendor tool) and the team needs that output in the case record without pretending ContextDesk produced or verified it.",
         steps: [
@@ -351,12 +351,34 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Paste the output (and the prompt, if you have it), pick the source, and enter the operator's name and ID.",
           "Confirm you redacted secrets before saving, and state the evidence visibility — leave it unknown rather than guessing.",
           "If you used a downloaded ContextDesk prompt package, open Import details, choose importer-described visibility, and paste the package snapshot identity into its supported field. Reopen the imported run to check the recorded value.",
-          "Later, record a human judgment: corroborated or contradicted, linked to a specific evidence or contribution ID.",
+          "On War Room Capture, inspect the imported output's recorded provenance and open Human assessments to append cited readings. Save review is a separate legacy control.",
         ],
         recorded:
           "The import records importer and operator identities, a content hash of the output (and prompt when given), the stated evidence visibility, and prompt completeness — an output-only import can never claim an exact prompt.",
         limits:
-          "The package snapshot identity is an importer-reported content-addressed reference, not proof that the outside tool consumed that package or that its answer is correct. Importing never runs the outside tool, and an unverified banner stays until a human records a judgment.",
+          "The package snapshot identity is an importer-reported content-addressed reference, not proof that the outside tool consumed that package or that its answer is correct. Importing never runs the outside tool. Human assessments do not change the legacy unverified banner; only the separate Save review action does.",
+        actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
+      },
+      {
+        id: "review-imported-response",
+        title: "Record a human assessment of imported output",
+        summary:
+          "Inspect recorded provenance and append a cited human reading without changing the imported run's legacy review state.",
+        keywords: ["human assessment", "judgment", "citation", "imported run", "conflict", "retry", "portable archive"],
+        what:
+          "War Room Capture shows the focused imported run's recorded source, importer, operator, completeness and reported context. A human assessment is an attributed reading, not verified model execution, a correctness verdict, a benchmark label, or an investigation resolution. Different people can record disagreement in sequence; the history is not a vote.",
+        when:
+          "Use it when a manually imported response needs a reviewable reading tied to case evidence, or when an interrupted assessment needs careful reconciliation.",
+        steps: [
+          "Open the exact imported run in Capture and inspect its recorded provenance. Missing values remain unknown; reported traces and package hashes do not prove the outside model saw or used them.",
+          "Choose Corroborates, Contradicts, or Insufficient evidence. The first two require at least one recorded evidence or contribution citation; Insufficient evidence may have none. Add an optional rationale.",
+          "Before the first write, acknowledge that human assessment history is not carried in the portable investigation archive. Record the assessment and inspect its server sequence, actor and time in the append-only history.",
+          "If another assessment won the sequence or the result is unknown, keep the frozen draft, explicitly refresh the authoritative history, then deliberately retry the same intent and request key. A changed reading needs a new assessment, not an edited old row.",
+        ],
+        recorded:
+          "The server records immutable attribution, time, sequence, original citation identities, optional rationale, timeline and audit together. A confirmed same-intent replay returns the original assessment without another row.",
+        limits:
+          "Save review, legacy corroboration and resolution stay separate. Assessment rows are not included in brief or selected-evidence package exports and are not represented by this portable archive version. Affected exact archive export or restore refuses rather than silently dropping history; old supported archives without assessments remain usable.",
         actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
       {
@@ -802,14 +824,14 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         id: "move-or-restore-investigation",
         title: "Move or restore a portable investigation",
         summary:
-          "A portable archive is different from the current brief and selected-evidence package. Only fields represented and supported exactly can be restored after a dry-run check and typed confirmation.",
+          "A portable archive differs from a brief or prompt package. Human assessment history is not represented by this archive version; affected exact transfers refuse.",
         keywords: ["move", "restore", "backup", "portable", "archive", "import", "different installation", "migration"],
         what:
-          "Moving an investigation requires more than a readable summary. This archive carries the supported Situation, contributions, historical attribution, evidence inventory and bytes, frozen snapshots, triage runs, comparisons, decisions, and benchmark history. Source memberships, role authority, audit references, discussions, and opaque imported-run state are not exported; an archive that represents unsupported exact-apply state is blocked. Historical people and roles remain attribution only and never grant destination access.",
+          "Moving an investigation requires more than a readable summary. This archive carries the supported Situation, contributions, historical attribution, evidence inventory and bytes, frozen snapshots, triage runs, comparisons, decisions, and benchmark history. Human assessment rows, source memberships, role authority, audit references, discussions, and opaque imported-run state are not represented. An affected exact archive operation refuses rather than silently omitting review history. Historical people and roles remain attribution only and never grant destination access.",
         when:
           "Read this when you need disaster recovery, migration to another installation, or a case that another War Room can reconstruct and continue.",
         steps: [
-          "Do not use the triage brief or selected-evidence prompt package as a backup; both are intentionally partial projections.",
+          "Do not use the triage brief or selected-evidence prompt package as a backup; both are intentionally partial projections and neither carries human assessment history.",
           "Download the portable investigation archive from Decide, then on the destination War Room run the dry-run check.",
           "Restore only when the check reports an exact reconstruction. Type RESTORE as a separate confirmation. Metadata-only, blocked, omitted, private, or redacted required content cannot be applied.",
           "After restore, open the returned investigation link and verify the reconstructed Situation, evidence, snapshot lineage, decisions, and historical attribution before continuing work.",
@@ -817,7 +839,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "A successful restore writes one investigation with destination identifiers, source-installation provenance, evidence bytes, and an apply audit in one coordinated operation. Replay is scoped to the applying actor. Historical people are not granted membership, roles, or capabilities.",
         limits:
-          "Restore applies only an exact reconstruction. Archive Ed25519 metadata is recorded, not verified. Interaction traces, discussions, audit references, source membership, and opaque imported-run details remain unsupported. Evidence bytes are staged and rolled back with failed metadata writes. PostgreSQL mode coordinates replicas transactionally; memory and SQLite modes are supported only as single-server-instance coordination, and the dry-run screen reports whether confirmation survives restart.",
+          "Restore applies only an exact reconstruction. Archive Ed25519 metadata is recorded, not verified. Human assessments, interaction traces, discussions, audit references, source membership, and opaque imported-run details remain unsupported. An affected export or incoming archive refuses; an older archive cannot erase existing destination assessments. Evidence bytes are staged and rolled back with failed metadata writes. PostgreSQL mode coordinates replicas transactionally; memory and SQLite modes are supported only as single-server-instance coordination, and the dry-run screen reports whether confirmation survives restart.",
         actions: [{ label: "Open the Decide stage", go: { stage: "decide" } }],
       },
     ],

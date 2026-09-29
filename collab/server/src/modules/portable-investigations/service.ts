@@ -71,6 +71,7 @@ export const PORTABLE_CONTRACT_UNSUPPORTED = [
   "source_membership_and_source_identity_ownership",
   "imported_opaque_run_details",
   "imported_run_corroboration",
+  "external_run_judgments",
   "imported_content_privacy_is_not_contract_bound",
   "discussion_containers_presence_and_live_chat_state",
   "derived_alignment_details_and_interaction_traces",
@@ -672,6 +673,12 @@ function applySupportReasons(
       "imported-run corroboration is not exact-applyable",
     );
   }
+  if (bundle.timeline.some((row) => row.kind === "external_run_judgment_recorded")) {
+    block(
+      "$.investigation.timeline",
+      "external-run judgments are not exact-applyable",
+    );
+  }
   if (bundle.timeline.some((row, index) => row.seq !== index + 1)) {
     block("$.investigation.timeline", "timeline sequence must be contiguous from one");
   }
@@ -709,6 +716,9 @@ export class PortableInvestigationService {
   ): Promise<PortableArchiveV1> {
     const caseRow = await this.deps.cases.getCase(caseId, actor, isAdmin);
     if (!caseRow) throw new PortableServerError("not_found", "investigation not found");
+    if (await this.deps.imports.caseHasStoredJudgments(caseId)) {
+      throw new PortableServerError("unsupported_state", "external-run judgments are not exact-applyable");
+    }
 
     const [latestContributions, artifacts, snapshots, timeline, importedRuns, jobs, experiments] =
       await Promise.all([
@@ -720,6 +730,20 @@ export class PortableInvestigationService {
         this.deps.triageRuns.list(caseId, actor, isAdmin),
         this.deps.experiments.list(caseId, actor, isAdmin),
       ]);
+    const judgmentLists = await Promise.all(
+      importedRuns.map((run) => this.deps.imports.listRunJudgments(
+        caseId,
+        run.id,
+        actor,
+        isAdmin,
+      )),
+    );
+    if (judgmentLists.some((list) => list.judgments.length > 0)) {
+      throw new PortableServerError(
+        "unsupported_state",
+        "external-run judgments are not exact-applyable",
+      );
+    }
     const contributionChains = await Promise.all(
       latestContributions.map((row) => this.deps.cases.provenance(caseId, row.id)),
     );
@@ -1258,6 +1282,12 @@ export class PortableInvestigationService {
           "imported-run corroboration is not exact-applyable",
         );
       }
+      if (row.kind === "external_run_judgment_recorded") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "external-run judgments are not exact-applyable",
+        );
+      }
       if (
         (/^contribution_/.test(row.kind) || row.kind === "hypothesis_status")
         && addressed?.namespace !== "contribution"
@@ -1460,6 +1490,9 @@ export class PortableInvestigationService {
       const encodedBytes = Buffer.byteLength(JSON.stringify(archive), "utf8");
       if (encodedBytes > MAX_PORTABLE_ARCHIVE_BYTES) {
         throw new PortableServerError("archive_size_limit", "portable archive exceeds size limit");
+      }
+      if (await this.deps.imports.caseHasStoredJudgments(caseId)) {
+        throw new PortableServerError("unsupported_state", "external-run judgments are not exact-applyable");
       }
       return archive;
     } catch (error) {

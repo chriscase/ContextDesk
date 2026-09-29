@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createElement, StrictMode } from "react";
+import { createElement, StrictMode, useEffect, useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { USER_PROFILE_SCHEMA_ID, ADMIN_PEOPLE_LIST_SCHEMA_ID, DEFAULT_DIRECTORY_ATTRIBUTE_MAP, LDAP_PUBLIC_CONFIG_SCHEMA_ID } from "@cd-collab/contracts/admin";
 import { App } from "./App.js";
@@ -22,6 +22,7 @@ import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLoca
  * than a stand-in for it.
  */
 const runtimeMounts = vi.hoisted(() => [] as InvestigationRuntimeProviderProps[]);
+const assessmentRuntimeProbe = vi.hoisted(() => ({ enabled: false, creates: 0, refreshes: 0 }));
 vi.mock("./investigations/runtime/public.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./investigations/runtime/public.js")>();
   return {
@@ -30,11 +31,36 @@ vi.mock("./investigations/runtime/public.js", async (importOriginal) => {
       runtimeMounts.push(props);
       return createElement(actual.InvestigationRuntimeProvider, props);
     },
+    useInvestigationRuntime: () => {
+      const runtime = actual.useInvestigationRuntime();
+      if (!assessmentRuntimeProbe.enabled) return runtime;
+      const create = runtime.commands.createExternalRunJudgment;
+      return {
+        ...runtime,
+        commands: {
+          ...runtime.commands,
+          createExternalRunJudgment: create === null ? null : (command: Parameters<typeof create>[0]) => {
+            assessmentRuntimeProbe.creates += 1;
+            return create(command);
+          },
+        },
+        refresh: {
+          ...runtime.refresh,
+          externalRunJudgments: () => {
+            assessmentRuntimeProbe.refreshes += 1;
+            return runtime.refresh.externalRunJudgments();
+          },
+        },
+      };
+    },
   };
 });
 
 afterEach(() => {
   runtimeMounts.length = 0;
+  assessmentRuntimeProbe.enabled = false;
+  assessmentRuntimeProbe.creates = 0;
+  assessmentRuntimeProbe.refreshes = 0;
   cleanup();
   vi.unstubAllGlobals();
   delete window.__CONTEXTDESK_STATIC_READ_ONLY__;
@@ -2069,5 +2095,294 @@ describe("pathname shell routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
     expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
     expect(window.location.pathname).toBe("/");
+  });
+});
+
+describe("War Room human assessments mount", () => {
+  const uuid = "77777777-7777-4777-8777-777777777771";
+  const run1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+  const run2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+  const focusedInvestigation = {
+    schemaId: CASE_SCHEMA_ID,
+    id: uuid,
+    title: "Imported output review",
+    problemStatement: "Review the imported model output.",
+    affectedParties: "On-call investigators",
+    impact: "The imported finding needs a human assessment.",
+    scope: "One imported run",
+    openQuestions: [],
+    situationVersion: 1,
+    investigationContext: null,
+    occurredAt: null,
+    occurredAtPrecision: "unknown",
+    occurredAtZone: "unspecified",
+    severity: "high",
+    status: "open",
+    legalHold: false,
+    retentionClass: "standard",
+    participants: [],
+    createdAt: "2026-09-09T12:00:00.000Z",
+    createdBy: "dave",
+  };
+
+  function importedRun(
+    id: string,
+    outputText: string,
+    corroborationState = "unverified",
+  ) {
+    return {
+      id,
+      sourceId: "s1",
+      outputText,
+      corroborationState,
+      evidenceVisibility: "unknown",
+      snapshotBinding: null,
+      importerUsername: "dave",
+      operatorUsername: "dave",
+      promptText: null,
+      promptCompleteness: "unknown",
+    };
+  }
+
+  function jsonOk(body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  function stubWarRoomCapture(
+    pathname: string,
+    extra?: (url: string, init?: RequestInit) => Promise<Response> | null,
+  ): FetchStub {
+    window.history.replaceState(null, "", pathname);
+    return stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url, init) => {
+      const handled = extra?.(url, init);
+      if (handled) return handled;
+      if (url === "/api/cases") {
+        return Promise.resolve(jsonOk({
+          cases: [{ id: uuid, title: "Imported output review", status: "open", severity: "high" }],
+        }));
+      }
+      if (url === `/api/cases/${uuid}/timeline`) {
+        return Promise.resolve(jsonOk({ events: [] }));
+      }
+      if (url === `/api/cases/${uuid}/contributions`) {
+        return Promise.resolve(jsonOk({
+          contributions: [{
+            id: "n1",
+            kind: "note",
+            body: "Queue depth spiked at 14:02",
+            privacyClass: "owner_only",
+            tombstoned: false,
+          }],
+        }));
+      }
+      if (url === `/api/cases/${uuid}/imports`) {
+        return Promise.resolve(jsonOk({
+          runs: [
+            importedRun(run1, "First imported output"),
+            importedRun(run2, "Second imported output", "corroborated"),
+          ],
+        }));
+      }
+      if (url === `/api/cases/${uuid}/runs/${run1}/judgments`) {
+        return Promise.resolve(jsonOk({
+          schemaId: "cd-collab.external_run_judgment_list.v1",
+          caseId: uuid,
+          runId: run1,
+          judgments: [],
+        }));
+      }
+      if (url === `/api/cases/${uuid}/imports/${run1}/corroborate`) {
+        return Promise.resolve(jsonOk({ ok: true }));
+      }
+      return null;
+    });
+  }
+
+  it("rejects a captured assessment submit in the actual keyed App replacement before passive cleanup", async () => {
+    assessmentRuntimeProbe.enabled = true;
+    const pathForRun = (runId: string) =>
+      `/investigations/${uuid}/capture?section=triage-capture&item=${runId}&kind=imported-run`;
+    const stub = stubWarRoomCapture(pathForRun(run1), (url) => {
+      if (url === `/api/cases/${uuid}`) return Promise.resolve(jsonOk(focusedInvestigation));
+      return url === `/api/cases/${uuid}/runs/${run2}/judgments`
+        ? Promise.resolve(jsonOk({
+          schemaId: "cd-collab.external_run_judgment_list.v1",
+          caseId: uuid,
+          runId: run2,
+          judgments: [],
+        }))
+        : null;
+    });
+    const posted = () => stub.mock.calls.filter(([url, init]) =>
+      String(url).includes("/judgments") && (init as RequestInit | undefined)?.method === "POST").length;
+    let oldSubmit: ((event: { preventDefault(): void }) => void) | null = null;
+    const passiveCleanups: number[] = [];
+    const observed: Array<{
+      phase: number; beforePassive: boolean; invoked: number;
+      runtimeCreates: number; gatewayPosts: number; oldDraftVisible: boolean;
+    }> = [];
+    function PassiveWitness({ phase }: { phase: number }) {
+      useEffect(() => () => { passiveCleanups.push(phase); }, [phase]);
+      return null;
+    }
+    function ReplacementProbe({ phase }: { phase: number }) {
+      useLayoutEffect(() => {
+        if (phase === 0 || oldSubmit === null) return;
+        const beforePassive = !passiveCleanups.includes(phase - 1);
+        oldSubmit({ preventDefault() {} });
+        observed.push({
+          phase, beforePassive, invoked: 1,
+          runtimeCreates: assessmentRuntimeProbe.creates,
+          gatewayPosts: posted(),
+          oldDraftVisible: document.body.textContent?.includes("Private draft A must disappear.") ?? false,
+        });
+      }, [phase]);
+      return null;
+    }
+    function Host({ phase }: { phase: number }) {
+      return <>
+        <App key={`app-${phase}`} />
+        <PassiveWitness key={`passive-${phase}`} phase={phase} />
+        <ReplacementProbe key={`probe-${phase}`} phase={phase} />
+      </>;
+    }
+    const view = render(<Host phase={0} />);
+    await screen.findByText("No human assessment has been recorded yet.");
+    await screen.findByRole("heading", { name: "Record an assessment" });
+    fireEvent.click(screen.getByRole("radio", { name: "Insufficient evidence" }));
+    fireEvent.click(screen.getByRole("checkbox", {
+      name: /I understand this assessment history cannot be carried/,
+    }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Rationale (optional)" }), {
+      target: { value: "Private draft A must disappear." },
+    });
+    const form = screen.getByRole("form", { name: "Record an assessment" });
+    const reactKey = Object.keys(form).find((key) => key.startsWith("__reactProps$"));
+    if (!reactKey) throw new Error("mounted assessment submit handler is unavailable");
+    oldSubmit = (form as unknown as Record<string, { onSubmit: typeof oldSubmit }>)[reactKey]!.onSubmit;
+    expect(oldSubmit).toBeTypeOf("function");
+    expect(posted()).toBe(0);
+
+    window.history.replaceState(null, "", pathForRun(run2));
+    view.rerender(<Host phase={1} />);
+    expect(observed[0]).toEqual({
+      phase: 1, beforePassive: true, invoked: 1,
+      runtimeCreates: 0, gatewayPosts: 0, oldDraftVisible: false,
+    });
+    expect(passiveCleanups).toContain(0);
+    await screen.findByRole("heading", { name: "Human assessments" });
+    expect(posted()).toBe(0);
+
+    window.history.replaceState(null, "", pathForRun(run1));
+    view.rerender(<Host phase={2} />);
+    expect(observed[1]).toEqual({
+      phase: 2, beforePassive: true, invoked: 1,
+      runtimeCreates: 0, gatewayPosts: 0, oldDraftVisible: false,
+    });
+    expect(passiveCleanups).toContain(1);
+    await screen.findByText("No human assessment has been recorded yet.");
+    expect(posted()).toBe(0);
+  });
+
+  it("mounts human assessments only for War Room capture of the focused imported run", async () => {
+    stubWarRoomCapture(
+      `/investigations/${uuid}/capture?section=triage-capture&item=${run1}&kind=imported-run`,
+    );
+    render(<App />);
+    const firstReview = (await screen.findAllByRole("button", { name: "Save review" }))[0];
+    const first = firstReview?.closest("article");
+    expect(first).toBeTruthy();
+    expect(screen.getByText("Second imported output")).toBeTruthy();
+    const heading = await screen.findByRole("heading", { name: "Human assessments" });
+    expect(first?.nextElementSibling?.contains(heading)).toBe(true);
+    expect(screen.getAllByRole("heading", { name: "Human assessments" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Save review" })).toHaveLength(1);
+    expect(await screen.findByText("No human assessment has been recorded yet.")).toBeTruthy();
+  });
+
+  it("does not mount human assessments for another stage or item kind", async () => {
+    stubWarRoomCapture(
+      `/investigations/${uuid}/situation?section=triage-capture&item=${run1}&kind=imported-run`,
+    );
+    const situation = render(<App />);
+    await screen.findByRole("heading", { name: "Situation" });
+    expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
+    situation.unmount();
+
+    stubWarRoomCapture(
+      `/investigations/${uuid}/capture?section=triage-capture&item=n1&kind=contribution`,
+    );
+    render(<App />);
+    await screen.findAllByRole("button", { name: "Save review" });
+    expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Save review" })).toHaveLength(1);
+  });
+
+  it.each(["keystone", "investigation-first", "beacon"] as const)(
+    "does not mount human assessments for the %s strategy",
+    async (strategyId) => {
+    stubWarRoomCapture(
+      `/investigations/${uuid}/capture?section=triage-capture&item=${run1}&kind=imported-run`,
+      (url) => {
+        if (url === "/api/ui-strategies/effective") {
+          return Promise.resolve(jsonOk({
+            schemaId: "cd-collab.ui_strategy_effective.v1",
+            policyRevision: 1,
+            preferenceRevision: 1,
+            preferredId: strategyId,
+            effectiveId: strategyId,
+            defaultId: "war-room",
+            enabledIds: ["war-room", strategyId],
+            selectableIds: [strategyId],
+            canSelect: true,
+            source: "user",
+          }));
+        }
+        if (url === `/api/cases/${uuid}`) {
+          return Promise.resolve(jsonOk(focusedInvestigation));
+        }
+        return null;
+      },
+    );
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Imported output review" })).toBeTruthy();
+    expect(within(screen.getByRole("main")).getByText({
+      "keystone": "Keystone · Engineer workbench",
+      "investigation-first": "Investigation First",
+      "beacon": "Beacon · Rapid Intake",
+    }[strategyId])).toBeTruthy();
+    expect(screen.queryByText("Investigation unavailable")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
+    expect(screen.queryByText("First imported output")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save review" })).toBeNull();
+    },
+  );
+
+  it("does not mount human assessments on the War Room Overview", async () => {
+    stubWarRoomCapture("/");
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Human assessments" })).toBeNull();
+  });
+
+  it("keeps the legacy Save review path and posts the existing corroborate callback", async () => {
+    const stub = stubWarRoomCapture(
+      `/investigations/${uuid}/capture?section=triage-capture&item=${run1}&kind=imported-run`,
+    );
+    render(<App />);
+    await screen.findByRole("heading", { name: "Human assessments" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Supporting record" }), {
+      target: { value: "n1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save review" }));
+    await waitFor(() => {
+      expect(stub).toHaveBeenCalledWith(
+        `/api/cases/${uuid}/imports/${run1}/corroborate`,
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
   });
 });

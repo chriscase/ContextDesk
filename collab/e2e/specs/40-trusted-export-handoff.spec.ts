@@ -165,7 +165,7 @@ test.describe("trusted export and external-response handoff", () => {
       const reopenedDetails = reopened.locator("details").first();
       if ((await reopenedDetails.getAttribute("open")) === null) await reopenedDetails.locator("summary").click();
       await expect(reopened.getByText(/Snapshot binding:/)).toContainText(envelope.payload!.snapshotIdentity!);
-      await expect(reopened.getByText(/described by the importer/)).toBeVisible();
+      await expect(reopened.getByText(/described by the importer/i)).toBeVisible();
 
       await openExportSupport(page);
       await panel.locator("select").first().selectOption("share_safe");
