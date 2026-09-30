@@ -118,7 +118,8 @@ impl GoldReference {
     /// Accept either historical bare gold or the explicit owner-only handoff.
     /// A bare file has unknown handling provenance, never implied share-safe status.
     pub fn parse_import_json(text: &str) -> BenchResult<(Self, bool)> {
-        let value: serde_json::Value = serde_json::from_str(text).map_err(BenchError::from_serde)?;
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(BenchError::from_serde)?;
         if value.get("schemaId").and_then(serde_json::Value::as_str)
             == Some(GOLD_REFERENCE_EXPORT_SCHEMA_V1)
         {
