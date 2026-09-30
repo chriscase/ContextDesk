@@ -257,11 +257,16 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
         }
         Command::ImportGold { file } => {
             let store = open_store(cli.library)?;
-            let gold = GoldReference::parse_json(
+            let (gold, owner_only) = GoldReference::parse_import_json(
                 &fs::read_to_string(&file).map_err(|e| BenchError::io(&file, e))?,
             )?;
             store.put_gold(&gold)?;
-            Ok(format!("{} v{}\n", gold.gold_id, gold.version))
+            Ok(format!(
+                "{} v{}{}\n",
+                gold.gold_id,
+                gold.version,
+                if owner_only { " owner_only" } else { "" },
+            ))
         }
         Command::ImportTrace { file } => {
             let store = open_store(cli.library)?;

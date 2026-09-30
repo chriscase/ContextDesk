@@ -68,6 +68,10 @@
       "types": "./dist/export-browser.d.ts",
       "import": "./dist/export-browser.js"
     },
+    "./gold": {
+      "types": "./dist/gold-browser.d.ts",
+      "import": "./dist/gold-browser.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [

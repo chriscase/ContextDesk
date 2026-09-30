@@ -8,6 +8,7 @@ import {
   GOLD_IS_HUMAN_BENCHMARK,
   parseExperimentPackage,
   parseGoldReference,
+  parseGoldReferenceExport,
   parseHelpfulnessObservation,
   parseLabExportV2,
   type InteractionTraceV1,
@@ -849,7 +850,7 @@ describe("accepted decision to versioned gold", () => {
   });
 
   it("promotes idempotently, versions on change, and refuses stale gold revisions", async () => {
-    await withApp(async ({ app }) => {
+    await withApp(async ({ app, audit }) => {
       const alice = await login(app, "alice", ALICE);
       const dave = await login(app, "dave", DAVE);
       const { caseId, experimentId, decision } = await acceptedExperiment(app, alice, dave);
@@ -939,6 +940,43 @@ describe("accepted decision to versioned gold", () => {
         "cand-gpt-oss-120b",
         "cand-ministral-14b",
       ]);
+
+      const exactExportUrl = `/api/cases/${caseId}/experiments/${experimentId}/gold/${gold.goldId}/export`;
+      const ownerExport = await app.inject({
+        method: "POST", url: exactExportUrl, headers: { cookie: dave }, payload: { version: 1 },
+      });
+      expect(ownerExport.statusCode).toBe(200);
+      expect(ownerExport.headers["cache-control"]).toBe("no-store");
+      expect(ownerExport.headers["content-type"]).toMatch(/application\/json/);
+      const ownerEnvelope = parseGoldReferenceExport(JSON.parse(ownerExport.body));
+      expect(ownerEnvelope.privacyClass).toBe("owner_only");
+      expect(ownerEnvelope.gold).toEqual(gold);
+      const repeated = await app.inject({
+        method: "POST", url: exactExportUrl, headers: { cookie: dave }, payload: { version: 1 },
+      });
+      expect(repeated.body).toBe(ownerExport.body);
+      const denied = await app.inject({
+        method: "POST", url: exactExportUrl, headers: { cookie: alice }, payload: { version: 1 },
+      });
+      expect(denied.statusCode).toBe(403);
+      const staleExport = await app.inject({
+        method: "POST", url: exactExportUrl, headers: { cookie: dave }, payload: { version: 2 },
+      });
+      expect(staleExport.statusCode).toBe(404);
+      const unauthenticatedExport = await app.inject({
+        method: "POST", url: exactExportUrl, payload: { version: 1 },
+      });
+      expect(unauthenticatedExport.statusCode).toBe(401);
+      const wrongExperimentExport = await app.inject({
+        method: "POST", url: `/api/cases/${caseId}/experiments/foreign-experiment/gold/${gold.goldId}/export`,
+        headers: { cookie: dave }, payload: { version: 1 },
+      });
+      expect(wrongExperimentExport.statusCode).toBe(404);
+      const malformedExport = await app.inject({
+        method: "POST", url: exactExportUrl, headers: { cookie: dave }, payload: { version: "1" },
+      });
+      expect(malformedExport.statusCode).toBe(400);
+      expect((await audit.list({ action: "experiment_gold_export_owner_only" })).length).toBe(2);
 
       const exportRes = await app.inject({
         method: "POST",

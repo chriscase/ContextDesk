@@ -7,10 +7,10 @@ already shipped, rechecks dependencies and risks, selects the highest-value
 ready slice, freezes its exact base, and starts that slice when it does not
 conflict with protected work.
 
-Baseline for Goal 08: `main` `7ed71e9930ae5f56345e81e321ef02766ad1efb9`,
-tree `7efbff74580d8f9b7ed31d61d9b3bff5d530b92f`. Goals 06 and 07
-joined main through merged PRs #1185 and #1186. Earlier Goal 07 baseline
-observations remain in its frozen contract and receipt.
+Baseline for Goal 09: `main` `5650f0666a42e0adfaecedd1b4d9286002dde3ba`,
+tree `16fea5e5f43844daba7da7d09ad6ed651cd6eab8`. Goal 08 joined main
+through merged PR #1187. Earlier baseline observations remain in their frozen
+contracts and receipts.
 
 ## Delivery loop
 
@@ -80,7 +80,7 @@ The browser contract exports activity DTOs and parsers without Node crypto or
 cursor decoding. Cursor generation, fingerprinting, and request validation
 remain server-only.
 
-## Active unmerged slice — trusted human review of imported responses
+## Shipped handoffs and active unmerged benchmark slice
 
 Goal 05 is shipped through merged [PR #1184](https://github.com/chriscase/ContextDesk/pull/1184).
 Its [frozen contract](../goals/05-S3-EVIDENCE-RECONCILIATION.md) and
@@ -106,13 +106,22 @@ history. This shipment is not a claim of measured triage quality. Historical
 #1177 and #1179 remain unchanged source branches; the accepted Goal 06/07
 behavior shipped through #1185/#1186, not by merging those branches.
 
-Goal 08 is the current unmerged slice: [recorded software context reuse](../goals/08-RECORDED-SOFTWARE-CONTEXT-REUSE.md)
-on `integrate/recorded-software-context-reuse-v1`. It reuses exact values and
+Goal 08 shipped through merged [PR #1187](https://github.com/chriscase/ContextDesk/pull/1187): [recorded software context reuse](../goals/08-RECORDED-SOFTWARE-CONTEXT-REUSE.md).
+It reuses exact values and
 product/version/build combinations from already loaded authorized records in
 existing create and Situation editors. Suggestions can be partial; manual
 entry and existing save commands remain authoritative. Historical #1174 is
 source material only and stays unchanged. No catalog, software-impact identity,
-new server query, or administrator deduplication ships in this slice.
+new server query, or administrator deduplication shipped in this slice.
+
+Goal 09 is the current unmerged slice: [trusted benchmark promotion and offline
+handoff](../goals/09-TRUSTED-BENCHMARK-HANDOFF.md) on
+`integrate/trusted-benchmark-handoff-v1`. It adds explicit promotion of an
+accepted Experiment Lab decision, version review, and a separately authorized
+owner-only identity-preserving file that the existing offline bench can import.
+The alias-only share-safe review export remains separate. Historical #1175
+remains source material. Neither a human benchmark nor evidence alignment is a
+correctness verdict, and this slice does not measure provider or review quality.
 
 ## Deferred successor queue
 
@@ -120,7 +129,7 @@ Trusted Investigation Discovery shipped through merged PR #1181. The desktop
 investigation-team save-status synchronization shipped through merged PR #1182.
 Activity Center first-frame scope safety shipped through #1183. S3 recovery
 shipped through #1184. Unmerged historical branches remain source material.
-Goal 08 is the active unmerged slice above; the candidates below and #1158
+Goal 09 is the active unmerged slice above; the candidates below and #1158
 remain deferred and are not authorized by this checkpoint.
 
 1. **Evidence annotation workspace and safe bulk metadata.** Build on the
@@ -130,7 +139,7 @@ remain deferred and are not authorized by this checkpoint.
 2. **Investigation search and facets.** Collection-wide recorded status, entity,
    software impact, contributor, and date filters shipped through #1181. Tags
    still need a canonical contract before they are a backlog item of their own.
-3. **Product/version/build catalog quality.** Goal 08 covers bounded reuse of
+3. **Product/version/build catalog quality.** Shipped Goal 08 covers bounded reuse of
    already loaded recorded values. Administrator-assisted deduplication and a
    complete catalog remain separate proposals; avoid a second software-impact
    truth model.

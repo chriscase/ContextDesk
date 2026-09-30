@@ -851,6 +851,7 @@ export {
   GOLD_ALIGNMENT_STATUSES,
   GOLD_IS_HUMAN_BENCHMARK,
   GOLD_REFERENCE_SCHEMA_ID,
+  GOLD_REFERENCE_EXPORT_SCHEMA_ID,
   HUMAN_ACCEPTANCE_STATUSES,
   alignCitedEvidence,
   goldAlignmentShape,
@@ -858,12 +859,14 @@ export {
   goldReferenceShape,
   parseGoldAlignment,
   parseGoldReference,
+  parseGoldReferenceExport,
 } from "./gold.js";
 export type {
   CandidateGoldAlignmentV1,
   ExpectedRelationshipV1,
   GoldAlignmentStatus,
   GoldReferenceV1,
+  GoldReferenceExportV1,
   HumanAcceptanceStatus,
 } from "./gold.js";
 
