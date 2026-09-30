@@ -57,7 +57,7 @@ refuse rather than silently omitting history. Brief and prompt-package exports
 are partial handoffs and do not transfer assessments. This slice is a local
 shipped behavior, not a measured quality or verified-model-execution claim.
 
-### Recorded software context reuse (Goal 08 unmerged slice)
+### Recorded software context reuse (Goal 08 shipped through #1187)
 
 Existing War Room, Investigation First, and Beacon creation and War Room and
 Keystone Situation editors may suggest exact strings from the currently loaded
@@ -70,6 +70,27 @@ canonical catalog or software-impact verdict. Free entry remains valid. The
 Investigation First create form trims outer whitespace; the other existing
 paths retain nonblank context literals subject to server validation. Keystone
 retains its existing version-checked Situation save and has no create workflow.
+
+### Trusted benchmark promotion and offline handoff (Goal 09 local integration)
+
+War Room Decide gives a case lead an explicit promotion of an accepted
+Experiment Lab decision. Only eligible decision evidence is initially selected;
+the operator can remove items or add optional roles and dimensions. The client
+rechecks selection before submitting a frozen request. The existing server
+fingerprint replays an identical promotion without another version or timeline
+event. A lost or conflicted result requires a fresh same-scope history read;
+finding the exact recorded version avoids another write. Neither an empty read
+nor a browser download click proves rollback or file persistence.
+
+A separately authorized exact-version export returns an owner-only envelope
+around the unchanged gold record. Its identities and attribution allow the
+existing offline triage bench to match a task and snapshot. The alias-only
+share-safe Experiment Lab review export remains separate and cannot be
+reversed into original IDs. Bench alignment reports evidence relationships,
+not answer correctness or measured review benefit. The owner-only file is not
+a portable investigation archive or Goal 07 assessment transfer. See the
+[benchmark loop](../../benchmarks/GOLD_BACKTEST_LOOP_V1.md) and the
+[Goal 09 contract](../../goals/09-TRUSTED-BENCHMARK-HANDOFF.md).
 
 The current local integration also adds a strategy-neutral evidence workspace:
 case-bound files remain owned by the evidence provider (filesystem or the

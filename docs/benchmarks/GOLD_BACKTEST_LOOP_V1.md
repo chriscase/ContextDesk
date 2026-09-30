@@ -1,7 +1,8 @@
 # Accepted decision to versioned gold backtest v1
 
-Status: hermetic collab promotion + bench consumption. Not a live-provider
-or infallible-truth claim.
+Status: hermetic collab promotion + bench consumption on `main`; Goal 09's
+browser-saved owner-only handoff is local integration until its draft PR merges.
+Neither is a live-provider or infallible-truth claim.
 
 A gold reference is a **human benchmark decision**, not a proof that a model
 was correct. Gold alignment is scored separately from helpfulness. Agreement
@@ -30,6 +31,36 @@ among candidates is never treated as correctness.
    - helpfulness / score visibility
    - human acceptance of the gold decision
    - unknown states when no gold exists (historical v2 JSON omits gold keys)
+
+## Deliberate owner-only handoff (Goal 09 local integration)
+
+In War Room Decide, a case lead opens **Version the human benchmark** after a
+decision is accepted. The accepted decision's currently eligible evidence is
+preselected for inspection. The operator can clear or change the selection,
+optionally assign roles and helpfulness dimensions, then deliberately promote.
+The UI checks current eligible references before sending the frozen request.
+After a lost or uncertain result, it retains that request and requires a fresh
+history read; an exact recorded match is recovered without another write.
+An empty history read does not prove rollback. A deliberate retry uses the same
+semantic selection and the server's existing idempotence/version guard.
+
+An authorized **Download owner-only benchmark** operation fetches one exact
+stored gold ID/version from the named case and experiment. It emits
+`cd-collab.gold_reference_export.v1` with `privacyClass: owner_only` and the
+unchanged gold object. It includes original case, task, snapshot, evidence and
+attribution identities. The browser checks the full envelope and selected
+version before saving. The existing alias-only share-safe Experiment Lab review
+export is separate; aliases cannot be reversed into these original identities.
+This file is for a trusted owner's offline handoff, not public sharing or a
+portable investigation archive. The export action is audited and cannot change
+the stored benchmark. A download click alone is not proof that a file was saved.
+
+The existing offline `cd-triage-bench --library DIR import-gold FILE` accepts
+either this strict envelope or a legacy bare gold file; bare input has unknown
+privacy provenance, not implied share-safe status. `report --format json
+--privacy owner-only --task TASK_ID` applies the latest gold only when task and
+snapshot identities match. Alignment describes cited evidence and optional
+roles; it does not establish diagnosis, provider quality, or human-review impact.
 
 ## Fixture
 

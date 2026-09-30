@@ -346,6 +346,39 @@ export async function registerExperimentRoutes(
     }
   });
 
+  app.post("/api/cases/:id/experiments/:eid/gold/:gid/export", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("export:create") || !ctx.has("evidence:private:read") ||
+        !ctx.has("decision:accept")) {
+      return capabilityForbidden(reply);
+    }
+    const params = request.params as { id: string; eid: string; gid: string };
+    const version = asRecord(request.body).version;
+    if (!Number.isSafeInteger(version) || (version as number) < 1) {
+      void reply.code(400);
+      return { error: "exact benchmark version is required" };
+    }
+    try {
+      const envelope = await deps.experiments.exportGold(
+        params.id, params.eid, params.gid, version as number, ctx.actor, ctx.isAdmin,
+      );
+      await deps.audit.append({
+        identity: ctx.actor.id,
+        action: "experiment_gold_export_owner_only",
+        target: `${params.gid}:${version}`,
+        origin: request.ip,
+        outcome: "success",
+      });
+      void reply.header("Cache-Control", "no-store");
+      void reply.type("application/json");
+      return envelope;
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
   app.post("/api/cases/:id/experiments/:eid/traces", async (request, reply) => {
     const loaded = await sessionOf(request, reply);
     if ("denied" in loaded) return loaded.denied;

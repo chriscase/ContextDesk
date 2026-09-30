@@ -9,6 +9,288 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// The handoff controls use the real Experiment Lab mount and the browser gateway.
+// The identity values here are synthetic; the joined E2E exercises the server.
+const BENCHMARK_CASE = "00000000-0000-4000-8000-000000000001";
+const BENCHMARK_SNAPSHOT_REF = "ev-snapshot-late";
+
+function benchmarkGold(anchors: string[]) {
+  return {
+    schemaId: "cd-collab.gold_reference.v1",
+    goldId: "gold-accepted-synth-v1",
+    version: 1,
+    predecessorGoldId: null,
+    caseId: BENCHMARK_CASE,
+    experimentId: goldView.id,
+    packageId: goldView.packageId,
+    taskFingerprint: goldView.taskFingerprint,
+    snapshotFingerprint: goldView.snapshotFingerprint,
+    acceptedDecisionId: "dec-1",
+    acceptedDecisionRevision: 2,
+    auditRefs: [],
+    evidenceAnchors: anchors,
+    expectedRelationships: [],
+    helpfulnessDimensions: [],
+    notes: ["A gold reference is a human benchmark decision, not an infallible truth claim."],
+    promotedById: "lead-synth",
+    promotedByUsername: "lead-synth",
+    createdAt: "2026-09-29T00:00:00Z",
+  };
+}
+
+function benchmarkView(recorded: ReturnType<typeof benchmarkGold> | null = null) {
+  return {
+    ...goldView,
+    snapshotProof: { basis: "host_frozen_snapshot" },
+    decisions: [{ ...goldView.decisions[0], evidenceRefs: ["ev-demo-checkout-log", BENCHMARK_SNAPSHOT_REF] }],
+    gold: recorded,
+    golds: recorded ? [recorded] : [],
+  };
+}
+
+function benchmarkSources() {
+  return {
+    artifacts: ["ev-demo-checkout-log", BENCHMARK_SNAPSHOT_REF].map((id) => ({
+      id, kind: "log", filename: `${id}.log`, uri: null, mediaType: "text/plain",
+      privacyClass: "owner_only", verificationStatus: "verified",
+    })),
+    snapshots: [{
+      fingerprint: goldView.snapshotFingerprint.slice("snap-".length),
+      evidence: [{ evidenceId: BENCHMARK_SNAPSHOT_REF }],
+    }],
+  };
+}
+
+describe("trusted benchmark promotion and owner-only handoff", () => {
+  it("does not borrow a coincidentally matching local snapshot without host-frozen proof", async () => {
+    const sources = benchmarkSources();
+    const imported = { ...benchmarkView(), snapshotProof: { basis: "imported_claim" } };
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) return { ok: true, json: async () => ({ experiments: [imported] }) };
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: sources.artifacts }) };
+      if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: sources.snapshots }) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId={BENCHMARK_CASE} canWrite canLead />);
+    fireEvent.click(await screen.findByText("Version the human benchmark"));
+    const evidence = screen.getByRole("group", { name: "Evidence anchors for this human benchmark" });
+    await waitFor(() => expect(within(evidence).getAllByRole("checkbox")).toHaveLength(1));
+    expect((within(evidence).getByRole("checkbox") as HTMLInputElement).value).toBe("ev-demo-checkout-log");
+    expect((within(evidence).getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/gold"))).toBe(false);
+  });
+
+  it("prefills only eligible accepted references once and posts only after explicit review", async () => {
+    let stored: ReturnType<typeof benchmarkGold> | null = null;
+    const posts: unknown[] = [];
+    const sources = benchmarkSources();
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) return {
+        ok: true, json: async () => ({ experiments: [benchmarkView(stored)] }),
+      };
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: sources.artifacts }) };
+      if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: sources.snapshots }) };
+      if (url.endsWith("/gold") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { evidenceAnchors: string[] };
+        posts.push(body);
+        stored = benchmarkGold(body.evidenceAnchors);
+        return { ok: true, status: 200, json: async () => stored };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId={BENCHMARK_CASE} canWrite canLead canBenchmarkExport />);
+    fireEvent.click(await screen.findByText("Version the human benchmark"));
+    const evidence = screen.getByRole("group", { name: "Evidence anchors for this human benchmark" });
+    await waitFor(() => expect(within(evidence).getAllByRole("checkbox")).toHaveLength(2));
+    const choices = within(evidence).getAllByRole("checkbox") as HTMLInputElement[];
+    expect(choices.every((row) => row.checked)).toBe(true);
+    expect(posts).toHaveLength(0);
+    fireEvent.click(choices.find((row) => row.value === BENCHMARK_SNAPSHOT_REF)!);
+    expect(posts).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toMatchObject({ evidenceAnchors: ["ev-demo-checkout-log"] });
+    expect(await screen.findByText(/Benchmark v1 recorded/)).toBeTruthy();
+  });
+
+  it("refuses a selected snapshot anchor removed before submit instead of silently dropping it", async () => {
+    const sources = benchmarkSources();
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) return { ok: true, json: async () => ({ experiments: [benchmarkView()] }) };
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: sources.artifacts }) };
+      if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: sources.snapshots }) };
+      if (url.endsWith("/gold") && init?.method === "POST") {
+        posts += 1;
+        return { ok: true, json: async () => benchmarkGold([BENCHMARK_SNAPSHOT_REF]) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    render(<ExperimentLab caseId={BENCHMARK_CASE} canWrite canLead />);
+    fireEvent.click(await screen.findByText("Version the human benchmark"));
+    const choices = await screen.findByRole("group", { name: "Evidence anchors for this human benchmark" });
+    await waitFor(() => expect(choices.querySelectorAll("input:checked")).toHaveLength(2));
+    fireEvent.click(within(choices).getAllByRole("checkbox").find((item) =>
+      (item as HTMLInputElement).value === "ev-demo-checkout-log")!);
+    sources.snapshots = [];
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    expect(await screen.findByText(/selected evidence reference is no longer eligible/)).toBeTruthy();
+    expect(posts).toBe(0);
+    expect(choices.querySelectorAll("input:checked")).toHaveLength(1);
+  });
+
+  it("recovers a committed version after the successful response is withheld from the caller", async () => {
+    let stored: ReturnType<typeof benchmarkGold> | null = null;
+    let posts = 0;
+    const sources = benchmarkSources();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) return {
+        ok: true, json: async () => ({ experiments: [benchmarkView(stored)] }),
+      };
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: sources.artifacts }) };
+      if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: sources.snapshots }) };
+      if (url.endsWith("/gold") && init?.method === "POST") {
+        posts += 1;
+        stored = benchmarkGold((JSON.parse(String(init.body)) as { evidenceAnchors: string[] }).evidenceAnchors);
+        throw new Error("synthetic lost acknowledgment after server commit");
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    render(<ExperimentLab caseId={BENCHMARK_CASE} canWrite canLead canBenchmarkExport />);
+    fireEvent.click(await screen.findByText("Version the human benchmark"));
+    await waitFor(() => expect(screen.getByRole("group", { name: "Evidence anchors for this human benchmark" })
+      .querySelectorAll("input:checked")).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    expect(await screen.findByText(/result is unconfirmed/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Read current benchmark history" }));
+    expect(await screen.findByText(/Recovered recorded benchmark v1/)).toBeTruthy();
+    expect(posts).toBe(1);
+    expect(screen.queryByRole("button", { name: /Retry the same selection/ })).toBeNull();
+  });
+
+  it("revokes old retry permission across a new unknown outcome and ignores an overlapping earlier read", async () => {
+    const sources = benchmarkSources();
+    let posts = 0;
+    let holdRead = false;
+    let releaseRead: (() => void) | undefined;
+    let releaseSecondPost: (() => void) | undefined;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const postGate = new Promise<void>((resolve) => { releaseSecondPost = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) {
+        if (holdRead) {
+          holdRead = false;
+          await readGate;
+        }
+        return { ok: true, json: async () => ({ experiments: [benchmarkView()] }) };
+      }
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: sources.artifacts }) };
+      if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: sources.snapshots }) };
+      if (url.endsWith("/gold") && init?.method === "POST") {
+        posts += 1;
+        if (posts === 2) await postGate;
+        return { ok: false, status: 503, json: async () => ({ error: "gateway result unavailable" }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    render(<ExperimentLab caseId={BENCHMARK_CASE} canWrite canLead />);
+    fireEvent.click(await screen.findByText("Version the human benchmark"));
+    const oldForm = screen.getByRole("button", { name: "Promote accepted decision to gold" }).closest("form")!;
+    const oldFormProps = Object.keys(oldForm).find((key) => key.startsWith("__reactProps$"))!;
+    const retainedSubmit = (oldForm as unknown as Record<string, { onSubmit: (event: unknown) => void }>)[oldFormProps]!.onSubmit;
+    await waitFor(() => expect(screen.getByRole("group", { name: "Evidence anchors for this human benchmark" })
+      .querySelectorAll("input:checked")).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await screen.findByText(/outcome is unconfirmed/);
+    fireEvent.click(screen.getByRole("button", { name: "Read current benchmark history" }));
+    const retry = await screen.findByRole("button", { name: /Retry the same selection/ });
+    holdRead = true;
+    fireEvent.click(screen.getByRole("button", { name: "Read current benchmark history" }));
+    const reactPropsKey = Object.keys(retry).find((key) => key.startsWith("__reactProps$"))!;
+    const retainedRetry = (retry as unknown as Record<string, { onClick: () => void }>)[reactPropsKey]!.onClick;
+    fireEvent.click(retry);
+    await waitFor(() => expect(posts).toBe(2));
+    retainedRetry();
+    expect(posts).toBe(2);
+    await act(async () => { releaseSecondPost?.(); });
+    expect(await screen.findByText(/outcome is unconfirmed/)).toBeTruthy();
+    await act(async () => {
+      retainedRetry();
+      retainedSubmit({ preventDefault() {}, currentTarget: oldForm });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(posts).toBe(2);
+    await act(async () => { releaseRead?.(); });
+    expect(screen.queryByRole("button", { name: /Retry the same selection/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Read current benchmark history" }));
+    expect(await screen.findByRole("button", { name: /Retry the same selection/ })).toBeTruthy();
+    expect(posts).toBe(2);
+  });
+
+  it("rejects a mismatched success body and never prepares a file from malformed owner-only output", async () => {
+    const sources = benchmarkSources();
+    let exports = 0;
+    const createObjectURL = vi.fn(() => "blob:should-not-exist");
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) return {
+        ok: true, json: async () => ({ experiments: [benchmarkView()] }),
+      };
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: sources.artifacts }) };
+      if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: sources.snapshots }) };
+      if (url.endsWith("/gold") && init?.method === "POST") return {
+        ok: true, status: 200,
+        json: async () => ({ ...benchmarkGold(["ev-demo-checkout-log", BENCHMARK_SNAPSHOT_REF]), caseId: "foreign-case" }),
+      };
+      if (url.endsWith("/export")) {
+        exports += 1;
+        return { ok: true, status: 200, text: async () => JSON.stringify({
+          schemaId: "cd-collab.gold_reference_export.v1", privacyClass: "share_safe",
+          gold: benchmarkGold(["ev-demo-checkout-log"]),
+        }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId={BENCHMARK_CASE} canWrite canLead canBenchmarkExport />);
+    fireEvent.click(await screen.findByText("Version the human benchmark"));
+    await waitFor(() => expect(screen.getByRole("group", { name: "Evidence anchors for this human benchmark" })
+      .querySelectorAll("input:checked")).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    expect(await screen.findByText(/result is unconfirmed/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Download owner-only benchmark/ })).toBeNull();
+    // Export from a separately recorded version, then reject a tampered envelope.
+    cleanup();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) return { ok: true, json: async () => ({ experiments: [benchmarkView(benchmarkGold(["ev-demo-checkout-log"]))] }) };
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: sources.artifacts }) };
+      if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: sources.snapshots }) };
+      if (url.endsWith("/export")) {
+        exports += 1;
+        return { ok: true, status: 200, text: async () => JSON.stringify({
+          schemaId: "cd-collab.gold_reference_export.v1", privacyClass: "share_safe",
+          gold: benchmarkGold(["ev-demo-checkout-log"]),
+        }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    render(<ExperimentLab caseId={BENCHMARK_CASE} canWrite canLead canBenchmarkExport />);
+    const download = await screen.findByRole("button", { name: "Download owner-only benchmark v1" });
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    fireEvent.click(download);
+    await waitFor(() => expect(exports).toBe(1));
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+});
+
 function compareWorkspaceNav() {
   return screen.getByRole("navigation", { name: "Compare workspace" });
 }
@@ -1383,6 +1665,7 @@ describe("experiment lab", () => {
   it("offers frozen snapshot evidence when provider-free lanes cite nothing", async () => {
     const snapshotOnlyView = {
       ...view,
+      snapshotProof: { basis: "host_frozen_snapshot" },
       agreement: {
         sharedAnchors: [],
         candidateSpecific: [],

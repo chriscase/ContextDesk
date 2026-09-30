@@ -727,12 +727,14 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         steps: [
           "Open the Compare stage and pick a candidate response.",
           "Record scores on the four dimensions with a short rationale.",
-          "A case lead can promote an accepted decision to gold; alignment then appears per lane.",
+          "In Decide, inspect an accepted decision and open Version the human benchmark. Review the preselected eligible evidence, adjust anchors or optional roles, then deliberately promote. A proposed decision is not eligible.",
+          "If the outcome is unconfirmed, read current benchmark history before choosing whether to retry the same selection. Reopen any recorded version from the version picker.",
+          "For a trusted offline bench, download the exact owner-only version. It retains internal IDs and attribution; the separate share-safe review export uses aliases and cannot be used to reconstruct those IDs.",
         ],
         recorded:
-          "Each observation records the reviewer, scores, and rationale. Gold promotion records the promoting lead, version lineage, the source decision and revision, and evidence anchors.",
+          "Each observation records the reviewer, scores, and rationale. Gold promotion records the promoting lead, version lineage, the source decision and revision, and evidence anchors. The owner-only file can be imported with cd-triage-bench import-gold, then compared only to a run with matching task and snapshot identities.",
         limits:
-          "Helpfulness describes response usefulness — it makes no live-provider claims. Gold is a human benchmark decision, and gold alignment is scored separately from helpfulness; neither is a correctness verdict.",
+          "Helpfulness describes response usefulness — it makes no live-provider claims. Gold is a human benchmark decision, and gold alignment is scored separately from helpfulness; neither is a correctness verdict. The owner-only file contains internal identifiers and should not be shared publicly by default; it is not a case archive or an external-response assessment export.",
         actions: [{ label: "Open the Compare stage", go: { stage: "compare" } }],
       },
     ],

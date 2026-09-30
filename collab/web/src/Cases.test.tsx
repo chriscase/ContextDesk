@@ -3446,6 +3446,135 @@ describe("mounted export handoff scope", () => {
   });
 });
 
+describe("mounted benchmark handoff scope", () => {
+  it.each(["identity", "private", "export", "lead", "record"] as const)("revokes retained benchmark actions before passive cleanup on %s change", async (change) => {
+    const benchmark = {
+      schemaId: "cd-collab.gold_reference.v1", goldId: "gold-synthetic", version: 1,
+      predecessorGoldId: null, caseId: "c1", experimentId: "exp-synthetic",
+      packageId: "pkg-synthetic", taskFingerprint: "task-synthetic",
+      snapshotFingerprint: "snap-synthetic", acceptedDecisionId: "dec-synthetic",
+      acceptedDecisionRevision: 2, auditRefs: [], evidenceAnchors: ["ev-synthetic"],
+      expectedRelationships: [], helpfulnessDimensions: [], notes: ["Human benchmark"],
+      promotedById: "lead-synthetic", promotedByUsername: "lead",
+      createdAt: "2026-09-29T00:00:00Z",
+    };
+    const experiment = {
+      id: "exp-synthetic", packageId: "pkg-synthetic", taskFingerprint: "task-synthetic",
+      snapshotFingerprint: "snap-synthetic", candidates: [{ candidateId: "candidate-synthetic",
+        modelLabel: "Synthetic", role: "single", runStatus: "completed",
+        observedLatency: { status: "unknown" }, cost: { status: "unknown" },
+        usage: { status: "unknown" }, helpfulnessState: "unreviewed", goldState: "present" }],
+      agreement: { sharedAnchors: [{ evidenceRef: "ev-synthetic", role: "symptom",
+        candidateIds: ["candidate-synthetic"] }], candidateSpecific: [], roleConflicts: [], notes: [] },
+      observations: [], decisions: [{ id: "dec-synthetic", status: "accepted", revision: 2,
+        text: "Synthetic reviewed call", rationale: "Fixture", evidenceRefs: ["ev-synthetic"] }],
+      gold: benchmark, golds: [benchmark], alignments: [], traces: [],
+    };
+    const fetchStub = stubCaseFetch({ onRequest: (url) => url.endsWith("/experiments")
+      ? Promise.resolve({ ok: true, json: async () => ({ experiments: [experiment] }) }) : null });
+    const createObjectURL = vi.fn(() => "blob:must-not-prepare");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    const capabilities = ["investigation:read", "decision:accept", "export:create", "evidence:private:read"];
+    const original = { roles: ["case-lead"], capabilities, identityKey: "A", authorityKey: "grant-A",
+      view: "investigations" as const, onOpenCase: vi.fn(), focusCaseId: "c1" };
+    const cleaned: number[] = [];
+    const observations: Array<{ beforePassive: boolean; posts: number; blobs: number; oldVisible: boolean }> = [];
+    const oldActions: Array<() => void> = [];
+    function PassiveWitness({ phase }: { phase: number }) {
+      useEffect(() => () => { cleaned.push(phase); }, [phase]);
+      return null;
+    }
+    function Probe({ phase }: { phase: number }) {
+      useLayoutEffect(() => {
+        if (phase === 0) return;
+        for (const action of oldActions) action();
+        observations.push({ beforePassive: !cleaned.includes(phase - 1),
+          posts: fetchStub.mock.calls.filter(([input, init]) => String(input).endsWith("/gold")
+            && (init as RequestInit | undefined)?.method === "POST").length,
+          blobs: createObjectURL.mock.calls.length,
+          oldVisible: document.body.textContent?.includes("Download owner-only benchmark v1") ?? false });
+      }, [phase]);
+      return null;
+    }
+    function Host({ phase, props }: { phase: number; props: typeof original }) {
+      return <><Cases {...props} /><PassiveWitness key={`witness-${phase}`} phase={phase} /><Probe key={`probe-${phase}`} phase={phase} /></>;
+    }
+    const view = render(<Host phase={0} props={original} />);
+    fireEvent.click(within(await screen.findByRole("navigation", { name: "Investigation stages" }))
+      .getByRole("button", { name: /Decide/ }));
+    const handoff = await screen.findByRole("button", { name: "Download owner-only benchmark v1" });
+    fireEvent.click(screen.getByText("Version the human benchmark"));
+    const form = handoff.closest(".experiment-lab__benchmark-handoff")?.querySelector("form");
+    expect(form).toBeTruthy();
+    const oldHandler = (element: Element, key: "onClick" | "onSubmit") => {
+      const reactKey = Object.keys(element).find((item) => item.startsWith("__reactProps$"))!;
+      return (element as unknown as Record<string, Record<string, (event?: unknown) => void>>)[reactKey]![key]!;
+    };
+    const submit = oldHandler(form!, "onSubmit");
+    const download = oldHandler(handoff, "onClick");
+    oldActions.push(() => submit({ preventDefault() {}, currentTarget: form }), () => download());
+    const next = change === "identity" ? { ...original, identityKey: "B", authorityKey: "grant-B" }
+      : change === "private" ? { ...original, capabilities: capabilities.filter((cap) => cap !== "evidence:private:read") }
+        : change === "export" ? { ...original, capabilities: capabilities.filter((cap) => cap !== "export:create") }
+          : change === "lead" ? { ...original, capabilities: capabilities.filter((cap) => cap !== "decision:accept") }
+            : { ...original, focusCaseId: "missing-case" };
+    view.rerender(<Host phase={1} props={next} />);
+    expect(observations).toEqual([{ beforePassive: true, posts: 0, blobs: 0, oldVisible: false }]);
+    expect(cleaned).toContain(0);
+    if (change === "identity") {
+      view.rerender(<Host phase={2} props={original} />);
+      expect(observations[1]).toMatchObject({ beforePassive: true, posts: 0, blobs: 0 });
+      expect(cleaned).toContain(1);
+    }
+  });
+
+  it("discards an in-flight exact-version export after the actual case mount changes authority", async () => {
+    const gold = {
+      schemaId: "cd-collab.gold_reference.v1", goldId: "gold-synthetic", version: 1,
+      predecessorGoldId: null, caseId: "c1", experimentId: "exp-synthetic",
+      packageId: "pkg-synthetic", taskFingerprint: "task-synthetic",
+      snapshotFingerprint: "snap-synthetic", acceptedDecisionId: "dec-synthetic",
+      acceptedDecisionRevision: 2, auditRefs: [], evidenceAnchors: ["ev-synthetic"],
+      expectedRelationships: [], helpfulnessDimensions: [],
+      notes: ["A gold reference is a human benchmark decision, not an infallible truth claim."],
+      promotedById: "lead-synthetic", promotedByUsername: "lead",
+      createdAt: "2026-09-29T00:00:00Z",
+    };
+    const experiment = {
+      id: gold.experimentId, packageId: gold.packageId, taskFingerprint: gold.taskFingerprint,
+      snapshotFingerprint: gold.snapshotFingerprint, candidates: [], agreement: {
+        sharedAnchors: [{ evidenceRef: "ev-synthetic", role: "symptom", candidateIds: [] }],
+        candidateSpecific: [], roleConflicts: [], notes: [] }, observations: [],
+      decisions: [{ id: gold.acceptedDecisionId, status: "accepted", revision: 2,
+        text: "Synthetic decision", rationale: "Fixture", evidenceRefs: ["ev-synthetic"] }],
+      gold, golds: [gold], alignments: [], traces: [],
+    };
+    let release: ((response: unknown) => void) | undefined;
+    const held = new Promise<unknown>((resolve) => { release = resolve; });
+    const stub = stubCaseFetch({ onRequest: (url) => url.endsWith("/experiments")
+      ? Promise.resolve({ ok: true, json: async () => ({ experiments: [experiment] }) })
+      : url.endsWith("/gold/gold-synthetic/export") ? held : null });
+    const createObjectURL = vi.fn(() => "blob:obsolete");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    const props = { roles: ["case-lead"], capabilities: ["investigation:read", "decision:accept",
+      "export:create", "evidence:private:read"], identityKey: "A", authorityKey: "grant-A",
+      view: "investigations" as const };
+    const mounted = render(<Cases {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    fireEvent.click(within(await screen.findByRole("navigation", { name: "Investigation stages" }))
+      .getByRole("button", { name: /Decide/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Download owner-only benchmark v1" }));
+    await waitFor(() => expect(stub.mock.calls.filter(([input]) => String(input).endsWith("/gold/gold-synthetic/export"))).toHaveLength(1));
+    mounted.rerender(<Cases {...props} identityKey="B" authorityKey="grant-B" />);
+    await act(async () => { release?.({ ok: true, status: 200,
+      text: async () => JSON.stringify({ schemaId: "cd-collab.gold_reference_export.v1",
+        privacyClass: "owner_only", gold }) }); });
+    expect(createObjectURL).not.toHaveBeenCalled();
+    mounted.rerender(<Cases {...props} />);
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+});
+
 describe("War Room human assessments pass-through", () => {
   const importedRuns = [
     {

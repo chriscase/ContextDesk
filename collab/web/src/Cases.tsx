@@ -772,6 +772,12 @@ export function Cases(props: {
   const canReadPrivate = capabilitySet
     ? capabilitySet.has("evidence:private:read")
     : roles.includes("case-lead") || roles.includes("admin");
+  const canBenchmarkPromote = !readOnly && (capabilitySet
+    ? capabilitySet.has("decision:accept")
+    : canLead);
+  const canBenchmarkExport = canBenchmarkPromote && canRead && canReadPrivate && (capabilitySet
+    ? capabilitySet.has("export:create")
+    : canLead);
   const collectionMode = props.collectionPage !== undefined;
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [casesLoaded, setCasesLoaded] = useState(false);
@@ -2767,10 +2773,13 @@ export function Cases(props: {
           >
             <TriageAnchor id="triage-comparison-lab" label="Comparison lab">
               <ExperimentLab
+                key={`${current.id}:${props.identityKey ?? props.participant?.username ?? ""}:${props.authorityKey ?? ""}:${canRead}:${canReadPrivate}:${canBenchmarkPromote}:${canBenchmarkExport}`}
                 caseId={current.id}
                 surface="comparison"
                 canWrite={canWrite}
                 canLead={canLead}
+                canBenchmarkPromote={canBenchmarkPromote}
+                canBenchmarkExport={canBenchmarkExport}
                 readOnly={readOnly}
                 caseTitle={current.title}
                 caseStatus={current.status}
@@ -2815,10 +2824,13 @@ export function Cases(props: {
                 decided, update the status and export a share-safe record.
               </p>
               <ExperimentLab
+                key={`${current.id}:${props.identityKey ?? props.participant?.username ?? ""}:${props.authorityKey ?? ""}:${canRead}:${canReadPrivate}:${canBenchmarkPromote}:${canBenchmarkExport}`}
                 caseId={current.id}
                 surface="decision"
                 canWrite={canWrite}
                 canLead={canLead}
+                canBenchmarkPromote={canBenchmarkPromote}
+                canBenchmarkExport={canBenchmarkExport}
                 readOnly={readOnly}
                 caseTitle={current.title}
                 caseStatus={current.status}
