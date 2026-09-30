@@ -62,6 +62,100 @@ function benchmarkSources() {
 }
 
 describe("trusted benchmark promotion and owner-only handoff", () => {
+  it("keeps the visible pending and uncertain intent equal to the replay payload despite edits and late sources", async () => {
+    const sources = benchmarkSources();
+    const posts: { evidenceAnchors: string[]; expectedRelationships: { evidenceRef: string; role: string }[];
+      helpfulnessDimensions: string[]; expectedGoldVersion: number }[] = [];
+    let currentGold: ReturnType<typeof benchmarkGold> | null = null;
+    let snapshotReads = 0;
+    let releaseSources: (() => void) | undefined;
+    let releasePost: (() => void) | undefined;
+    const sourceGate = new Promise<void>((resolve) => { releaseSources = resolve; });
+    let postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) return { ok: true, json: async () => ({ experiments: [benchmarkView(currentGold)] }) };
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: sources.artifacts }) };
+      if (url.endsWith("/snapshots")) {
+        snapshotReads += 1;
+        if (snapshotReads === 1) await sourceGate;
+        return { ok: true, json: async () => ({ snapshots: sources.snapshots }) };
+      }
+      if (url.endsWith("/gold") && init?.method === "POST") {
+        posts.push(JSON.parse(String(init.body)) as typeof posts[number]);
+        await postGate;
+        return { ok: false, status: 503, json: async () => ({ error: "synthetic unconfirmed promotion" }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    render(<ExperimentLab caseId={BENCHMARK_CASE} canWrite canLead />);
+    fireEvent.click(await screen.findByText("Version the human benchmark"));
+    const picker = screen.getByRole("group", { name: "Evidence anchors for this human benchmark" });
+    const anchor = picker.querySelector<HTMLInputElement>('input[value="ev-demo-checkout-log"]')!;
+    const role = picker.querySelector<HTMLSelectElement>('select[name="evidenceRole:ev-demo-checkout-log"]')!;
+    const dimensions = screen.getByRole("textbox", { name: "Optional helpfulness dimensions, comma separated" }) as HTMLInputElement;
+    fireEvent.change(role, { target: { value: "cause" } });
+    fireEvent.change(dimensions, { target: { value: "evidence_support, actionability" } });
+    const shownIntent = () => ({
+      evidenceAnchors: [...picker.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')].map((input) => input.value),
+      expectedRelationships: [{ evidenceRef: anchor.value, role: role.value }],
+      helpfulnessDimensions: dimensions.value.split(",").map((value) => value.trim()).filter(Boolean),
+    });
+    // Only enabled controls receive user edits; DOM mutation of disabled inputs
+    // would not model an operator interaction. The real browser also checks this.
+    const tryEdit = (value: string) => {
+      if (!anchor.matches(":disabled")) fireEvent.click(anchor);
+      if (!role.matches(":disabled")) fireEvent.change(role, { target: { value: "symptom" } });
+      if (!dimensions.matches(":disabled")) fireEvent.change(dimensions, { target: { value } });
+    };
+    const submitted = shownIntent();
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    tryEdit("pending edit");
+    const shownWhilePending = shownIntent();
+    await act(async () => { releaseSources?.(); });
+    const shownAfterLateSources = shownIntent();
+    await act(async () => { releasePost?.(); });
+    await screen.findByText(/outcome is unconfirmed/);
+    tryEdit("uncertain edit");
+    const lateAnchor = picker.querySelector<HTMLInputElement>(`input[value="${BENCHMARK_SNAPSHOT_REF}"]`);
+    if (lateAnchor && !lateAnchor.matches(":disabled") && !lateAnchor.checked) fireEvent.click(lateAnchor);
+    const shownWhileUncertain = shownIntent();
+    currentGold = benchmarkGold([BENCHMARK_SNAPSHOT_REF]); // Same scope, different intent: no match.
+    fireEvent.click(screen.getByRole("button", { name: "Read current benchmark history" }));
+    const retry = await screen.findByRole("button", { name: "Retry the same selection using reviewed version 1" });
+    const shownAfterRead = shownIntent();
+    postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+    fireEvent.click(retry);
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts[0]).toMatchObject({ ...submitted, expectedGoldVersion: 0 });
+    expect(posts[1]).toMatchObject({ ...submitted, expectedGoldVersion: 1 });
+    expect.soft(shownWhilePending).toEqual(submitted);
+    expect.soft(shownAfterLateSources).toEqual(submitted);
+    expect.soft(shownWhileUncertain).toEqual(submitted);
+    expect.soft(shownAfterRead).toEqual(submitted);
+    expect(anchor.matches(":disabled")).toBe(true);
+    expect(role.matches(":disabled")).toBe(true);
+    expect(dimensions.matches(":disabled")).toBe(true);
+    await act(async () => { releasePost?.(); });
+    await screen.findByText(/outcome is unconfirmed/);
+    expect(screen.queryByRole("button", { name: /Retry the same selection/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Read current benchmark history" }));
+    const edit = await screen.findByRole("button", { name: "Edit a new benchmark intent" });
+    fireEvent.click(edit);
+    expect(anchor.matches(":disabled")).toBe(false);
+    expect(dimensions.value).toBe("evidence_support, actionability");
+    await waitFor(() => expect(picker.querySelector<HTMLInputElement>(`input[value="${BENCHMARK_SNAPSHOT_REF}"]`)?.checked).toBe(true));
+    fireEvent.click(anchor);
+    fireEvent.change(dimensions, { target: { value: "uncertainty_calibration" } });
+    expect(posts).toHaveLength(2); // Editing never replays or submits by itself.
+    act(() => window.dispatchEvent(new CustomEvent("contextdesk:experiment-created", { detail: { experimentId: goldView.id } })));
+    await screen.findByText("Expected current benchmark version: 1.");
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await waitFor(() => expect(posts).toHaveLength(3));
+    expect(posts[2]).toMatchObject({ evidenceAnchors: [BENCHMARK_SNAPSHOT_REF], helpfulnessDimensions: ["uncertainty_calibration"], expectedGoldVersion: 1 });
+  });
+
   it("does not borrow a coincidentally matching local snapshot without host-frozen proof", async () => {
     const sources = benchmarkSources();
     const imported = { ...benchmarkView(), snapshotProof: { basis: "imported_claim" } };
@@ -80,6 +174,43 @@ describe("trusted benchmark promotion and owner-only handoff", () => {
     expect((within(evidence).getByRole("checkbox") as HTMLInputElement).value).toBe("ev-demo-checkout-log");
     expect((within(evidence).getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/gold"))).toBe(false);
+  });
+
+  it("resolves the submitted editor on confirmed success even when the later display refresh fails", async () => {
+    const sources = benchmarkSources();
+    let recorded = false;
+    let releaseRefresh: (() => void) | undefined;
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) {
+        if (recorded) {
+          await refreshGate;
+          return { ok: false, status: 503, json: async () => ({}) };
+        }
+        return { ok: true, json: async () => ({ experiments: [benchmarkView()] }) };
+      }
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: sources.artifacts }) };
+      if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: sources.snapshots }) };
+      if (url.endsWith("/gold") && init?.method === "POST") {
+        recorded = true;
+        return { ok: true, status: 200, json: async () => benchmarkGold(["ev-demo-checkout-log", BENCHMARK_SNAPSHOT_REF]) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    render(<ExperimentLab caseId={BENCHMARK_CASE} canWrite canLead canBenchmarkExport />);
+    fireEvent.click(await screen.findByText("Version the human benchmark"));
+    const evidence = screen.getByRole("group", { name: "Evidence anchors for this human benchmark" });
+    await waitFor(() => expect(evidence.querySelectorAll("input:checked")).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await screen.findByText(/Benchmark v1 recorded/);
+    expect(evidence.querySelectorAll("input:checked")).toHaveLength(0);
+    expect(screen.getByRole("textbox", { name: "Optional helpfulness dimensions, comma separated" }).matches(":disabled")).toBe(false);
+    expect(screen.queryByText("Selection, roles, and dimensions are locked for this promotion.")).toBeNull();
+    await act(async () => { releaseRefresh?.(); });
+    await screen.findByText(/Benchmark recorded, but the history refresh failed/);
+    expect(screen.getByRole("button", { name: "Download owner-only benchmark v1" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Read current benchmark history" })).toBeNull();
   });
 
   it("prefills only eligible accepted references once and posts only after explicit review", async () => {
@@ -142,6 +273,8 @@ describe("trusted benchmark promotion and owner-only handoff", () => {
     expect(await screen.findByText(/selected evidence reference is no longer eligible/)).toBeTruthy();
     expect(posts).toBe(0);
     expect(choices.querySelectorAll("input:checked")).toHaveLength(1);
+    expect(within(choices).getAllByRole("checkbox").every((input) => !input.matches(":disabled"))).toBe(true);
+    expect(screen.getByRole("textbox", { name: "Optional helpfulness dimensions, comma separated" }).matches(":disabled")).toBe(false);
   });
 
   it("recovers a committed version after the successful response is withheld from the caller", async () => {

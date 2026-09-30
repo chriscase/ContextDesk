@@ -140,3 +140,114 @@ screenshots/videos, temporary SQLite libraries, compiler caches and private
 recovery backups stay local. This is a reviewable human-benchmark handoff, not
 a truth verdict, provider-quality ranking, proof of production durability,
 public sharing clearance, deployment, or merge authorization.
+
+## TBH-IR-01 bounded review correction — 2026-09-30
+
+Starting published head `73ddb56502a8d6b309218cec1feaf3b447fd6de4`, tree
+`a8ae352cadf6564ec67337b145ea651b852a3eeb`, was clean. One fetch confirmed
+the branch, main and merge base remained as recorded above. The frozen goal
+still hashes to `8227beff2e666b02413f9520948462baf77043f51a27084cc63ee64897d3e2c5`.
+This is the existing draft #1188 continuation, not another product goal.
+
+The actual-component controlled-response reproduction demonstrated the review
+finding. After submitting anchor A with role `cause` and two dimensions, user
+edits changed the visible pending fields; a late accepted snapshot reference
+was seeded into that form. The unconfirmed form then showed A plus the late
+anchor, role `symptom`, and `uncertain edit`. Nevertheless, the first and replay
+POST assertions both retained the original A/role/dimensions; only the explicitly
+reviewed `expectedGoldVersion` advanced from 0 to 1. The new behavioral regression
+failed on those visible-intent assertions before the correction (1 failed;
+76 name-filter exclusions), rather than on setup or payload identity.
+
+The small presentation correction locks native evidence/role/dimension controls
+and their initial seeding during pending or unresolved intent. The editor keeps
+the original visible evidence choices, labels, accepted context and values;
+late resources and ordinary refresh cannot replace that context. A reviewed CAS
+version is shown without changing semantic replay. Explicit **Edit a new
+benchmark intent** unlocks the existing values, makes late sources available for
+one-time review, and sends nothing. A later explicit submit is a new intent.
+Known preflight rejection remains editable; confirmed recording releases and
+resets the editor before the later display refresh, whose failure does not turn
+success into uncertainty. Replay still uses its frozen request, and the existing
+attempt/retained-handler guards are unchanged.
+
+The correction changes exactly four paths relative to the starting head:
+
+```text
+collab/web/src/ExperimentLab.tsx
+collab/web/src/ExperimentLab.test.tsx
+collab/e2e/specs/43-trusted-benchmark-handoff.spec.ts
+docs/goals/TRUSTED_BENCHMARK_HANDOFF_RECEIPT.md
+```
+
+No endpoint, transaction, schema, fingerprint/scoring semantics, owner-only
+envelope, importer, checker or workflow changed. Git tree identities remain:
+server `40a483518fa515f37551570dc38f70a8d5a90988`, contracts
+`5dd426a3b413b8d9faa9bd795c313b960e9b2ad0`, and bench
+`1811c7756269e0bf32fecdee7757610b31b54b27`, attributable to their qualification
+at `73ddb565`. The checker blob remains
+`940b6a5c33c368a2aaefa2ea2256968ea95b6537`. Handbook impact: none — this
+correction makes the already-documented frozen-intent workflow visible faithfully.
+
+Qualification commands and results:
+
+- `npx vitest run src/ExperimentLab.test.tsx src/Cases.test.tsx`: **173 passed**.
+  The final full web pass includes these affected suites and both new regressions.
+- The visible pending/uncertain regression passed **five independent final runs**:
+  1 passed / 77 other test names excluded per run. These are name filters, not
+  environment skips. A temporary `intentLocked = false` mutation failed the
+  visible anchors, role and dimensions assertions while replay payload assertions
+  still passed. Exact source bytes were restored (SHA-256
+  `c4f5af80d88468aa4430f175913fdd9b1d54187229ab26404167463e6530e577`),
+  then the final full suite passed. No mutant is published.
+- Web `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build` passed;
+  final `npm test`: **110 files / 1,839 tests passed**, zero environment skips.
+  E2E `npm run typecheck` passed.
+- Explicit joined config with `CD_GOAL09_JOINED=1`, the existing compiled bench,
+  and `--retries=0`: **1/1 passed** against the corrected production build.
+  Real browser assertions covered disabled pending controls, unchanged values
+  after acknowledgment loss, and unlocking after matching-history recovery.
+  The pending editor's 320px forced-colors/reduced-motion screenshot was visually
+  inspected and its document had no horizontal overflow. The real saved file's
+  SHA-256 was `a34cc0a1457a56a17c56f7411ab3eaf25fbb38e4c653c9e168055fd4cfaa4f86`;
+  original gold `2d7c18da-f999-4275-a27c-fb07fe15eed0`, task
+  `task-c5db6b76920a8c19348a5cc77979dddf2d14ad17fa5f8e908537ee062a76ad69`,
+  snapshot `snap-8198576802e793eb33fc447e8e9871dd8be80a89ed584d8cb721ee972e9ba8fc`.
+  The existing import/report, unrelated control and SQLite restart assertions passed.
+- The first joined correction attempt failed recovery because its newly added
+  `clarity` dimension was unsupported and filtered by the unchanged route.
+  The fixture was corrected to supported `actionability`; the final joined run
+  passed without changing product contracts. An initial sandbox-limited Vitest
+  launch could not write its cache; the authorized normal test launch ran afterward.
+- One separate bounded adversarial source review found **no actionable findings**.
+  It ran no tests, accessed no GitHub state, edited nothing and gave no approval.
+  Raw test/diagnostic logs and browser recordings remain local.
+
+### Separate historical close-proof observation
+
+On starting head `73ddb565`, collab `36667083988`, collab-qualify `36667084163`
+and all three triage workflows succeeded on attempt 1. Root CI `36667084114`
+failed only job `109743309102`, close-proof discipline (#254). Its actual checkout
+was generated merge `e3f3336b90aa75d820621e3902e5cd8d0562318a`; the log reported
+both missing SHA and missing pasted proof for #537 among 120 sampled issues.
+The earlier formatting failure in fast lane `36666888693` at `00906b9a` remains
+historical; the formatting amendment `73ddb565` was preserved unchanged.
+
+The unmodified `closing_comment_body` selection rule chooses the last marked
+closing comment, else the last comment. Running that exact `gh issue view`
+selection now exited **0**, returned **1,527 bytes including its output newline**,
+and had **empty stderr**. A separate REST read exited 0 and confirmed the selected
+body equals comment **5098054687**, SHA-256
+`3b48f1713f444cec720226011cdbfc4baddb019c497f923444c57fc515eab6b6` (body without
+the output newline). It contains full commit SHAs and the fenced **66 passed**
+block. The unchanged checker's `--fixture` mode accepted that selected body
+(exit 0). This tests the selected proof; it does not claim a fresh whole-history
+live sample passed.
+
+The script suppresses per-issue read stderr/status and substitutes empty content
+on read failure. The old log therefore cannot distinguish a failed read from
+other missing-body causes. A transient retrieval failure is plausible, **not
+confirmed**. #537, its comments/labels and cutoff, the checker and workflow were
+not altered. The corrected head's normal hosted run must be assessed separately;
+its final identities/conclusions belong in the PR handoff, without recursive
+receipt commits. Private archives, credentials and raw recordings remain local.

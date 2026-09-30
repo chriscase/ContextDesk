@@ -562,6 +562,7 @@ function EvidencePicker(props: {
   roles?: boolean;
   additionalRefs?: readonly string[];
   initialSelectedRefs?: readonly string[];
+  locked?: boolean;
 }) {
   // Resolve the whole set at once: picking one reference at a time cannot see
   // that two of them would render under the same name, and a chooser whose
@@ -625,16 +626,16 @@ function EvidencePicker(props: {
   useEffect(() => {
     // A matching snapshot may arrive later. Seed each accepted ref only once;
     // neither refresh nor a new resource object can undo manual deselection.
-    if (selectionWasReset.current) return;
+    if (props.locked || selectionWasReset.current) return;
     const pending = (JSON.parse(initialSelectionKey) as string[])
       .filter((ref) => !seededInitialRefs.current.has(ref));
     if (!pending.length) return;
     for (const ref of pending) seededInitialRefs.current.add(ref);
     setSelectedRefs((current) => new Set([...current, ...pending]));
-  }, [initialSelectionKey]);
+  }, [initialSelectionKey, props.locked]);
 
   return (
-    <fieldset className="experiment-lab__evidence-picker" ref={fieldsetRef}>
+    <fieldset className="experiment-lab__evidence-picker" ref={fieldsetRef} disabled={props.locked}>
       <legend>{props.legend}</legend>
       <label className="experiment-lab__evidence-search">
         <span>Search recorded evidence</span>
@@ -748,6 +749,12 @@ function BenchmarkPromotion(props: {
   const alive = useRef(true);
   const formRef = useRef<HTMLFormElement>(null);
   const [uncertain, setUncertain] = useState<{ intent: BenchmarkIntent; attempt: number } | null>(null);
+  // Keep both the values and their visible evidence choices in the submitted
+  // editing context. Late resources/refreshes belong to the next editable draft.
+  const [frozenEditor, setFrozenEditor] = useState<{
+    view: ExperimentView; artifacts: EvidenceArtifactView[]; snapshotRefs: string[];
+    accepted: typeof props.accepted; intent: BenchmarkIntent;
+  } | null>(null);
   // Event handlers retained by the browser/React can outlive their render.
   // A synchronous ref keeps an earlier form or retry handler from bypassing a
   // newer unknown outcome before React publishes the next render.
@@ -768,6 +775,11 @@ function BenchmarkPromotion(props: {
   history.sort((a, b) => b.version - a.version);
   const effectiveGoldId = selectedGoldId ?? props.view.gold?.goldId ?? recorded?.goldId ?? null;
   const selectedGold = history.find((gold) => gold.goldId === effectiveGoldId) ?? null;
+  const intentLocked = frozenEditor !== null && (pending || uncertain !== null);
+  const editor = intentLocked && frozenEditor ? frozenEditor : props;
+  const shownGoldVersion = intentLocked
+    ? reviewPermission?.expectedGoldVersion ?? frozenEditor?.intent.expectedGoldVersion ?? 0
+    : props.view.gold?.version ?? 0;
 
   const revokeBlob = useCallback(() => {
     const lease = blobLease.current;
@@ -862,6 +874,7 @@ function BenchmarkPromotion(props: {
       if (!alive.current || attempt !== attemptRef.current) return;
       setRecorded(gold);
       setSelectedGoldId(gold.goldId);
+      setFrozenEditor(null);
       formRef.current?.reset();
       setNotice(`Benchmark v${gold.version} recorded. Its attribution and original version are preserved.`);
       const refreshed = await props.refresh();
@@ -908,6 +921,8 @@ function BenchmarkPromotion(props: {
       helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
         .split(",").map((row) => row.trim()).filter(Boolean),
     };
+    setFrozenEditor({ view: props.view, artifacts: props.artifacts, snapshotRefs: props.snapshotRefs,
+      accepted: props.accepted, intent });
     pendingRef.current = true;
     setPending(true);
     setProblem(null);
@@ -936,6 +951,7 @@ function BenchmarkPromotion(props: {
         pendingRef.current = false;
         setPending(false);
       }
+      if (alive.current && !uncertainRef.current) setFrozenEditor(null);
     }
   }
 
@@ -966,6 +982,7 @@ function BenchmarkPromotion(props: {
         setSelectedGoldId(recovered.goldId);
         uncertainRef.current = null;
         setUncertain(null);
+        setFrozenEditor(null);
         setReviewPermission(null);
         setNotice(`Recovered recorded benchmark v${recovered.version}; no second promotion was sent.`);
         const refreshed = await props.refresh();
@@ -991,6 +1008,7 @@ function BenchmarkPromotion(props: {
     // The review permits only the frozen semantic request. Its CAS precondition
     // may advance after explicit review; selected evidence is checked afresh.
     const intent = { ...issue.intent, expectedGoldVersion: permission.expectedGoldVersion };
+    setFrozenEditor((current) => current ? { ...current, intent } : current);
     pendingRef.current = true;
     setPending(true);
     setProblem(null);
@@ -1010,6 +1028,7 @@ function BenchmarkPromotion(props: {
         pendingRef.current = false;
         setPending(false);
       }
+      if (alive.current && !uncertainRef.current) setFrozenEditor(null);
     }
   }
 
@@ -1075,23 +1094,25 @@ function BenchmarkPromotion(props: {
         <details className="experiment-lab__tools">
           <summary>Version the human benchmark</summary>
           <p className="experiment-lab__section-note">
-            Accepted decision r{props.accepted.revision}: “{truncateText(props.accepted.text)}”.
+            Accepted decision r{editor.accepted.revision}: “{truncateText(editor.accepted.text)}”.
             Review the initial evidence selection. This human benchmark is not a correctness verdict.
           </p>
+          {intentLocked ? <p>Selection, roles, and dimensions are locked for this promotion.</p> : null}
           <form ref={formRef} className="composer" onSubmit={(event) => void submit(event)}>
             <EvidencePicker
-              view={props.view}
-              artifacts={props.artifacts}
+              view={editor.view}
+              artifacts={editor.artifacts}
               legend="Evidence anchors for this human benchmark"
-              additionalRefs={props.snapshotRefs}
-              initialSelectedRefs={props.accepted.evidenceRefs}
+              additionalRefs={editor.snapshotRefs}
+              initialSelectedRefs={editor.accepted.evidenceRefs}
+              locked={intentLocked}
               roles
             />
             <label>
               Optional helpfulness dimensions, comma separated
-              <input className="login__input" name="helpfulnessDimensions" />
+              <input className="login__input" name="helpfulnessDimensions" disabled={intentLocked} />
             </label>
-            <p>Expected current benchmark version: {props.view.gold?.version ?? 0}.</p>
+            <p>Expected current benchmark version: {shownGoldVersion}.</p>
             <button className="login__submit" type="submit" disabled={pending || uncertain !== null}>
               {pending ? "Checking and promoting…" : "Promote accepted decision to gold"}
             </button>
@@ -1100,7 +1121,7 @@ function BenchmarkPromotion(props: {
       ) : null}
       {uncertain ? (
         <div className="experiment-lab__benchmark-recovery">
-          <p>The previous promotion outcome is unconfirmed or conflicted. The frozen selection remains in this form.</p>
+          <p>The previous promotion outcome is unconfirmed or conflicted. Its selection, roles, and dimensions stay locked in the benchmark form.</p>
           <button type="button" disabled={pending} onClick={() => void readHistory()}>
             Read current benchmark history
           </button>
@@ -1112,6 +1133,7 @@ function BenchmarkPromotion(props: {
               <button type="button" disabled={pending} onClick={() => {
                 uncertainRef.current = null;
                 setUncertain(null);
+                setFrozenEditor(null);
                 setReviewPermission(null);
                 setNotice("Frozen retry discarded. Review the current selection before submitting a new intent.");
               }}>
