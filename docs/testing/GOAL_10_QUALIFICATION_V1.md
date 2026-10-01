@@ -213,6 +213,14 @@ Ordinary type imports and a canonical public Runtime model close this without
 weakening the boundary checker. The 52-test affected suite then passed, and the
 required five timing/three browser processes were repeated on the correction.
 The correction is a normal follow-up commit, with reviewed history retained.
+The next full pass at `ea91f5a5` again passed typecheck/lint, 948 contracts and
+1,434 server tests with 19 environment skips. One web assertion failed because
+the exact public-export inventory still listed six exports before the reviewed
+label model was added (1,850 other web tests passed). The corrected inventory
+retains exact matching; a new assertion checks that the frozen model contains
+only the canonical parser/projector. Public-surface plus dependency-boundary
+qualification then passed 21 tests. Implementation semantics are unchanged
+from the final five timing and three browser runs.
 The final exact-head full result is reported in the draft PR body.
 
 Baseline root CI [36768372784](https://github.com/chriscase/ContextDesk/actions/runs/36768372784)
@@ -270,6 +278,7 @@ collab/web/src/investigations/runtime/controllers/use-artifact-annotations.test.
 collab/web/src/investigations/runtime/controllers/use-artifact-annotations.ts
 collab/web/src/investigations/runtime/gateway.test.ts
 collab/web/src/investigations/runtime/gateway.ts
+collab/web/src/investigations/runtime/public.test.ts
 collab/web/src/investigations/runtime/public.ts
 collab/web/src/investigations/runtime/testkit/fixtures.test.ts
 collab/web/src/investigations/strategies/investigation-first/InvestigationFirstStrategy.tsx

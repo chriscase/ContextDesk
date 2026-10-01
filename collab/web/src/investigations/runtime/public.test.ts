@@ -13,6 +13,7 @@ import type {
 } from "./public.js";
 import { MAX_ARTIFACT_ANNOTATION_BULK_IDS } from "./public.js";
 import * as publicRuntime from "./public.js";
+import {parseEvidenceLabel,projectEvidenceLabels} from "./annotation-contract.js";
 
 const STRATEGY_FACING_PROPS: InvestigationRuntimeProviderProps = {
   identityKey: "alice",
@@ -32,10 +33,18 @@ describe("investigation runtime public surface", () => {
       "InvestigationRuntimeProvider",
       "MAX_ARTIFACT_ANNOTATION_BULK_IDS",
       "MAX_EVIDENCE_UPLOAD_BYTES",
+      "evidenceLabelModel",
       "selectEvidenceInventory",
       "selectResourceView",
       "useInvestigationRuntime",
     ]);
+  });
+
+  it("exposes only frozen canonical label semantics in the presentation model", () => {
+    expect(Object.isFrozen(publicRuntime.evidenceLabelModel)).toBe(true);
+    expect(Object.keys(publicRuntime.evidenceLabelModel).sort()).toEqual(["parse", "project"]);
+    expect(publicRuntime.evidenceLabelModel.parse).toBe(parseEvidenceLabel);
+    expect(publicRuntime.evidenceLabelModel.project).toBe(projectEvidenceLabels);
   });
 
   it("gives strategies no transport-injection seam on the provider contract", () => {
