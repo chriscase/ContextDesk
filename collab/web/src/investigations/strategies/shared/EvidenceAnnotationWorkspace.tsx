@@ -1,7 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { StrategyActionRow, StrategyBadge, StrategyStateNotice } from "./presentation.js";
 
-import { parseEvidenceLabel, projectEvidenceLabels, type EvidenceLabelMutationV1 } from "../../runtime/annotation-contract.js";
+interface EvidenceLabelMutationView { readonly label: string; readonly operation: "add" | "remove" }
+interface EvidenceLabelEventView extends EvidenceLabelMutationView { readonly sequence: number; readonly intentKey: string }
 
 const MAX_BULK_IDS = 64;
 
@@ -17,7 +18,7 @@ interface AnnotationItem {
   readonly privacyClass: "owner_only" | "share_safe";
   readonly body?: string;
   readonly createdAt?: string;
-  readonly labelEvent?: import("../../runtime/annotation-contract.js").EvidenceLabelEventV1;
+  readonly labelEvent?: EvidenceLabelEventView;
 }
 
 interface AnnotationView {
@@ -37,7 +38,7 @@ interface BulkResult {
 
 type CommandResult = { readonly status: string; readonly value?: unknown; readonly error?: unknown };
 type BulkCommandInput = {
-  readonly labelMutation?: EvidenceLabelMutationV1;
+  readonly labelMutation?: EvidenceLabelMutationView;
   readonly artifactIds: readonly string[];
   readonly body: string;
   readonly privacyClass: "owner_only" | "share_safe";
@@ -47,6 +48,11 @@ type BulkCommand = (command: BulkCommandInput) => Promise<CommandResult>;
 type BulkMutation = { readonly status: "idle" | "running" | "succeeded" | "failed"; readonly error?: unknown };
 
 export interface EvidenceAnnotationWorkspaceProps {
+  /** Canonical semantics supplied through the public Runtime seam; no local truth model. */
+  readonly labelModel: {
+    readonly parse: (value: unknown) => string;
+    readonly project: (history: readonly AnnotationItem[]) => readonly {readonly artifactId: string; readonly label: string}[];
+  };
   /** Includes the focused case and identity so drafts cannot cross scopes. */
   readonly scopeKey: string;
   readonly readCompletion?: {readonly requested: number; readonly succeeded: number; readonly failed: number} | undefined;
@@ -101,6 +107,7 @@ function resultTone(outcome: BulkResultItem["outcome"]): "success" | "warning" |
  * authorization check, idempotency decision, and durable result.
  */
 export function EvidenceAnnotationWorkspace({
+  labelModel,
   scopeKey,
   readCompletion,
   evidence,
@@ -122,7 +129,7 @@ export function EvidenceAnnotationWorkspace({
     noteOperationRef.current = false;
     return await bulkCommand(input);
   };
-  const labelProps = {scopeKey, evidence, selectedArtifactIds, annotations, canAnnotate, canReadPrivate, readOnly, bulkCommand: labelCommand, bulkMutation, bulkErrorCopy, onRefresh, onClearSelection, ...(readCompletion === undefined ? {} : {readCompletion})};
+  const labelProps = {labelModel, scopeKey, evidence, selectedArtifactIds, annotations, canAnnotate, canReadPrivate, readOnly, bulkCommand: labelCommand, bulkMutation, bulkErrorCopy, onRefresh, onClearSelection, ...(readCompletion === undefined ? {} : {readCompletion})};
   const labels = useLabelIntent(labelProps);
   const bodyId = useId();
   const privacyId = useId();
@@ -369,7 +376,7 @@ export function EvidenceAnnotationWorkspace({
 }
 
 
-interface FrozenLabelIntent extends EvidenceLabelMutationV1 {
+interface FrozenLabelIntent extends EvidenceLabelMutationView {
   readonly artifactIds: readonly string[];
   readonly privacyClass: "owner_only" | "share_safe";
   readonly idempotencyKey: string;
@@ -387,10 +394,10 @@ export function useLabelIntent(props: EvidenceAnnotationWorkspaceProps) {
   const privacy = draft.epoch === epoch ? draft.privacy : props.canReadPrivate ? "owner_only" as const : "share_safe" as const;
   const available = props.annotations.availability === "available" && props.annotations.refresh !== "failed" && props.annotations.refresh !== "loading";
   const history = (available ? props.annotations.value ?? [] : []).filter(row => props.canReadPrivate || row.privacyClass !== "owner_only");
-  const current = projectEvidenceLabels(history);
+  const current = props.labelModel.project(history);
   const clock = props.readCompletion;
   const causal = shown.phase === "unknown" && clock !== undefined && clock.succeeded > shown.barrier && clock.succeeded === clock.requested && available;
-  const lane = projectEvidenceLabels(history.filter(row => row.privacyClass === shown.intent?.privacyClass));
+  const lane = props.labelModel.project(history.filter(row => row.privacyClass === shown.intent?.privacyClass));
   const proven = causal && shown.intent !== null && shown.intent.artifactIds.every(id => props.evidence.some(row => row.id === id)
     && lane.some(row => row.artifactId === id && row.label === shown.intent!.label) === (shown.intent!.operation === "add"));
   useEffect(() => {
@@ -399,7 +406,7 @@ export function useLabelIntent(props: EvidenceAnnotationWorkspaceProps) {
     setState({epoch,phase:"idle",intent:null,barrier:0,feedback:"Refreshed history confirms the desired label state; no second mutation was sent."});
   }, [proven, epoch]);
   let valid = false;
-  try { parseEvidenceLabel(text.trim()); valid = true; } catch { /* Strict contract disables invalid text. */ }
+  try { props.labelModel.parse(text.trim()); valid = true; } catch { /* Strict contract disables invalid text. */ }
   const ready = props.canAnnotate && !props.readOnly && props.bulkCommand !== null && available && props.bulkMutation.status !== "running"
     && props.selectedArtifactIds.length >= 1 && props.selectedArtifactIds.length <= MAX_BULK_IDS && new Set(props.selectedArtifactIds).size === props.selectedArtifactIds.length
     && props.selectedArtifactIds.every(id => props.evidence.some(row => row.id === id)) && valid && (privacy !== "owner_only" || props.canReadPrivate);

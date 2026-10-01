@@ -2,10 +2,11 @@ import {act,cleanup,fireEvent,render,renderHook,screen,waitFor} from "@testing-l
 import {useLayoutEffect} from "react";
 import {afterEach,describe,expect,it,vi} from "vitest";
 import {EvidenceAnnotationWorkspace,useLabelIntent,type EvidenceAnnotationWorkspaceProps} from "./EvidenceAnnotationWorkspace.js";
+import {evidenceLabelModel} from "../../runtime/public.js";
 afterEach(cleanup);
 const unknown={status:"failed",error:{kind:"unavailable",reason:"commit_outcome_unknown"}};
 function props(overrides:Partial<EvidenceAnnotationWorkspaceProps>={}):EvidenceAnnotationWorkspaceProps {
- return {scopeKey:"A:alice:authority1",evidence:[{id:"a",filename:"a.log",uri:null},{id:"b",filename:"b.log",uri:null}],selectedArtifactIds:["a","b"],annotations:{availability:"available",value:[],refresh:"settled"},canAnnotate:true,canReadPrivate:true,readOnly:false,bulkCommand:vi.fn(async(_input:unknown)=>unknown),bulkMutation:{status:"idle"},bulkErrorCopy:null,onRefresh:vi.fn(async()=>{}),onClearSelection:vi.fn(),readCompletion:{requested:1,succeeded:1,failed:-1},...overrides};
+ return {labelModel:evidenceLabelModel,scopeKey:"A:alice:authority1",evidence:[{id:"a",filename:"a.log",uri:null},{id:"b",filename:"b.log",uri:null}],selectedArtifactIds:["a","b"],annotations:{availability:"available",value:[],refresh:"settled"},canAnnotate:true,canReadPrivate:true,readOnly:false,bulkCommand:vi.fn(async(_input:unknown)=>unknown),bulkMutation:{status:"idle"},bulkErrorCopy:null,onRefresh:vi.fn(async()=>{}),onClearSelection:vi.fn(),readCompletion:{requested:1,succeeded:1,failed:-1},...overrides};
 }
 describe("mounted structured label workspace",()=>{
  it("freezes exact explicit operation and targets across selection changes, and requires a causal successful read after every unknown",async()=>{

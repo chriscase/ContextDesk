@@ -81,7 +81,9 @@ status, preventing false note warnings from an uncertain label result.
 durable notes/history, explicit add/remove and privacy controls, and truthful
 unavailable/stale/loading states. Investigation First retains its existing
 selection. Keystone adopts the same workspace through public Runtime and its
-existing working set. Both are mounted in the actual-server browser proof.
+existing working set. Both mounts supply a frozen canonical label model from
+Runtime; the shared kit owns structural view types and never imports wire
+contract behavior or maintains another label truth model. Both are mounted in the actual-server browser proof.
 Beacon has no compatible evidence selection; War Room's CaseBoard selection
 uses its separate existing transport rather than a Runtime annotation surface.
 Neither receives a parallel inventory or extra read for visual symmetry.
@@ -125,11 +127,11 @@ Required timing repeats run in five separate processes, 30/30 tests each
 
 | Run | Exit | Wall seconds |
 | --- | --- | --- |
-| 1 | 0 | 2.122 |
-| 2 | 0 | 1.921 |
-| 3 | 0 | 1.642 |
-| 4 | 0 | 2.099 |
-| 5 | 0 | 1.985 |
+| 1 | 0 | 1.263 |
+| 2 | 0 | 1.267 |
+| 3 | 0 | 1.248 |
+| 4 | 0 | 1.238 |
+| 5 | 0 | 1.243 |
 
 The next unused spec prefix is 44. The dedicated config has one worker and
 zero retries. With `CD_GOAL10_JOINED=1`, it starts the actual built server on a
@@ -147,13 +149,13 @@ Three independent final-source Chromium journeys passed with no retries:
 
 | Run | Exit | Wall seconds |
 | --- | --- | --- |
-| 1 | 0 | 5.338 |
-| 2 | 0 | 5.908 |
-| 3 | 0 | 5.443 |
+| 1 | 0 | 5.159 |
+| 2 | 0 | 3.688 |
+| 3 | 0 | 5.069 |
 
 [Sanitized narrow Keystone screenshot](../assets/goal10/keystone-narrow-forced-colors.png)
 was inspected for legibility, controls and overflow. Its SHA-256 is
-`dd9b6c7bbaed0557ebb73be324f805dab67eb9a72f715e6df865092187900386`.
+`445ed43ddc384db368e377dac5d57878f0815119441503f02cc118910d29c794`.
 The joined test explicitly skips without its real-server opt-in; a generic
 fixture-browser run is not this proof. The dedicated local qualification has
 no environment skips. The unchanged hosted fixture lane does not opt into it.
@@ -185,7 +187,9 @@ equivalent uncertain-result unlocking, retained retry after repeated unknown,
 canonical property-order binding, nullable SQL checks, and hidden quota oracle.
 The narrow follow-up on the defensive request snapshot, export messaging and
 note ownership found a stale note flag; its closure also preserved known-note
-failure feedback, with a mounted regression. Final reviewer disposition:
+failure feedback, with a mounted regression. A final narrow wiring recheck
+confirmed canonical semantics flow through public Runtime after the boundary
+correction, with no new finding. Final reviewer disposition:
 **no remaining actionable findings**. Source review is not test execution,
 independent hosted verification or a broad product acceptance claim.
 
@@ -200,6 +204,16 @@ note-feedback refinement was corrected after source review. Its first test
 invocation used the repository root instead of the collab workspace and failed
 to start; the corrected invocation passed. Earlier successful repeat runs were
 retained locally, then repeated after the final feedback correction.
+
+The first committed-candidate full pass at `da7632cd` passed typecheck/lint,
+948 contract tests and 1,434 server tests (19 environment skips), but failed one
+web architecture-boundary assertion (1,850 web tests passed). It reported three
+inline type imports and the shared kit's direct contract-behavior import.
+Ordinary type imports and a canonical public Runtime model close this without
+weakening the boundary checker. The 52-test affected suite then passed, and the
+required five timing/three browser processes were repeated on the correction.
+The correction is a normal follow-up commit, with reviewed history retained.
+The final exact-head full result is reported in the draft PR body.
 
 Baseline root CI [36768372784](https://github.com/chriscase/ContextDesk/actions/runs/36768372784)
 on the base is still attempt 1, completed/failure, Windows Rust shard 4 job
@@ -256,9 +270,11 @@ collab/web/src/investigations/runtime/controllers/use-artifact-annotations.test.
 collab/web/src/investigations/runtime/controllers/use-artifact-annotations.ts
 collab/web/src/investigations/runtime/gateway.test.ts
 collab/web/src/investigations/runtime/gateway.ts
+collab/web/src/investigations/runtime/public.ts
 collab/web/src/investigations/runtime/testkit/fixtures.test.ts
 collab/web/src/investigations/strategies/investigation-first/InvestigationFirstStrategy.tsx
 collab/web/src/investigations/strategies/keystone/KeystoneStrategy.tsx
+collab/web/src/investigations/strategies/shared/EvidenceAnnotationWorkspace.test.tsx
 collab/web/src/investigations/strategies/shared/EvidenceAnnotationWorkspace.tsx
 collab/web/src/investigations/strategies/shared/EvidenceLabelWorkspace.test.tsx
 collab/web/src/styles/investigation-strategy-shared.css

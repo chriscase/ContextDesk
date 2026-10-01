@@ -4,6 +4,7 @@ import {
   EvidenceAnnotationWorkspace,
   type EvidenceAnnotationWorkspaceProps,
 } from "./EvidenceAnnotationWorkspace.js";
+import {evidenceLabelModel} from "../../runtime/public.js";
 import type { ArtifactAnnotationV1, ArtifactAnnotationBulkResultV1, ArtifactV1, CommandOutcome } from "../../runtime/public.js";
 
 function artifact(id: string): ArtifactV1 {
@@ -52,6 +53,7 @@ function mount(overrides: Partial<EvidenceAnnotationWorkspaceProps> = {}) {
     },
   }));
   const props: EvidenceAnnotationWorkspaceProps = {
+    labelModel: evidenceLabelModel,
     scopeKey: "case-1\u0000alice",
     evidence: [artifact("artifact-a"), artifact("artifact-b"), artifact("artifact-c")],
     selectedArtifactIds: [],
@@ -147,6 +149,7 @@ describe("shared evidence annotation workspace", () => {
     expect(screen.getByRole("combobox", { name: "Privacy" }).getAttribute("disabled")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Save one note to selected evidence" }).getAttribute("disabled")).not.toBeNull();
     rerender(<EvidenceAnnotationWorkspace
+      labelModel={evidenceLabelModel}
       scopeKey={props.scopeKey}
       evidence={[artifact("artifact-a"), artifact("artifact-b"), artifact("artifact-c")]}
       selectedArtifactIds={["artifact-a", "artifact-b"]}

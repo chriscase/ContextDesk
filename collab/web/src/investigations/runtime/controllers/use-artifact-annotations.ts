@@ -1,6 +1,7 @@
 import type {
   ArtifactAnnotationBulkResultV1,
   ArtifactAnnotationV1,
+  EvidenceLabelMutationV1,
 } from "../annotation-contract.js";
 import type {
   CreateArtifactAnnotationsBulkInput,
@@ -404,7 +405,7 @@ export function useCreateArtifactAnnotation(
 }
 
 export interface CreateArtifactAnnotationsBulkCommand {
-  readonly labelMutation?: import("../annotation-contract.js").EvidenceLabelMutationV1;
+  readonly labelMutation?: EvidenceLabelMutationV1;
   /** The target set is submitted as one atomic server operation. */
   readonly artifactIds: readonly string[];
   readonly body: string;

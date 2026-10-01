@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  evidenceLabelModel,
   selectEvidenceInventory,
   selectResourceView,
   useInvestigationRuntime,
@@ -554,7 +555,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
             />
           </>
         ) : null}
-        <EvidenceAnnotationWorkspace scopeKey={scope} evidence={evidenceRows.map(row => row.evidence)} selectedArtifactIds={workingSet}
+        <EvidenceAnnotationWorkspace labelModel={evidenceLabelModel} scopeKey={scope} evidence={evidenceRows.map(row => row.evidence)} selectedArtifactIds={workingSet}
           annotations={selectResourceView(runtime.resources.artifactAnnotations)} readCompletion={runtime.resources.annotationReadCompletion}
           canAnnotate={runtime.capabilities.canContribute} canReadPrivate={runtime.capabilities.canReadPrivate} readOnly={!runtime.capabilities.canContribute}
           bulkCommand={runtime.commands.createArtifactAnnotations} bulkMutation={runtime.mutations.createArtifactAnnotations} bulkErrorCopy={null}

@@ -76,6 +76,7 @@ import {
 import type {
   ArtifactAnnotationBulkResultV1,
   ArtifactAnnotationV1,
+  EvidenceLabelMutationV1,
 } from "./annotation-contract.js";
 import { protectedApiFetch } from "../../protected-api.js";
 import {
@@ -205,7 +206,7 @@ export interface CreateArtifactAnnotationInput {
 
 /** Transport-ready input for one atomic, bounded annotation target set. */
 export interface CreateArtifactAnnotationsBulkInput {
-  readonly labelMutation?: import("./annotation-contract.js").EvidenceLabelMutationV1;
+  readonly labelMutation?: EvidenceLabelMutationV1;
   readonly artifactIds: readonly string[];
   readonly body: string;
   readonly privacyClass?: PrivacyClass;
