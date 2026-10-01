@@ -58,14 +58,22 @@ for(const backend of ["memory","sqlite","postgres"]) describe.skipIf(backend ===
     await cases.addArtifactAnnotationsBulk(c.id,actor,request([a.id],"reviewed","add"),"test",true);
     await cases.addArtifactAnnotationsBulk(c.id,actor,request([a.id,b.id],"Reviewed","remove"),"test",true);
     expect(projectEvidenceLabels(await cases.listArtifactAnnotations(c.id,actor,true,undefined,true))).toEqual([{artifactId:a.id,label:"reviewed"}]);
+    const previousSequence=Math.max(...(await cases.listArtifactAnnotations(c.id,actor,true,undefined,true)).filter(row=>row.artifactId===a.id && row.privacyClass==="share_safe").map(row=>row.labelEvent?.sequence ?? 0));
     const competing=await Promise.all([cases.addArtifactAnnotationsBulk(c.id,actor,request([a.id],"Competing","add"),"test",true),cases.addArtifactAnnotationsBulk(c.id,actor,request([a.id],"Competing","remove"),"test",true)]);
-    expect(competing.every(result=>result.items[0]?.outcome === "applied")).toBe(true);
+    expect(competing[0]?.items[0]?.outcome).toBe("applied");
+    const removeOutcome=competing[1]?.items[0]?.outcome;expect(["applied","already_desired"]).toContain(removeOutcome);
     const history=await cases.listArtifactAnnotations(c.id,actor,true,undefined,true);
+    const ordered=history.filter(row=>row.labelEvent?.label==="Competing").sort((x,y)=>x.labelEvent!.sequence-y.labelEvent!.sequence);
+    // Promise invocation order is not PostgreSQL lock-acquisition order. Both
+    // serializations are valid, but outcomes, durable order and projection must agree.
+    expect(ordered.map(row=>row.labelEvent?.operation)).toEqual(removeOutcome==="applied" ? ["add","remove"] : ["add"]);
+    expect(ordered.map(row=>row.labelEvent?.sequence)).toEqual(ordered.map((_,index)=>previousSequence+index+1));
+    const expectedCurrent=removeOutcome==="applied" ? [{artifactId:a.id,label:"reviewed"}] : [{artifactId:a.id,label:"Competing"},{artifactId:a.id,label:"reviewed"}];
     expect(history.filter(row=>row.labelEvent?.label === "Reviewed").map(row=>row.labelEvent?.operation).sort()).toEqual(["add","add","remove","remove"]);
-    expect(projectEvidenceLabels(history)).toEqual([{artifactId:a.id,label:"reviewed"}]);
+    expect(projectEvidenceLabels(history)).toEqual(expectedCurrent);
     expect(await store.listArtifactsByCase(c.id)).toEqual(before);
     const restored=reopen();expect(await restored.listArtifactAnnotations(c.id,actor,true,undefined,true)).toEqual(history);
-    expect(projectEvidenceLabels(await restored.listArtifactAnnotations(c.id,actor,true,undefined,true))).toEqual([{artifactId:a.id,label:"reviewed"}]);
+    expect(projectEvidenceLabels(await restored.listArtifactAnnotations(c.id,actor,true,undefined,true))).toEqual(expectedCurrent);
     expect(await Promise.all([a.id,b.id].map(id=>restored.getArtifactBytes(c.id,id,actor,true,true,1024)))).toEqual(bytesBefore);
     if(database) {
       const stored=await database.query("SELECT * FROM artifact_annotations WHERE artifact_id=$1 LIMIT 1",[a.id]);const row=stored.rows[0];

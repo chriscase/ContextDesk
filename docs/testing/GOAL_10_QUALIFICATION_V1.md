@@ -213,6 +213,29 @@ range clean with it (exit 0). The mounted regression still passed all 10 tests.
 This normal follow-up corrects an actual qualification gate and preserves
 published history. It is not a recursive commit to record prior CI.
 
+## Hosted competing-intent assertion correction
+
+Initial push [collab-qualify 36836867098](https://github.com/chriscase/ContextDesk/actions/runs/36836867098)
+failed one PostgreSQL label assertion at the published `14ddbeb8`; the same-head
+PR qualification 36836901579 succeeded. The assertion assumed concurrent add
+would acquire the case lock before remove. PostgreSQL may correctly serialize
+remove first (already desired) then add (applied). The corrected test accepts
+either serialization while requiring the corresponding exact event operations,
+contiguous durable lane sequences, explicit expected current labels and the
+same state after reopen. All 10 focused backend tests passed. The same bounded
+reviewer confirmed the correction preserves ordering/projection proof. There
+is no product-semantic change or hidden test retry.
+
+A local final qualification invocation at `5bd3f21f` restarted the owned
+PostgreSQL fixture on its default port while tests targeted its original port;
+102 connection-refused server tests failed (1,332 passed, 19 environment skips).
+The port was corrected and readiness checked. The resumed exact-head suite
+passed 948 contracts, 1,434 server tests (19 environment skips), 1,852 web tests,
+build/type/documentation checks and five timing/three real-server browser runs.
+The original failed invocation is retained locally and not represented as a
+successful run. The final corrected-test head and its repeated qualification
+are recorded in the draft PR description.
+
 ## Prior failures, independent blockers and nonclaims
 
 Development failures remain visible: initial TypeScript union/envelope errors
