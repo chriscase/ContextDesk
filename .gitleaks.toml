@@ -77,3 +77,12 @@ id = "generic-api-key"
   regexTarget = "line"
   regexes = ['''idempotencyKey: "(?:judgment-key-0001|judgment-key-0002|judgment-empty-contradicts-01|judgment-held-0001|judgment-owner-positive-01|judgment-at-cap-0001)"''']
   paths = ['''^collab/server/src/modules/import/judgment\.test\.ts$''']
+
+  # Goal 10's first published mounted test used a literal idempotency marker.
+  # It cannot authenticate; retained history requires this exact secret/path match.
+  [[rules.allowlists]]
+  description = "Historical synthetic Goal 10 label intent marker (not a credential)"
+  condition = "AND"
+  regexTarget = "secret"
+  regexes = ['^fixture-label-0001$']
+  paths = ['^collab/web/src/investigations/strategies/shared/EvidenceLabelWorkspace\.test\.tsx$']

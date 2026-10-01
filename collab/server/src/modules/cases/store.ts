@@ -129,8 +129,11 @@ export interface ArtifactRow {
   intakeBatchId?: string | null;
 }
 
+import { parseEvidenceLabelEvent, type EvidenceLabelEventV1 } from "@cd-collab/contracts";
+
 /** Durable, insert-only annotation attached to one evidence artifact. */
 export interface ArtifactAnnotationRow {
+  labelEvent?: EvidenceLabelEventV1;
   id: string;
   caseId: string;
   artifactId: string;
@@ -1598,7 +1601,7 @@ export class PgCaseStore implements CaseStore {
   async listArtifactAnnotationsByCase(caseId: string): Promise<ArtifactAnnotationRow[]> {
     const result = await this.db.query(
       `SELECT id, case_id, artifact_id, body, content_hash, privacy_class,
-              author_id, author_username, created_at, source_id
+              author_id, author_username, created_at, source_id, label_event
        FROM artifact_annotations
        WHERE case_id = $1
        ORDER BY created_at ASC, id ASC`,
@@ -1662,8 +1665,8 @@ export class PgCaseStore implements CaseStore {
     await this.db.query(
       `INSERT INTO artifact_annotations (
          id, case_id, artifact_id, body, content_hash, privacy_class,
-         author_id, author_username, created_at, source_id
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+         author_id, author_username, created_at, source_id, label_event
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         row.id,
         row.caseId,
@@ -1675,6 +1678,7 @@ export class PgCaseStore implements CaseStore {
         row.authorUsername,
         row.createdAt,
         row.sourceId,
+        row.labelEvent === undefined ? null : JSON.stringify(parseEvidenceLabelEvent(row.labelEvent)),
       ],
     );
   }
@@ -2428,6 +2432,7 @@ function asArtifact(row: Record<string, unknown>): ArtifactRow {
 
 function asArtifactAnnotation(row: Record<string, unknown>): ArtifactAnnotationRow {
   return {
+    ...(row.label_event == null ? {} : { labelEvent: parseEvidenceLabelEvent(row.label_event) }),
     id: String(row.id),
     caseId: String(row.case_id),
     artifactId: String(row.artifact_id),

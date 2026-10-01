@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
+  evidenceLabelModel,
   selectEvidenceInventory,
   selectResourceView,
   useInvestigationRuntime,
@@ -191,7 +192,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const evidenceInventory = selectEvidenceInventory(runtime.resources.evidence, runtime.resources.contributions);
   const artifactAnnotationView = selectResourceView(runtime.resources.artifactAnnotations);
   const artifactAnnotations = artifactAnnotationView.availability === "available"
-    ? artifactAnnotationView.value
+    ? artifactAnnotationView.value.filter(row => row.labelEvent === undefined)
     : [];
   const artifactAnnotationsByEvidence = useMemo(() => {
     const byEvidence = new Map<string, ArtifactAnnotationV1[]>();
@@ -545,8 +546,9 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           })}
         </ul>
       ) : null}
-      <EvidenceAnnotationWorkspace
-        scopeKey={`${props.focusCaseId ?? "none"}\u0000${runtime.identity.id}\u0000${runtime.identity.username}`}
+      <EvidenceAnnotationWorkspace labelModel={evidenceLabelModel}
+        scopeKey={`${runtime.presentationScopeKey}\u0000${props.focusCaseId ?? "none"}\u0000${runtime.identity.id}\u0000${runtime.identity.username}`}
+        readCompletion={runtime.resources.annotationReadCompletion}
         evidence={inventory.availability === "available" ? inventory.value.map(({ evidence }) => evidence) : []}
         selectedArtifactIds={selectedEvidence}
         annotations={artifactAnnotationView}

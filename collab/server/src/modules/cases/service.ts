@@ -1,3 +1,4 @@
+import { MAX_EVIDENCE_LABEL_EVENTS_PER_CASE, parseArtifactAnnotation, projectEvidenceLabels } from "@cd-collab/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   ARTIFACT_ANNOTATION_SCHEMA_ID,
@@ -1699,9 +1700,11 @@ export class CaseService {
     }, this.audit);
   }
 
-  async listTimeline(caseId: string): Promise<TimelineRow[]> {
+  async listTimeline(caseId: string, canReadPrivate = false): Promise<TimelineRow[]> {
     await this.requireCase(caseId);
-    return this.store.listTimeline(caseId);
+    const artifacts = new Map((await this.store.listArtifactsByCase(caseId)).map(row => [row.id,row]));
+    return (await this.store.listTimeline(caseId)).filter(row => row.kind !== "artifact_label_changed"
+      || canReadPrivate || (JSON.parse(row.payload).privacyClass !== "owner_only" && artifacts.get(row.targetId ?? "")?.privacyClass === "share_safe"));
   }
 
   async listContributions(
@@ -1728,12 +1731,18 @@ export class CaseService {
   ): Promise<ArtifactAnnotationV1[]> {
     if (!(await this.getCase(caseId, actor, isAdmin))) return [];
     const annotations = await this.store.listArtifactAnnotationsByCase(caseId);
+    const artifacts = new Map((await this.store.listArtifactsByCase(caseId)).map(row => [row.id,row]));
     return annotations
+      .filter(row => row.labelEvent === undefined || (artifacts.has(row.artifactId) && (canReadPrivate || artifacts.get(row.artifactId)!.privacyClass !== "owner_only")))
       .filter((row) => artifactId === undefined || row.artifactId === artifactId)
       // Annotation privacy follows the same fail-closed rule as private
       // evidence: case membership alone must not disclose owner-only text.
       .filter((row) => row.privacyClass !== "owner_only" || canReadPrivate)
-      .map((row) => this.toArtifactAnnotation(row));
+      .map((row) => parseArtifactAnnotation(this.toArtifactAnnotation(row)));
+  }
+
+  async hasLabelHistory(caseId: string): Promise<boolean> {
+    return (await this.store.listArtifactAnnotationsByCase(caseId)).some(row => row.labelEvent !== undefined);
   }
 
   async addArtifactAnnotation(
@@ -1837,9 +1846,13 @@ export class CaseService {
     actor: Actor,
     input: ArtifactAnnotationBulkRequestV1,
     origin: string,
+    canReadPrivate = false,
   ): Promise<ArtifactAnnotationBulkResultV1> {
     if (!isRfc4122Uuid(caseId)) throw new ContractViolation("$.caseId", "must be an RFC 4122 UUID");
-    const request = parseArtifactAnnotationBulkRequest(input);
+    const parsed = parseArtifactAnnotationBulkRequest(input);
+    const request = Object.freeze({...parsed, artifactIds: [...parsed.artifactIds],
+      ...(parsed.labelMutation === undefined ? {} : {labelMutation: Object.freeze({label:parsed.labelMutation.label,operation:parsed.labelMutation.operation})})});
+    if (request.labelMutation !== undefined && request.privacyClass === "owner_only" && !canReadPrivate) throw new Error("label authority unavailable");
     const clientTime = canonicalClientTime(request.clientTime);
     const privacy = defaultPrivacy(request.privacyClass);
     const requestArtifactIds = [...request.artifactIds];
@@ -1847,12 +1860,12 @@ export class CaseService {
     return this.store.withAtomic(async () => {
       if (!(await this.store.lockCase(caseId))) throw new Error("case not found");
       const sourceId = await this.resolveSourceId(actor, request.sourceId);
-      const digest = artifactAnnotationBulkWriteDigest({
+      const digest = request.labelMutation === undefined ? artifactAnnotationBulkWriteDigest({
         artifactIds,
         body: request.body,
         privacyClass: privacy,
         sourceId,
-      });
+      }) : createHash("sha256").update(JSON.stringify({artifactIds, label: request.labelMutation.label, operation: request.labelMutation.operation, privacy, sourceId})).digest("hex");
       await this.store.lockArtifactAnnotationBulkIdempotency(caseId, actor.id, request.idempotencyKey);
       const existing = await this.store.getArtifactAnnotationBulkIdempotency(
         caseId,
@@ -1862,13 +1875,15 @@ export class CaseService {
       if (existing) {
         if (existing.requestDigest !== digest) throw new ArtifactAnnotationConflictError();
         const stored = parseArtifactAnnotationBulkResult(JSON.parse(existing.resultJson));
+        const accessible = request.labelMutation === undefined ? null : new Set((await this.store.getArtifactsByIds(artifactIds)).filter(row => row.caseId === caseId && (canReadPrivate || row.privacyClass !== "owner_only")).map(row => row.id));
         const byArtifactId = new Map(stored.items.map((item) => [item.artifactId, item]));
         return {
           ...stored,
           items: requestArtifactIds.map((artifactId) => {
             const item = byArtifactId.get(artifactId);
             if (!item) throw new Error("artifact annotation bulk result is incomplete");
-            return item.outcome === "not_found"
+            if (accessible !== null && !accessible.has(artifactId)) return {artifactId, outcome: "not_found" as const};
+            return item.outcome === "not_found" || item.outcome === "already_desired"
               ? item
               : { ...item, outcome: "replayed" as const };
           }),
@@ -1877,21 +1892,41 @@ export class CaseService {
 
       const found = new Map(
         (await this.store.getArtifactsByIds(artifactIds))
-          .filter((artifact) => artifact.caseId === caseId)
+          .filter((artifact) => artifact.caseId === caseId && (request.labelMutation === undefined || canReadPrivate || artifact.privacyClass !== "owner_only"))
           .map((artifact) => [artifact.id, artifact]),
       );
       const createdAt = new Date().toISOString();
+      const history = request.labelMutation === undefined ? [] : await this.store.listArtifactAnnotationsByCase(caseId);
+      const caseArtifacts = new Map((request.labelMutation === undefined ? [] : await this.store.listArtifactsByCase(caseId)).map(row => [row.id,row]));
+      const isPublic = (artifactId: string, eventPrivacy: PrivacyClass) => eventPrivacy === "share_safe" && caseArtifacts.get(artifactId)?.privacyClass === "share_safe";
+      let publicEventCount = history.filter(row => row.labelEvent !== undefined && isPublic(row.artifactId,row.privacyClass)).length;
+      let protectedEventCount = history.filter(row => row.labelEvent !== undefined && !isPublic(row.artifactId,row.privacyClass)).length;
+      const lane = history.filter(row => row.privacyClass === privacy).map(row => this.toArtifactAnnotation(row));
+      const current = projectEvidenceLabels(lane);
       const result: ArtifactAnnotationBulkResultV1 = {
         schemaId: ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
         caseId,
         items: [],
+        ...(request.labelMutation === undefined ? {} : {labelMutation: request.labelMutation, privacyClass: privacy, idempotencyKey: request.idempotencyKey}),
       };
       for (const artifactId of artifactIds) {
+        let sequence = 0;
         if (!found.has(artifactId)) {
           result.items.push({ artifactId, outcome: "not_found" });
           continue;
         }
+        if (request.labelMutation !== undefined) {
+          const present = current.some(row => row.artifactId === artifactId && row.label === request.labelMutation!.label);
+          if (present === (request.labelMutation.operation === "add")) {
+            result.items.push({artifactId, outcome: "already_desired"});
+            continue;
+          }
+          sequence = 1 + Math.max(0,...history.filter(row => row.artifactId === artifactId && row.privacyClass === privacy).flatMap(row => row.labelEvent ? [row.labelEvent.sequence] : []));
+          const eventCount = isPublic(artifactId,privacy) ? ++publicEventCount : ++protectedEventCount;
+          if (eventCount > MAX_EVIDENCE_LABEL_EVENTS_PER_CASE) throw new ContractViolation("$.labelMutation", "case label history limit reached; no writes committed");
+        }
         const row: ArtifactAnnotationRow = {
+          ...(request.labelMutation === undefined ? {} : {labelEvent: {...request.labelMutation, sequence, intentKey: request.idempotencyKey}}),
           id: randomUUID(),
           caseId,
           artifactId,
@@ -1907,9 +1942,12 @@ export class CaseService {
         };
         await this.store.insertArtifactAnnotation(row);
         const annotation = this.toArtifactAnnotation(row);
-        result.items.push({ artifactId, outcome: "created", annotation });
+        result.items.push({ artifactId, outcome: request.labelMutation === undefined ? "created" : "applied", annotation });
+        // Private labels stay in their protected append-only history. Public activity
+        // never receives an event whose existence/count would disclose private metadata.
+        if (request.labelMutation === undefined || (privacy === "share_safe" && found.get(artifactId)!.privacyClass === "share_safe")) {
         await this.store.appendTimeline(caseId, {
-          kind: "artifact_annotation_created",
+          kind: request.labelMutation === undefined ? "artifact_annotation_created" : "artifact_label_changed",
           actor,
           targetId: artifactId,
           clientTime,
@@ -1921,6 +1959,7 @@ export class CaseService {
             bulk: true,
           },
         });
+        }
       }
       await this.store.insertArtifactAnnotationBulkIdempotency({
         caseId,
@@ -3454,6 +3493,7 @@ export class CaseService {
   private toArtifactAnnotation(row: ArtifactAnnotationRow): ArtifactAnnotationV1 {
     return {
       schemaId: ARTIFACT_ANNOTATION_SCHEMA_ID,
+      ...(row.labelEvent === undefined ? {} : {labelEvent: row.labelEvent}),
       id: row.id,
       caseId: row.caseId,
       artifactId: row.artifactId,

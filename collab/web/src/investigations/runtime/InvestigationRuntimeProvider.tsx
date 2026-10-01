@@ -123,6 +123,7 @@ export interface InvestigationRuntimeResources {
   readonly lifecycle: ResourceState<InvestigationLifecycleV1>;
   readonly coordination: ResourceState<InvestigationCoordinationV1>;
   readonly artifactAnnotations: ResourceState<readonly ArtifactAnnotationV1[]>;
+  readonly annotationReadCompletion?: {readonly requested: number; readonly succeeded: number; readonly failed: number};
   readonly externalRunJudgments: ResourceState<ExternalRunJudgmentListV1>;
   readonly externalRunJudgmentsRunId: string | null;
   /** Optional for older injected Runtime snapshots; absent never proves a fresh read. */
@@ -640,7 +641,7 @@ export function InvestigationRuntimeProvider({
       // confirmed rows locally may iterate the bounded result, but it never
       // schedules one request per target.
       for (const item of result.items) {
-        if (item.outcome !== "not_found") {
+        if (item.outcome !== "not_found" && item.outcome !== "already_desired") {
           artifactAnnotationsController.publish(item.annotation);
         }
       }
@@ -821,6 +822,7 @@ export function InvestigationRuntimeProvider({
       coordination: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : coordinationController.coordination,
+      annotationReadCompletion: artifactAnnotationsController.readCompletion,
       artifactAnnotations: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : artifactAnnotationsController.annotations,
@@ -945,6 +947,7 @@ export function InvestigationRuntimeProvider({
     activeInvestigation.refreshInvestigation,
     activeInvestigation.refreshLifecycle,
     artifactAnnotationsController.annotations,
+    artifactAnnotationsController.readCompletion,
     artifactAnnotationsController.refresh,
     activeInvestigation.scopeDenied,
     activeMissingFromAuthoritativeList,

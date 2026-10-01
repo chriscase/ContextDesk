@@ -582,3 +582,16 @@ describe("useCreateArtifactAnnotationsBulk", () => {
     });
   });
 });
+
+describe("bulk annotation render-time scope epoch",()=>{
+  it("refuses callbacks retained across authority and A→B→A replacement",async()=>{
+    const opts=bulkOptions();const hook=renderHook(options=>useCreateArtifactAnnotationsBulk(options),{initialProps:opts});
+    const retained=hook.result.current.create;
+    const command={artifactIds:[RUNTIME_FIXTURE_IDS.evidence],body:"add: Exact",labelMutation:{label:"Exact",operation:"add" as const},privacyClass:"share_safe" as const,idempotencyKey:"render-label-0001"};
+    hook.rerender({...opts,authorityKey:"replacement"});
+    await act(async()=>{expect(await retained(command)).toEqual({status:"ignored",reason:"stale"});});
+    hook.rerender(opts);
+    await act(async()=>{expect(await retained(command)).toEqual({status:"ignored",reason:"stale"});});
+    expect(opts.gateway.createArtifactAnnotationsBulk).not.toHaveBeenCalled();
+  });
+});

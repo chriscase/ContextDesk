@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  evidenceLabelModel,
   selectEvidenceInventory,
   selectResourceView,
   useInvestigationRuntime,
@@ -15,6 +16,7 @@ import {
 } from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
+  EvidenceAnnotationWorkspace,
   StrategyActionRow,
   StrategyBadge,
   CollectionPagination,
@@ -553,12 +555,17 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
             />
           </>
         ) : null}
+        <EvidenceAnnotationWorkspace labelModel={evidenceLabelModel} scopeKey={scope} evidence={evidenceRows.map(row => row.evidence)} selectedArtifactIds={workingSet}
+          annotations={selectResourceView(runtime.resources.artifactAnnotations)} readCompletion={runtime.resources.annotationReadCompletion}
+          canAnnotate={runtime.capabilities.canContribute} canReadPrivate={runtime.capabilities.canReadPrivate} readOnly={!runtime.capabilities.canContribute}
+          bulkCommand={runtime.commands.createArtifactAnnotations} bulkMutation={runtime.mutations.createArtifactAnnotations} bulkErrorCopy={null}
+          onRefresh={runtime.refresh.artifactAnnotations} onClearSelection={() => setWorkingSetState({scope,ids:[]})} />
         <div className="keystone-strategy__working-set" aria-labelledby="keystone-working-set-title">
           <div>
             <h4 ref={workingSetHeadingRef} id="keystone-working-set-title" tabIndex={-1}>Working set</h4>
             <p>
               Temporary for this signed-in identity and investigation. Selection alone sends nothing;
-              cited evidence IDs are submitted only when you explicitly record a hypothesis.
+              evidence IDs are submitted only when you explicitly record a hypothesis, save a note, or add/remove a label.
             </p>
           </div>
           {workingSet.length === 0 ? <span>No evidence selected</span> : (

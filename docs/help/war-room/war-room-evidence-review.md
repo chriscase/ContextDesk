@@ -24,6 +24,40 @@ before accepting a claim.
 
 ![Evidence remains visible through Capture, snapshot-bound analysis, comparison, and a human-owned decision](../assets/war-room-stage-flow.svg)
 
+## Structured labels and shared evidence review
+
+Goal 10 is a draft integration awaiting independent review. Investigation First
+and Keystone share the existing evidence annotation workspace. In Investigation
+First, select evidence rows; in Keystone, select the evidence working set. A
+single label operation supports 1–64 files. Bulk notes were already shipped.
+
+Review **Current labels** separately from **Durable history**. Enter one exact
+label (1–120 trimmed, safe single-line characters), choose its privacy, and
+explicitly select **Add label** or **Remove label**. Labels are case-sensitive:
+`Reviewed` and `reviewed` are different. Exact duplicates collapse in the current
+set. Removing a label appends history; it does not erase the earlier add. Add
+and remove affect the selected privacy class, preserving the other class.
+
+Labels can reveal investigation meaning. Owner-only history requires the
+existing private-evidence read capability. Files, bytes, identity, provenance,
+case membership, ownership and evidence privacy do not change. Selection alone
+writes nothing. Stale or unavailable history blocks label writes.
+
+An uncertain response freezes the original files, label, operation, privacy and
+retry identity. Selection changes do not alter that intent. Refresh history
+started after the uncertain response. If the desired state is confirmed, no
+second write is sent; otherwise explicitly retry the same frozen operation.
+Another uncertain result requires another later successful read.
+
+This portable archive version cannot carry label history. Exact portable export
+refuses a case containing durable labels; an incoming archive claiming label
+history cannot obtain exact apply authorization. The refusal preserves metadata
+instead of silently dropping it. Ordinary trusted export handoff, human
+assessments and owner-only benchmark handoff remain separate. Label search and
+facets, aliases, taxonomy, AI labeling, and portable label round-trip are future
+scope. Beacon has no compatible selected-evidence surface, and War Room uses
+its direct technical-tools transport; neither gets a parallel inventory here.
+
 ## Manual intake checklist
 
 | Check | Acceptable record | Stop and review when |

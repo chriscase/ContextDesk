@@ -76,6 +76,7 @@ import {
 import type {
   ArtifactAnnotationBulkResultV1,
   ArtifactAnnotationV1,
+  EvidenceLabelMutationV1,
 } from "./annotation-contract.js";
 import { protectedApiFetch } from "../../protected-api.js";
 import {
@@ -205,6 +206,7 @@ export interface CreateArtifactAnnotationInput {
 
 /** Transport-ready input for one atomic, bounded annotation target set. */
 export interface CreateArtifactAnnotationsBulkInput {
+  readonly labelMutation?: EvidenceLabelMutationV1;
   readonly artifactIds: readonly string[];
   readonly body: string;
   readonly privacyClass?: PrivacyClass;
@@ -579,6 +581,7 @@ function createArtifactAnnotationsBulkBody(
     schemaId: ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
     artifactIds: Array.from(artifactIds, (artifactId) => artifactId),
     body: input.body,
+    ...(input.labelMutation === undefined ? {} : {labelMutation: {...input.labelMutation}}),
     idempotencyKey: input.idempotencyKey,
   };
   if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
@@ -1428,7 +1431,7 @@ function annotationBulkIdentity(
       || returned.has(item.artifactId)
     ) return false;
     returned.add(item.artifactId);
-    if (item.outcome === "not_found") continue;
+    if (item.outcome === "not_found" || item.outcome === "already_desired") continue;
     if (
       item.annotation.caseId !== investigationId
       || item.annotation.artifactId !== item.artifactId
@@ -2113,7 +2116,9 @@ export const investigationGateway: InvestigationGatewayWithWrites
       fetched.response,
       signal,
       parseArtifactAnnotationBulkResult,
-      (value) => annotationBulkIdentity(investigationId, artifactIds, value),
+      (value) => annotationBulkIdentity(investigationId, artifactIds, value)
+        && value.labelMutation?.label === input.labelMutation?.label && value.labelMutation?.operation === input.labelMutation?.operation
+        && (input.labelMutation === undefined || (value.privacyClass === input.privacyClass && value.idempotencyKey === input.idempotencyKey)),
     );
   },
 

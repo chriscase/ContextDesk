@@ -209,6 +209,7 @@ function portableErrorMessage(status: number, code: string | null = null): strin
   if (status === 401 || status === 403) {
     return "Your current account is not authorized to check portable investigation archives.";
   }
+  if (code === "label_history_unsupported") return "This portable archive version cannot carry structured evidence label history. Exact export was refused; no archive was downloaded.";
   if (code === "unsupported_state") {
     return "This investigation contains state the portable archive cannot represent exactly. Human assessments are one possible cause. No archive was prepared.";
   }
