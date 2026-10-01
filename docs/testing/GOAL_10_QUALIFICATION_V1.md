@@ -193,6 +193,26 @@ correction, with no new finding. Final reviewer disposition:
 **no remaining actionable findings**. Source review is not test execution,
 independent hosted verification or a broad product acceptance claim.
 
+## Hosted synthetic-marker false positive
+
+The initial PR [CI run 36836901583](https://github.com/chriscase/ContextDesk/actions/runs/36836901583/job/110286381928)
+failed `generic-api-key` on one historical literal label intent marker in the
+mounted test at `da7632cd`. It is solely a synthetic idempotency identity,
+not a credential, token grant or authentication material. The published source
+was safe; the automated finding is retained as a prior failure.
+
+Following [the repository false-positive process](../DEV.md#false-positive-process),
+the current fixture uses a lower-entropy marker. Retained history requires a
+`generic-api-key` exception with exact secret value AND exact test-file path;
+no entire file, other value, other rule or production credential is exempted.
+The existing bounded reviewer independently confirmed the marker cannot
+authenticate and that exception scope is exact. Official gitleaks 8.24.3,
+with its release checksum verified, reproduced exactly one historical finding
+without the exception (exit 2) and scanned the same three-commit first-parent
+range clean with it (exit 0). The mounted regression still passed all 10 tests.
+This normal follow-up corrects an actual qualification gate and preserves
+published history. It is not a recursive commit to record prior CI.
+
 ## Prior failures, independent blockers and nonclaims
 
 Development failures remain visible: initial TypeScript union/envelope errors
@@ -221,7 +241,13 @@ retains exact matching; a new assertion checks that the frozen model contains
 only the canonical parser/projector. Public-surface plus dependency-boundary
 qualification then passed 21 tests. Implementation semantics are unchanged
 from the final five timing and three browser runs.
-The final exact-head full result is reported in the draft PR body.
+At `14ddbeb8`, all eight final steps passed: typecheck/lint, 948 contract tests,
+1,434 server tests with 19 absent Garage/OpenLDAP environment skips, 1,852 web
+tests, contracts/web/server builds, e2e typecheck, Help/handbook checks and one
+real-server Chromium confirmation (zero retries). This revision was published
+normally to draft PR #1189 before the hosted scanner identified the fixture
+false positive described below. Final published-head qualification is in the
+PR description; no evidence-only CI follow-up commit is required.
 
 Baseline root CI [36768372784](https://github.com/chriscase/ContextDesk/actions/runs/36768372784)
 on the base is still attempt 1, completed/failure, Windows Rust shard 4 job
@@ -248,6 +274,7 @@ commit's manifest is rechecked before publication. No lockfile, private recovery
 archive, raw log, local database or credential file is included.
 
 ```text
+.gitleaks.toml
 collab/contracts/schemas/artifact-annotation-bulk-request.v1.json
 collab/contracts/schemas/artifact-annotation-bulk-result.v1.json
 collab/contracts/schemas/artifact-annotation-list.v1.json

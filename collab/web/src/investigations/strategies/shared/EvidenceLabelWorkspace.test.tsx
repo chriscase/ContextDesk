@@ -53,7 +53,7 @@ describe("mounted structured label workspace",()=>{
  it("recovers committed desired state from later history with no second mutation and hides revoked private labels",async()=>{
   const command=vi.fn(async(_input:unknown)=>unknown);let p=props({bulkCommand:command});const view=render(<EvidenceAnnotationWorkspace {...p}/>);
   fireEvent.change(screen.getByLabelText("Exact label"),{target:{value:"Private meaning"}});fireEvent.click(screen.getByRole("button",{name:"Add label to selected evidence"}));await screen.findByText("Label outcome is unknown");
-  p={...p,readCompletion:{requested:2,succeeded:2,failed:-1},annotations:{availability:"available",refresh:"settled",value:["a","b"].map(artifactId=>({id:artifactId,artifactId,privacyClass:"owner_only",labelEvent:{label:"Private meaning",operation:"add",sequence:1,intentKey:"fixture-label-0001"}}))}};
+  p={...p,readCompletion:{requested:2,succeeded:2,failed:-1},annotations:{availability:"available",refresh:"settled",value:["a","b"].map(artifactId=>({id:artifactId,artifactId,privacyClass:"owner_only",labelEvent:{label:"Private meaning",operation:"add",sequence:1,intentKey:"test-00000000"}}))}};
   view.rerender(<EvidenceAnnotationWorkspace {...p}/>);await screen.findByText(/no second mutation was sent/);expect(command).toHaveBeenCalledTimes(1);
   p={...p,canReadPrivate:false};view.rerender(<EvidenceAnnotationWorkspace {...p}/>);expect(screen.queryByText(/add label “Private meaning”/)).toBeNull();expect(screen.queryByText(/Current labels: Private meaning/)).toBeNull();expect(screen.getByLabelText("Exact label").getAttribute("value")).toBe("");
  });
