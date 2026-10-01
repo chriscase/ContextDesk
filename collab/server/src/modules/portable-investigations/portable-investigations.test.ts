@@ -622,6 +622,24 @@ describe("portable investigation service", () => {
       .toBe(true);
   });
 
+  it("refuses exact export from authoritative label history even without public activity, and blocks incoming lossy label claims", async () => {
+    const row = await fixture();
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    await row.cases.addArtifactAnnotationsBulk(row.caseId, ACTOR, {
+      schemaId: "cd-collab.artifact_annotation_bulk_request.v1", artifactIds: [row.evidenceId],
+      body: "add: Private meaning", labelMutation: {label: "Private meaning", operation: "add"}, privacyClass: "owner_only", idempotencyKey: "portable-label-0001",
+    }, "test", true);
+    expect((await row.caseStore.listTimeline(row.caseId)).some(event => event.kind === "artifact_label_changed")).toBe(false);
+    await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({code: "label_history_unsupported"});
+    const last = original.investigation.timeline.at(-1)!;
+    const archive = resealArchive(original, investigation => {investigation.timeline.push({...last,seq:last.seq+1,kind:"artifact_label_changed",targetNamespace:"evidence",targetId:row.evidenceId});});
+    const preview = await row.portable.preflight(archive,{mode:"dry_run",collisionPolicy:"remap_deterministic",identityMap:identityMapFor(archive)},ACTOR,false);
+    expect(preview.report.exactReconstruction).toBe(false);
+    expect(preview.report.reconstructionReasons).toContainEqual(expect.objectContaining({detail:"structured evidence label history cannot round-trip in this archive version"}));
+    expect(preview.apply).toMatchObject({confirmationToken:null,reason:"exact_reconstruction_required"});
+    await expect(row.portable.apply(archive,{confirmationToken:"unissued-label-token",typedConfirmation:PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,collisionPolicy:"remap_deterministic",identityMap:identityMapFor(archive)},ACTOR,false)).rejects.toMatchObject({code:"confirmation_invalid"});
+  });
+
   it("refuses export when judgment timeline exists without portable judgment rows", async () => {
     const row = await fixture();
     await row.caseStore.appendTimeline(row.caseId, {

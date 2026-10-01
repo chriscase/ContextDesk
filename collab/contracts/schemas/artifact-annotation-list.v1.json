@@ -4,13 +4,47 @@
   "title": "cd-collab Artifact Annotation List v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaId", "caseId", "annotations"],
+  "required": [
+    "schemaId",
+    "caseId",
+    "annotations"
+  ],
   "properties": {
-    "schemaId": { "type": "string", "const": "cd-collab.artifact_annotation_list.v1" },
-    "caseId": { "type": "string" },
+    "schemaId": {
+      "type": "string",
+      "const": "cd-collab.artifact_annotation_list.v1"
+    },
+    "caseId": {
+      "type": "string"
+    },
     "annotations": {
       "type": "array",
-      "items": { "$ref": "#/$defs/annotation" }
+      "items": {
+        "$ref": "#/$defs/annotation"
+      }
+    },
+    "currentLabels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifactId",
+          "label"
+        ],
+        "properties": {
+          "artifactId": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "Exact trimmed single-line text; controls and invisible/bidi formatting rejected by the canonical parser."
+          }
+        }
+      },
+      "description": "Deterministic projection of visible event history, validated by the canonical parser."
     }
   },
   "$defs": {
@@ -31,17 +65,79 @@
         "sourceId"
       ],
       "properties": {
-        "schemaId": { "type": "string", "const": "cd-collab.artifact_annotation.v1" },
-        "id": { "type": "string" },
-        "caseId": { "type": "string" },
-        "artifactId": { "type": "string" },
-        "body": { "type": "string", "minLength": 1 },
-        "contentHash": { "type": "string" },
-        "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
-        "authorId": { "type": "string" },
-        "authorUsername": { "type": "string" },
-        "createdAt": { "type": "string" },
-        "sourceId": { "type": "string" }
+        "schemaId": {
+          "type": "string",
+          "const": "cd-collab.artifact_annotation.v1"
+        },
+        "id": {
+          "type": "string"
+        },
+        "caseId": {
+          "type": "string"
+        },
+        "artifactId": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "privacyClass": {
+          "type": "string",
+          "enum": [
+            "owner_only",
+            "share_safe"
+          ]
+        },
+        "authorId": {
+          "type": "string"
+        },
+        "authorUsername": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "sourceId": {
+          "type": "string"
+        },
+        "labelEvent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "label",
+            "operation",
+            "sequence",
+            "intentKey"
+          ],
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "description": "Exact trimmed single-line text; controls and invisible/bidi formatting rejected by the canonical parser."
+            },
+            "operation": {
+              "enum": [
+                "add",
+                "remove"
+              ]
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 25000,
+              "description": "Artifact/privacy-lane order, independent of hidden events."
+            },
+            "intentKey": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$"
+            }
+          }
+        }
       }
     }
   }

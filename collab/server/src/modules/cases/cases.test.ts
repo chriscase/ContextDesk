@@ -202,6 +202,25 @@ async function login(
 }
 
 describe("cases timeline evidence provenance", () => {
+  it("revokes label read/write authority immediately and keeps private label activity out of public projections", async () => {
+    await withApp(async ({app,domain,roles,caseStore}) => {
+      const alice = await login(app,"alice",ALICE); const actor=users().get("alice")!.identity;
+      const c=await domain.createCase(actor,{title:"Private label revocation"},"test");
+      const a=(await domain.addEvidence(c.id,actor,{kind:"attachment",filename:"safe.txt",bytes:new Uint8Array([1]),summary:"Synthetic",privacyClass:"share_safe"},"test")).artifact;
+      const payload={schemaId:ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,artifactIds:[a.id],body:"add: Private meaning",labelMutation:{label:"Private meaning",operation:"add"},privacyClass:"owner_only",idempotencyKey:"private-label-0001"};
+      const post=()=>app.inject({method:"POST",url:`/api/cases/${c.id}/evidence/annotations`,headers:{cookie:alice},payload});
+      expect((await post()).statusCode).toBe(403);
+      roles.set("cn=contributors,ou=groups,dc=example,dc=test","case-lead");expect((await post()).statusCode).toBe(200);
+      const get=()=>app.inject({method:"GET",url:`/api/cases/${c.id}/evidence/annotations`,headers:{cookie:alice}});
+      expect(parseArtifactAnnotationList(JSON.parse((await get()).body)).currentLabels).toEqual([{artifactId:a.id,label:"Private meaning"}]);
+      roles.set("cn=contributors,ou=groups,dc=example,dc=test","contributor");
+      const revoked=parseArtifactAnnotationList(JSON.parse((await get()).body));expect(revoked.annotations).toEqual([]);expect(revoked.currentLabels).toEqual([]);expect((await post()).statusCode).toBe(403);
+      expect((await caseStore.listTimeline(c.id)).some(event=>event.kind === "artifact_label_changed")).toBe(false);
+      expect((await domain.listRecentActivity(actor,false,1)).some(event=>event.kind === "artifact_label_changed")).toBe(false);
+      expect(await caseStore.listArtifactAnnotationsByCase(c.id)).toHaveLength(1);
+    });
+  });
+
   it("canonically hashes the bulk target set with durable resolved fields", () => {
     const first = "10000000-0000-4000-8000-000000000001";
     const second = "20000000-0000-4000-8000-000000000002";

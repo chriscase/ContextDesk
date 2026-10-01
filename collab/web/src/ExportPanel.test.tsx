@@ -667,6 +667,19 @@ describe("export panel", () => {
     vi.useRealTimers();
   });
 
+  it("explains exact label-history refusal and does not download a lossy archive", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      if (String(input) === "/api/cases/case-safe/export/inventory") return jsonResponse(true,{caseId:"case-safe",items:[]});
+      if (String(input) === "/api/portable-investigations/capabilities") return jsonResponse(true,PORTABLE_CAPABILITIES);
+      return jsonResponse(false,{error:"label_history_unsupported"},422);
+    }));
+    const createObjectURL=vi.fn();vi.stubGlobal("URL",{createObjectURL,revokeObjectURL:vi.fn()});
+    render(<ExportPanel caseId="case-safe" canWrite canLead />);
+    const button=await screen.findByRole("button",{name:"Download portable investigation archive"});
+    await waitFor(()=>expect((button as HTMLButtonElement).disabled).toBe(false));fireEvent.click(button);
+    expect(await screen.findByText(/Exact export was refused; no archive was downloaded/)).toBeTruthy();expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
   it("explains unsupported assessment history when the server refuses a portable download", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo) => {
       const url = String(input);

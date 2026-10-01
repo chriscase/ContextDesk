@@ -4,10 +4,19 @@
   "title": "cd-collab Artifact Annotation Bulk Result v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaId", "caseId", "items"],
+  "required": [
+    "schemaId",
+    "caseId",
+    "items"
+  ],
   "properties": {
-    "schemaId": { "const": "cd-collab.artifact_annotation_bulk_result.v1" },
-    "caseId": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "schemaId": {
+      "const": "cd-collab.artifact_annotation_bulk_result.v1"
+    },
+    "caseId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
     "items": {
       "type": "array",
       "minItems": 1,
@@ -18,24 +27,97 @@
           {
             "type": "object",
             "additionalProperties": false,
-            "required": ["artifactId", "outcome", "annotation"],
+            "required": [
+              "artifactId",
+              "outcome",
+              "annotation"
+            ],
             "properties": {
-              "artifactId": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
-              "outcome": { "enum": ["created", "replayed"] },
-              "annotation": { "$ref": "artifact-annotation.v1.json" }
+              "artifactId": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              },
+              "outcome": {
+                "enum": [
+                  "created",
+                  "replayed",
+                  "applied"
+                ]
+              },
+              "annotation": {
+                "$ref": "artifact-annotation.v1.json"
+              }
             }
           },
           {
             "type": "object",
             "additionalProperties": false,
-            "required": ["artifactId", "outcome"],
+            "required": [
+              "artifactId",
+              "outcome"
+            ],
             "properties": {
-              "artifactId": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
-              "outcome": { "const": "not_found" }
+              "artifactId": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              },
+              "outcome": {
+                "const": "not_found"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "artifactId",
+              "outcome"
+            ],
+            "properties": {
+              "artifactId": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              },
+              "outcome": {
+                "const": "already_desired"
+              }
             }
           }
         ]
       }
+    },
+    "labelMutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "operation"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Exact trimmed single-line text; controls and invisible/bidi formatting rejected by the canonical parser."
+        },
+        "operation": {
+          "enum": [
+            "add",
+            "remove"
+          ]
+        }
+      }
+    },
+    "privacyClass": {
+      "enum": [
+        "owner_only",
+        "share_safe"
+      ]
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$"
     }
-  }
+  },
+  "description": "Canonical parser additionally enforces exact target set, intent/operation/privacy/key/event binding and already_desired only for a label intent."
 }

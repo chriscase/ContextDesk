@@ -94,7 +94,7 @@ describe("Runtime V1 deterministic testkit", () => {
     ]);
     expect(result.items.map((item) => item.artifactId)).toEqual(request.artifactIds);
     expect(result.items.every((item) =>
-      item.outcome === "not_found"
+      item.outcome === "not_found" || item.outcome === "already_desired"
       || (item.annotation.caseId === result.caseId && item.annotation.artifactId === item.artifactId),
     )).toBe(true);
   });

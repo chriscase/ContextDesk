@@ -26,3 +26,6 @@ export type {
   ArtifactAnnotationListV1,
   ArtifactAnnotationV1,
 } from "@cd-collab/contracts/evidence-annotations";
+
+export { parseEvidenceLabel, parseEvidenceLabelMutation, projectEvidenceLabels, MAX_EVIDENCE_LABEL_LENGTH } from "@cd-collab/contracts/evidence-annotations";
+export type { EvidenceLabelMutationV1, EvidenceLabelEventV1 } from "@cd-collab/contracts/evidence-annotations";

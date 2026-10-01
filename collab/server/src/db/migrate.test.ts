@@ -34,7 +34,8 @@ describe("migration versions", () => {
     expect(versions).toContain("030_source_catalog_mutations");
     expect(versions).toContain("031_external_run_import_atomic");
     expect(versions).toContain("032_external_run_judgments");
-    expect(latestMigrationVersion()).toBe("032_external_run_judgments");
+    expect(versions).toContain("033_evidence_label_events");
+    expect(latestMigrationVersion()).toBe("033_evidence_label_events");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -43,7 +44,7 @@ describe("migration versions", () => {
     // localeCompare ordering is what the runner applies, so assert on it
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
-    expect(versions.slice(-8)).toEqual([
+    expect(versions.slice(-9)).toEqual([
       "025_artifact_annotations",
       "026_artifact_annotation_write_intents",
       "027_artifact_annotation_bulk_write_intents",
@@ -52,6 +53,7 @@ describe("migration versions", () => {
       "030_source_catalog_mutations",
       "031_external_run_import_atomic",
       "032_external_run_judgments",
+      "033_evidence_label_events",
     ]);
   });
 
@@ -488,6 +490,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
         "external_run_judgments",
       ]);
 
+      expect((await migrateDown(client)).rolledBack).toBe("033_evidence_label_events");
       expect((await migrateDown(client)).rolledBack).toBe("032_external_run_judgments");
       expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       const strictImportColumnsAfterRollback = await client.query<{ column_name: string }>(
@@ -736,6 +739,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("enforces strict imported-run marker and replay-intent durability", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("033_evidence_label_events");
       expect((await migrateDown(client)).rolledBack).toBe("032_external_run_judgments");
       await client.query(`
         INSERT INTO cases (id, title, severity, status, created_by, created_by_username)
@@ -831,6 +835,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("refuses judgment rollback while immutable judgment history exists", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("033_evidence_label_events");
       await client.query(`
         INSERT INTO cases (id, title, severity, status, created_by, created_by_username)
         VALUES (
@@ -887,6 +892,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("refuses catalog rollback when an immutable success intent exists without deleting it", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("033_evidence_label_events");
       expect((await migrateDown(client)).rolledBack).toBe("032_external_run_judgments");
       expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       await client.query(`
@@ -922,6 +928,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("excludes concurrent writers from both coordination tables during the rollback guard", async () => {
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("033_evidence_label_events");
       expect((await migrateDown(client)).rolledBack).toBe("032_external_run_judgments");
       expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       const catalogRollback = await migrateDown(client);

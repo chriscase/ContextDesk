@@ -2517,6 +2517,7 @@ describe("artifact annotation runtime seam", () => {
       expect(Object.isFrozen(result.value.items[0])).toBe(true);
       expect(
         result.value.items[0]?.outcome === "not_found"
+          || result.value.items[0]?.outcome === "already_desired"
           || Object.isFrozen(result.value.items[0]?.annotation),
       ).toBe(true);
     }

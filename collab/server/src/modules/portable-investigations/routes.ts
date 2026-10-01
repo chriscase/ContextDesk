@@ -242,7 +242,7 @@ export async function registerPortableInvestigationRoutes(
 function portableError(
   reply: { code: (status: number) => unknown },
   error: unknown,
-): { error: string } {
+): { error: string; detail?: string } {
   if (!(error instanceof PortableServerError)) {
     void reply.code(422);
     return { error: "portable_archive_invalid" };
@@ -250,6 +250,10 @@ function portableError(
   if (error.code === "not_found") {
     void reply.code(404);
     return { error: "not_found" };
+  }
+  if (error.code === "label_history_unsupported") {
+    void reply.code(422);
+    return {error: "label_history_unsupported", detail: "This portable archive version cannot carry structured label history. Exact export refused."};
   }
   if (error.code === "archive_size_limit") {
     void reply.code(413);

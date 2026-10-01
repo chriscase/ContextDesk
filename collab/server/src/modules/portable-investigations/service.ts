@@ -90,6 +90,7 @@ export type PortableServerErrorCode =
   | "not_found"
   | "archive_size_limit"
   | "unsupported_state"
+  | "label_history_unsupported"
   | "integrity_failure"
   | "archive_invalid"
   | "apply_refused"
@@ -667,6 +668,9 @@ function applySupportReasons(
   if (bundle.discussions.length > 0) {
     block("$.investigation.discussions", "discussion containers are unsupported");
   }
+  if (bundle.timeline.some(row => row.kind === "artifact_label_changed")) {
+    block("$.investigation.timeline", "structured evidence label history cannot round-trip in this archive version");
+  }
   if (bundle.timeline.some((row) => row.kind === "run_corroboration")) {
     block(
       "$.investigation.timeline",
@@ -716,6 +720,11 @@ export class PortableInvestigationService {
   ): Promise<PortableArchiveV1> {
     const caseRow = await this.deps.cases.getCase(caseId, actor, isAdmin);
     if (!caseRow) throw new PortableServerError("not_found", "investigation not found");
+    // Refusal is uniform for every case: checking hidden label existence would itself leak metadata.
+    if (!canReadPrivate) throw new PortableServerError("unsupported_state", "exact portable export requires private-evidence read authority");
+    if (await this.deps.cases.hasLabelHistory(caseId)) {
+      throw new PortableServerError("label_history_unsupported", "this portable archive version cannot carry structured label history; exact export refused");
+    }
     if (await this.deps.imports.caseHasStoredJudgments(caseId)) {
       throw new PortableServerError("unsupported_state", "external-run judgments are not exact-applyable");
     }
