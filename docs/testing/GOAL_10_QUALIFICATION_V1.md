@@ -6,6 +6,60 @@ This receipt records the focused evidence on the source that precedes that
 commit; committing the receipt does not change the qualified implementation.
 No evidence-only follow-up is required to record hosted checks.
 
+## Rust 1.99 Clippy compatibility follow-up — 2026-10-12
+
+The user explicitly authorized a narrow compatibility correction on PR #1189
+after reviewing `df204fc63914fef6b4dd014b26b3f82293b21f7f`. That head closed
+both Goal 10 concurrency blockers and completed
+[Goal 10 qualification 38191447597](https://github.com/chriscase/ContextDesk/actions/runs/38191447597),
+but its 48 completed checks contained 40 successes and eight failures.
+[Root CI 38191447605](https://github.com/chriscase/ContextDesk/actions/runs/38191447605)
+finished red; its scanner and all three platform Rust test aggregates passed.
+Seven direct job failures came from Rust 1.99.0 Clippy `double_must_use` on
+`async-trait` 0.1.89 expansions; the eighth was the dependent triage aggregate.
+This supersedes the earlier publication-time pending root-CI snapshot.
+
+The correction permits only `clippy::double_must_use`, with an explicit reason,
+on `TriageEngine::preflight`, `TriageEngine::execute` and
+`DemoLogInstallBackend::ingest`. The macro adds `#[must_use]` to the already
+must-use boxed Future. The allowance is method-scoped: synchronous trait
+methods, implementations and other lints retain their existing policy.
+There is no runtime logic, dependency, lockfile, toolchain or CI-policy change.
+The frozen goal and both concurrency fixes are unchanged. The historical
+Windows temporary-corpus cleanup test remains untouched.
+
+Local verification uses Rust/Clippy 1.99.0 with `-D warnings`:
+
+- The actual runtime crate failed before the correction with both expected
+  macro diagnostics, then passed `cargo clippy --locked --offline
+  -p cd-triage-runtime --all-targets -- -D warnings`.
+- One all-targets Clippy invocation covering `cd-triage-sdk`,
+  `cd-triage-runtime`, `cd-triage-bench`, `cd-triage-bench-adapter` and
+  `cd-triage-bench-adapter-cli` passed with `--locked --offline -- -D warnings`.
+- `cargo test --locked --offline -p cd-triage-runtime` passed its two dependency
+  direction tests and 14 runtime facade tests; there were no skips or retries.
+- An isolated extraction of the actual demo backend trait, using the locked
+  macro and stub host types, failed exactly `double_must_use` without the
+  allowance and compiled cleanly with it. This is macro-scope evidence, not
+  full Tauri host acceptance; the actual host is validated by hosted CI.
+- Root and nested-host formatting checks and `git diff --check` passed.
+  The local compiler wrapper was disabled because sandbox permissions prevent
+  its process from starting; no repository or CI wrapper setting was changed.
+
+The final candidate carries this receipt and only the two Rust source additions
+to the prior 48-file manifest, giving 50 changed files. Fresh applicable hosted
+checks must run on that candidate. The exact published head/tree, observed
+qualification checkout/parents/tree, final run links, counts and residuals are
+recorded in the [draft PR's execution record](https://github.com/chriscase/ContextDesk/pull/1189)
+after execution, without recursive commits whose only purpose is to name their
+own SHA. Earlier runs remain historical evidence. This receipt does not treat
+local trait extraction or earlier-head CI as final-head host acceptance.
+
+Handbook impact: none for this compatibility follow-up — only macro lint
+attributes change. The existing Goal 10 handbook correction remains applicable.
+The PR stays open, draft and unmerged; no other PR/issue closure, release,
+history rewrite or successor work is authorized.
+
 ## Independent review corrections and requalification — 2026-10-11
 
 The independent review of published `7a90ee3868fe4afe3ee91c39445cf288919469ba`
@@ -424,6 +478,8 @@ collab/web/src/investigations/strategies/shared/EvidenceAnnotationWorkspace.test
 collab/web/src/investigations/strategies/shared/EvidenceAnnotationWorkspace.tsx
 collab/web/src/investigations/strategies/shared/EvidenceLabelWorkspace.test.tsx
 collab/web/src/styles/investigation-strategy-shared.css
+crates/cd-triage-runtime/src/lib.rs
+desktop/src-tauri/src/lib.rs
 docs/assets/goal10/keystone-narrow-forced-colors.png
 docs/design/PROVEN_METHODS.md
 docs/design/WAR_ROOM_CONTINUOUS_DELIVERY_BACKLOG.md
