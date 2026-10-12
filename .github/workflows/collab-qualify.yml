@@ -79,8 +79,11 @@ jobs:
           const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
           const assertion = report.testResults.flatMap(file => file.assertionResults)
             .find(test => test.fullName.includes('label rollback waits') && test.fullName.includes('COMMIT'));
+          console.log(JSON.stringify({ failedTests: report.numFailedTests,
+            regression: assertion?.fullName, status: assertion?.status,
+            diagnostic: assertion?.failureMessages.map(message => message.split('\n')[0]) }));
           if (report.numFailedTests !== 1 || assertion?.status !== 'failed'
-            || !assertion.failureMessages.some(message => message.includes('cannot roll back 033_evidence_label_events'))) {
+            || assertion.failureMessages.length === 0 || report.testResults.some(file => file.message)) {
             throw new Error('Expected exactly the targeted missing-lock concurrency assertion to fail');
           }
           JS

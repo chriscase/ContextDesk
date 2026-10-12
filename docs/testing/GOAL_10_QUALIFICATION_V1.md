@@ -65,6 +65,26 @@ recursive evidence-only commits. At correction publication those runs are
 pending. Prior successful source heads below are historical evidence, not
 acceptance of this updated head.
 
+The first correction head `961804abfe6ee71ae8db8cd1c5c1a33001669e34` completed
+the real-PostgreSQL hosted full pass: 948 contracts, 1,440 server tests with
+19 environment skips, and 1,852 web tests, plus typecheck/lint/build. Both new
+migration races ran and passed. [Qualification run 38190880190](https://github.com/chriscase/ContextDesk/actions/runs/38190880190)
+then failed in the newly added mutation-report gate after the mutant Vitest
+process returned nonzero. That gate required particular assertion-message
+wording; the bounded follow-up validates the named failed regression, failure
+count, nonempty diagnostics and absence of collection errors instead. The test's
+history/payload assertions and both product fixes remain unchanged. The first
+failed qualification is retained; five hosted repeats and three browser runs
+were skipped there and are not claimed. Final-head hosted qualification is
+recorded in the PR description after execution.
+
+Other first-correction hosted residuals are also retained: Windows source
+acceptance timed out in the unchanged snapshot-fixture JSON-schema test;
+the three Rust triage lanes failed the current stable Clippy
+`double_must_use` diagnostic at `crates/cd-triage-runtime/src/lib.rs:249`,
+whose source matches the frozen base. No unrelated test, Rust source or
+toolchain policy is changed in this correction.
+
 Handbook impact: the investigation-loop chapter and status matrix now explain
 the final export recheck and the writer-excluding downgrade guard. The only
 new path relative to the original 47-file manifest is
