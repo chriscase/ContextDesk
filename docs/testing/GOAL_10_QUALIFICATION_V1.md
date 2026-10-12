@@ -19,7 +19,7 @@ Seven direct job failures came from Rust 1.99.0 Clippy `double_must_use` on
 `async-trait` 0.1.89 expansions; the eighth was the dependent triage aggregate.
 This supersedes the earlier publication-time pending root-CI snapshot.
 
-The correction permits only `clippy::double_must_use`, with an explicit reason,
+The initial correction permits only `clippy::double_must_use`, with an explicit reason,
 on `TriageEngine::preflight`, `TriageEngine::execute` and
 `DemoLogInstallBackend::ingest`. The macro adds `#[must_use]` to the already
 must-use boxed Future. The allowance is method-scoped: synchronous trait
@@ -27,6 +27,34 @@ methods, implementations and other lints retain their existing policy.
 There is no runtime logic, dependency, lockfile, toolchain or CI-policy change.
 The frozen goal and both concurrency fixes are unchanged. The historical
 Windows temporary-corpus cleanup test remains untouched.
+
+The first compatibility head `1e794a759ab12bf52dc83920df93dcbac403d06c`
+passed all three triage workflows, both actual Tauri hosts, collaboration and
+[Goal 10 qualification 38285752372](https://github.com/chriscase/ContextDesk/actions/runs/38285752372).
+Its qualification checkout was `42a7dc5db97b45c8c94f4660ad67a73196776d39`,
+with the published `49fb1ddc5b2db32dd09f821f53fd923a380efcd4` tree and
+independently verified parents frozen base + that source head. It repeated the
+948/1,440/1,852 full-suite pass (19 unrelated server environment skips), five
+backend passes of 15, five client passes of 30, three Chromium journeys without
+retries, and the load-bearing missing-lock mutation/restoration check.
+
+The [macOS workspace Clippy job](https://github.com/chriscase/ContextDesk/actions/runs/38285752231/job/114933790452)
+then reached code previously masked by the runtime crate's compile failure and
+reported nine identical diagnostics: `ChatBackend::{complete,complete_streaming}`,
+`EmbedBackend::embed`, `ObjectStore::{put,get,head,list}`,
+`RerankBackend::rerank` and `BackupConfirmationGate::confirm`. This failed
+first compatibility run is retained rather than represented as overall green.
+An inventory of the remaining macro traits found the same cause on
+`TriageProductionHooks::{validate,correction_messages,finalize}`; an isolated
+extraction reproduced exactly three diagnostics before the allowance and
+compiled cleanly afterward, including its default async method body.
+
+The bounded follow-up applies the same method-level allowance to those twelve
+methods, for fifteen async methods across eight existing traits in total.
+Stripping only these attributes reproduces the frozen-base source byte-for-byte
+in all eight files. No synchronous method, implementation, test, default body,
+dependency, lockfile or CI/toolchain policy is changed. The final hosted pass
+validates the complete workspaces after those masked diagnostics are removed.
 
 Local verification uses Rust/Clippy 1.99.0 with `-D warnings`:
 
@@ -46,8 +74,8 @@ Local verification uses Rust/Clippy 1.99.0 with `-D warnings`:
   The local compiler wrapper was disabled because sandbox permissions prevent
   its process from starting; no repository or CI wrapper setting was changed.
 
-The final candidate carries this receipt and only the two Rust source additions
-to the prior 48-file manifest, giving 50 changed files. Fresh applicable hosted
+The final candidate carries this receipt and only the eight Rust source additions
+to the prior 48-file manifest, giving 56 changed files. Fresh applicable hosted
 checks must run on that candidate. The exact published head/tree, observed
 qualification checkout/parents/tree, final run links, counts and residuals are
 recorded in the [draft PR's execution record](https://github.com/chriscase/ContextDesk/pull/1189)
@@ -478,7 +506,13 @@ collab/web/src/investigations/strategies/shared/EvidenceAnnotationWorkspace.test
 collab/web/src/investigations/strategies/shared/EvidenceAnnotationWorkspace.tsx
 collab/web/src/investigations/strategies/shared/EvidenceLabelWorkspace.test.tsx
 collab/web/src/styles/investigation-strategy-shared.css
+crates/cd-core/src/agent.rs
+crates/cd-core/src/embed.rs
+crates/cd-core/src/object_store.rs
+crates/cd-core/src/rerank.rs
+crates/cd-core/src/workspace_backup.rs
 crates/cd-triage-runtime/src/lib.rs
+crates/cd-workflow/src/triage_production_runner.rs
 desktop/src-tauri/src/lib.rs
 docs/assets/goal10/keystone-narrow-forced-colors.png
 docs/design/PROVEN_METHODS.md

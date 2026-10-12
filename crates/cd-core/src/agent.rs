@@ -22,6 +22,10 @@ use tokio::time::Instant;
 #[async_trait]
 pub trait ChatBackend: Send + Sync {
     /// Complete one turn (buffered).
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn complete(
         &self,
         messages: &[ChatMessage],
@@ -30,6 +34,10 @@ pub trait ChatBackend: Send + Sync {
 
     /// Streaming complete: call `on_text` for each text fragment as it arrives.
     /// Default: buffered complete then one-shot text emit.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn complete_streaming(
         &self,
         messages: &[ChatMessage],

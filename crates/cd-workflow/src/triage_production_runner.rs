@@ -124,6 +124,10 @@ impl TriageValidationDecision {
 #[async_trait]
 pub trait TriageProductionHooks: Send + Sync {
     /// Validate one raw completion against host state.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn validate(
         &self,
         slot: &CompiledRoleSlotV2,
@@ -133,6 +137,10 @@ pub trait TriageProductionHooks: Send + Sync {
     ) -> TriageValidationDecision;
 
     /// Return a correction prompt, or `None` when no correction is warranted.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn correction_messages(
         &self,
         slot: &CompiledRoleSlotV2,
@@ -146,6 +154,10 @@ pub trait TriageProductionHooks: Send + Sync {
     /// authoritative answer envelope. The hook must perform the normal
     /// `AnswerEnvelopeV1`/ledger validation itself; returning `None` keeps the
     /// honest-partial deterministic floor.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn finalize(
         &self,
         _slot: &CompiledRoleSlotV2,
