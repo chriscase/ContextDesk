@@ -125,7 +125,11 @@ Render-time scope epochs and handler tokens reject retained callbacks, including
 identity/authority replacement and A→B→A before passive cleanup.
 
 Portable v1 does not represent labels. Exact export refuses authoritative label
-history (including removed/private history); dry-run blocks an incoming label
+history (including removed/private history), rechecking after assembly because
+protected label commits do not change the public timeline. Migration 033 locks
+the annotation table before its downgrade guard: a concurrent committed label
+refuses rollback and preserves its payload; an aborted insert permits rollback.
+Dry-run blocks an incoming label
 history claim and issues no apply token. Existing trusted handoff, assessments
 and benchmark file export are preserved. Label facets and portable round-trip
 are separately deferred. See [Goal 10](../../goals/10-STRUCTURED-EVIDENCE-LABELS.md)

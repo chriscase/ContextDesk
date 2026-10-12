@@ -925,6 +925,67 @@ describe.skipIf(!adminUrl())("migrations", () => {
     });
   });
 
+  it.each(["COMMIT", "ROLLBACK"] as const)("label rollback waits for an in-flight writer to %s before checking history", async (resolution) => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      await client.query(`
+        INSERT INTO cases (id, title, severity, status, created_by, created_by_username)
+        VALUES ('11111111-1111-4111-8111-111111111111', 'Synthetic label rollback',
+                'low', 'open', 'synthetic-actor', 'synthetic-actor');
+        INSERT INTO evidence_artifacts (id, case_id, kind, filename, privacy_class, uploader_id, uploader_username)
+        VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111',
+                'log', 'synthetic.log', 'owner_only', 'synthetic-actor', 'synthetic-actor');
+      `);
+      const rollbackPid = (await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      const writer = new Client({ connectionString: url });
+      await writer.connect();
+      let writerOpen = false;
+      let rollback: ReturnType<typeof migrateDown> | null = null;
+      try {
+        await writer.query("BEGIN");
+        writerOpen = true;
+        await writer.query(`
+          INSERT INTO artifact_annotations (id, case_id, artifact_id, body, content_hash, privacy_class,
+            author_id, author_username, source_id, label_event)
+          VALUES ('33333333-3333-4333-8333-333333333333', '11111111-1111-4111-8111-111111111111',
+            '22222222-2222-4222-8222-222222222222', 'add: Private meaning', $1, 'owner_only',
+            'synthetic-actor', 'synthetic-actor', '00000000-0000-0000-0000-000000000001', $2)
+        `, ["a".repeat(64), JSON.stringify({ label: "Private meaning", operation: "add", sequence: 1, intentKey: "migration-label-race-0001" })]);
+        rollback = migrateDown(client);
+        const settled = rollback.then((value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+        let waiting = false;
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const locks = await writer.query(`
+            SELECT 1 FROM pg_locks WHERE pid = $1 AND relation = 'artifact_annotations'::regclass
+              AND mode = 'AccessExclusiveLock' AND NOT granted
+          `, [rollbackPid]);
+          if (locks.rowCount) { waiting = true; break; }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(waiting, "rollback must wait for the writer before its history decision").toBe(true);
+        await writer.query(resolution);
+        writerOpen = false;
+        const outcome = await settled;
+        if (resolution === "COMMIT") {
+          expect(outcome).toMatchObject({ value: null, error: { message: expect.stringMatching(/cannot roll back 033_evidence_label_events while label history exists/) } });
+          expect((await writer.query("SELECT label_event FROM artifact_annotations")).rows).toEqual([
+            { label_event: { label: "Private meaning", operation: "add", sequence: 1, intentKey: "migration-label-race-0001" } },
+          ]);
+          expect((await writer.query("SELECT version FROM schema_migrations WHERE version = '033_evidence_label_events'")).rowCount).toBe(1);
+          expect((await writer.query("SELECT to_regclass('artifact_label_event_case_sequence') AS index")).rows[0]?.index).not.toBeNull();
+        } else {
+          expect(outcome).toMatchObject({ value: { rolledBack: "033_evidence_label_events" }, error: null });
+          expect((await writer.query("SELECT id FROM artifact_annotations")).rows).toEqual([]);
+          expect((await writer.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'artifact_annotations' AND column_name = 'label_event'")).rows).toEqual([]);
+        }
+      } finally {
+        if (writerOpen) await writer.query("ROLLBACK");
+        await rollback?.catch(() => undefined);
+        await writer.end();
+      }
+    });
+  });
+
   it("excludes concurrent writers from both coordination tables during the rollback guard", async () => {
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);

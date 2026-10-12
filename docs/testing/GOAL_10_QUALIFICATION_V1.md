@@ -6,6 +6,72 @@ This receipt records the focused evidence on the source that precedes that
 commit; committing the receipt does not change the qualified implementation.
 No evidence-only follow-up is required to record hosted checks.
 
+## Independent review corrections and requalification — 2026-10-11
+
+The independent review of published `7a90ee3868fe4afe3ee91c39445cf288919469ba`
+found two blockers that supersede the earlier historical “no remaining actionable
+findings” disposition below. This correction retains the frozen Goal 10 hash,
+base, scope and draft publication boundary.
+
+- Exact portable export now rechecks authoritative label history after assembly
+  and its final asynchronous judgment read. Protected label commits deliberately
+  leave the case/public timeline unchanged, so those consistency checks alone
+  cannot prove the absence of label history. A newly committed label produces
+  `label_history_unsupported`; no lossy archive reaches dry-run/apply.
+- Migration 033 takes `ACCESS EXCLUSIVE` on `artifact_annotations` before its
+  history guard. An in-flight insert must commit or abort before the decision.
+  A committed label refuses downgrade with its payload, index and migration
+  version retained; an aborted insert permits the empty-history downgrade.
+
+Four export races cover both privacy classes on a private artifact, with
+explicit barriers during byte assembly and during the last judgment read.
+Two real-PostgreSQL migration races observe the rollback's waiting table lock,
+then release an already inserted but uncommitted label with COMMIT or ROLLBACK.
+They exercise the actual migration runner and SQL, not a copied lock sequence.
+
+Local correction-source qualification:
+
+| Check | Observed result |
+| --- | --- |
+| Collaboration typecheck and lint | exit 0 |
+| Contracts full suite | 69 files; 948 passed |
+| Web full suite | 111 files; 1,852 passed |
+| Contracts/web/server build and e2e typecheck | exit 0 |
+| Help and Proven Methods checks, handbook checker tests | exit 0; 3 checker tests passed |
+| Focused backend repeats | five independent processes; 10 passed each |
+| Client timing repeats | five independent processes; 30 passed each |
+| Export final-guard mutation | all four races failed; source restored byte-for-byte |
+
+Each local backend repeat has five environment skips (three PostgreSQL label
+tests and the two new PostgreSQL migration races) and 57 intentionally filtered
+exclusions. These are distinct. The local full server attempt is **not green**:
+1,329 passed, 7 failed, 123 environment skips. Four failures are denied loopback
+listeners (`listen EPERM`); three LDAP transport tests timed out under the same
+network restriction. PostgreSQL is unavailable locally because the sandbox
+rejects its shared-memory initialization. No local PostgreSQL, joined browser,
+complete server acceptance or scanner execution is claimed for the correction.
+The failed invocation and pre-fix red export tests remain recorded locally.
+
+The updated `collab-qualify` workflow supplies the missing execution environment:
+a full typecheck/lint/test/build pass with real PostgreSQL, a temporary removal
+of the rollback lock that must fail exactly the COMMIT regression, five
+independent backend/client passes, and three actual-server Chromium spec 44
+journeys with zero retries. It records the checkout commit/tree/parents and
+verifies that temporary mutations leave tracked source unchanged. The normal
+`collab` and root scanner lanes still apply. Hosted runs must actually succeed
+before their proof is claimed; the exact correction head/tree, observed checkout
+identities and run outcomes are recorded in the draft PR description, without
+recursive evidence-only commits. At correction publication those runs are
+pending. Prior successful source heads below are historical evidence, not
+acceptance of this updated head.
+
+Handbook impact: the investigation-loop chapter and status matrix now explain
+the final export recheck and the writer-excluding downgrade guard. The only
+new path relative to the original 47-file manifest is
+`.github/workflows/collab-qualify.yml`, making the candidate manifest 48 files.
+No permission, portable version, Rust/desktop source, release or successor scope
+was added. PR #1189 remains open, draft and unmerged.
+
 ## Provenance and scope
 
 - Repository: `chriscase/ContextDesk`.
@@ -297,6 +363,7 @@ commit's manifest is rechecked before publication. No lockfile, private recovery
 archive, raw log, local database or credential file is included.
 
 ```text
+.github/workflows/collab-qualify.yml
 .gitleaks.toml
 collab/contracts/schemas/artifact-annotation-bulk-request.v1.json
 collab/contracts/schemas/artifact-annotation-bulk-result.v1.json

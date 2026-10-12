@@ -1503,6 +1503,11 @@ export class PortableInvestigationService {
       if (await this.deps.imports.caseHasStoredJudgments(caseId)) {
         throw new PortableServerError("unsupported_state", "external-run judgments are not exact-applyable");
       }
+      // Protected label writes do not alter the case or public timeline. Recheck
+      // their authoritative history after every other asynchronous assembly read.
+      if (await this.deps.cases.hasLabelHistory(caseId)) {
+        throw new PortableServerError("label_history_unsupported", "this portable archive version cannot carry structured label history; exact export refused");
+      }
       return archive;
     } catch (error) {
       if (error instanceof PortableServerError) throw error;

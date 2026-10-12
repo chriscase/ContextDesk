@@ -1,3 +1,5 @@
+-- Wait for in-flight inserts before deciding whether dropping history is safe.
+LOCK TABLE artifact_annotations IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
  IF EXISTS (SELECT 1 FROM artifact_annotations WHERE label_event IS NOT NULL) THEN
   RAISE EXCEPTION 'cannot roll back 033_evidence_label_events while label history exists';
