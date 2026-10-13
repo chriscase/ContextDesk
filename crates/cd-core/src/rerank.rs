@@ -200,6 +200,10 @@ pub trait RerankBackend: Send + Sync {
     /// Score `documents` against `query`; one finite score per document in
     /// input order (higher = more relevant to the QUERY TEXT — relevance,
     /// not causation).
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn rerank(&self, query: &str, documents: &[String]) -> CoreResult<Vec<f32>>;
 
     /// Configured model identity for telemetry/reports (e.g.

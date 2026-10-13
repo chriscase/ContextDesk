@@ -622,6 +622,76 @@ describe("portable investigation service", () => {
       .toBe(true);
   });
 
+  it("refuses exact export from authoritative label history even without public activity, and blocks incoming lossy label claims", async () => {
+    const row = await fixture();
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    await row.cases.addArtifactAnnotationsBulk(row.caseId, ACTOR, {
+      schemaId: "cd-collab.artifact_annotation_bulk_request.v1", artifactIds: [row.evidenceId],
+      body: "add: Private meaning", labelMutation: {label: "Private meaning", operation: "add"}, privacyClass: "owner_only", idempotencyKey: "portable-label-0001",
+    }, "test", true);
+    expect((await row.caseStore.listTimeline(row.caseId)).some(event => event.kind === "artifact_label_changed")).toBe(false);
+    await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({code: "label_history_unsupported"});
+    const last = original.investigation.timeline.at(-1)!;
+    const archive = resealArchive(original, investigation => {investigation.timeline.push({...last,seq:last.seq+1,kind:"artifact_label_changed",targetNamespace:"evidence",targetId:row.evidenceId});});
+    const preview = await row.portable.preflight(archive,{mode:"dry_run",collisionPolicy:"remap_deterministic",identityMap:identityMapFor(archive)},ACTOR,false);
+    expect(preview.report.exactReconstruction).toBe(false);
+    expect(preview.report.reconstructionReasons).toContainEqual(expect.objectContaining({detail:"structured evidence label history cannot round-trip in this archive version"}));
+    expect(preview.apply).toMatchObject({confirmationToken:null,reason:"exact_reconstruction_required"});
+    await expect(row.portable.apply(archive,{confirmationToken:"unissued-label-token",typedConfirmation:PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,collisionPolicy:"remap_deterministic",identityMap:identityMapFor(archive)},ACTOR,false)).rejects.toMatchObject({code:"confirmation_invalid"});
+  });
+
+  it.each([
+    { privacyClass: "owner_only", stage: "bytes" },
+    { privacyClass: "share_safe", stage: "bytes" },
+    { privacyClass: "owner_only", stage: "final judgment read" },
+    { privacyClass: "share_safe", stage: "final judgment read" },
+  ] as const)("refuses exact export when a $privacyClass label commits during archive assembly at $stage", async ({ privacyClass, stage }) => {
+    const row = await fixture();
+    let entered!: () => void;
+    let release!: () => void;
+    const readingBytes = new Promise<void>((resolve) => { entered = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    const getBytes = row.cases.getArtifactBytes.bind(row.cases);
+    const storedJudgments = row.imports.caseHasStoredJudgments.bind(row.imports);
+    let judgmentReads = 0;
+    const paused = stage === "bytes"
+      ? vi.spyOn(row.cases, "getArtifactBytes").mockImplementationOnce(async (...args) => {
+          entered();
+          await resume;
+          return getBytes(...args);
+        })
+      : vi.spyOn(row.imports, "caseHasStoredJudgments").mockImplementation(async (...args) => {
+          if (++judgmentReads === 2) {
+            entered();
+            await resume;
+          }
+          return storedJudgments(...args);
+        });
+    // Attach failure handling immediately, while the competing write is pending.
+    const exporting = row.portable.exportArchive(row.caseId, ACTOR, false, true)
+      .then((archive) => ({ archive, error: null }), (error: unknown) => ({ archive: null, error }));
+    try {
+      await readingBytes;
+      await row.cases.addArtifactAnnotationsBulk(row.caseId, ACTOR, {
+        schemaId: "cd-collab.artifact_annotation_bulk_request.v1",
+        artifactIds: [row.evidenceId], body: "add: Private meaning",
+        labelMutation: { label: "Private meaning", operation: "add" },
+        privacyClass, idempotencyKey: "portable-label-race-0001",
+      }, "test", true);
+      expect(await row.cases.hasLabelHistory(row.caseId)).toBe(true);
+      // Both privacy lanes on this private artifact leave the public timeline unchanged.
+      expect((await row.caseStore.listTimeline(row.caseId)).some((event) => event.kind === "artifact_label_changed")).toBe(false);
+      release();
+      const outcome = await exporting;
+      expect(outcome.error).toMatchObject({ code: "label_history_unsupported" });
+      expect(outcome.archive).toBeNull();
+    } finally {
+      release();
+      await exporting;
+      paused.mockRestore();
+    }
+  });
+
   it("refuses export when judgment timeline exists without portable judgment rows", async () => {
     const row = await fixture();
     await row.caseStore.appendTimeline(row.caseId, {

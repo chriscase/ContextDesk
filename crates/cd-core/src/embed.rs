@@ -33,6 +33,10 @@ pub const HTTP_EMBED_TIMEOUT_MS: u64 = 60_000;
 #[async_trait]
 pub trait EmbedBackend: Send + Sync {
     /// Embed each input string; output vectors must all share the same length.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>>;
 
     /// Stable backend-known model identity for vector-space binding and

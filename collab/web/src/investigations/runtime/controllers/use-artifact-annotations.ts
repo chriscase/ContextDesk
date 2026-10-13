@@ -1,6 +1,7 @@
 import type {
   ArtifactAnnotationBulkResultV1,
   ArtifactAnnotationV1,
+  EvidenceLabelMutationV1,
 } from "../annotation-contract.js";
 import type {
   CreateArtifactAnnotationsBulkInput,
@@ -50,6 +51,7 @@ export interface UseArtifactAnnotationsOptions {
 
 export interface ArtifactAnnotationsController {
   readonly annotations: ResourceState<readonly ArtifactAnnotationV1[]>;
+  readonly readCompletion: {readonly requested: number; readonly succeeded: number; readonly failed: number};
   /** Resolve after the next authoritative refresh has settled. */
   readonly refresh: () => Promise<void>;
   /** Publish only a server-confirmed annotation for the active case. */
@@ -107,6 +109,11 @@ export function useArtifactAnnotations(
     () => createResourceState<AnnotationScope, readonly ArtifactAnnotationV1[]>(),
   );
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const readCounterRef = useRef(0);
+  const completionRef = useRef({succeeded: -1, failed: -1});
+  const scopeRef = useRef(scope);
+  if (scopeRef.current !== scope) { scopeRef.current = scope; requestSlot.current.invalidate(); }
+  const [readCompletion, setReadCompletion] = useState({requested: 0, succeeded: -1, failed: -1});
   const refreshResolversRef = useRef<Array<() => void>>([]);
   const latestRef = useRef(options);
   latestRef.current = options;
@@ -132,6 +139,8 @@ export function useArtifactAnnotations(
       return;
     }
 
+    const readId = ++readCounterRef.current;
+    setReadCompletion(current => ({...current, requested: readId}));
     const token = requestSlot.current.begin(scope);
     setResource((current) => beginResourceLoad(current, scope));
     void load(scope, token.signal)
@@ -145,6 +154,8 @@ export function useArtifactAnnotations(
         if (!result.ok && result.error.kind === "auth_lost") {
           latestRef.current.onScopeDenied(scope.investigationId, result.error);
         }
+        completionRef.current[result.ok ? "succeeded" : "failed"] = readId;
+        setReadCompletion(current => ({...current, [result.ok ? "succeeded" : "failed"]: readId}));
         setResource((current) => result.ok
           ? succeedResourceLoad(current, scope, result.value)
           : failResourceLoad(current, scope, result.error));
@@ -152,6 +163,8 @@ export function useArtifactAnnotations(
       })
       .catch(() => {
         if (!requestSlot.current.isCurrent(token)) return;
+        completionRef.current.failed = readId;
+        setReadCompletion(current => ({...current, failed: readId}));
         setResource((current) => failResourceLoad(
           current,
           scope,
@@ -166,7 +179,7 @@ export function useArtifactAnnotations(
   useEffect(() => () => settleRefreshWaiters(), [settleRefreshWaiters]);
 
   const refresh = useCallback(() => {
-    if (scope === null) return Promise.resolve();
+    if (scope === null || scopeRef.current !== scope) return Promise.resolve();
     return new Promise<void>((resolve) => {
       refreshResolversRef.current.push(resolve);
       setRefreshGeneration((current) => current + 1);
@@ -183,7 +196,13 @@ export function useArtifactAnnotations(
   const state = scope !== null && resource.key === scope
     ? resource.state
     : { status: "idle" as const };
-  return { annotations: state, refresh, publish };
+  // Reading these getters is causal even while React has a pending state update.
+  void readCompletion;
+  return { annotations: state, readCompletion: {
+    get requested() { return readCounterRef.current; },
+    get succeeded() { return completionRef.current.succeeded; },
+    get failed() { return completionRef.current.failed; },
+  }, refresh, publish };
 }
 
 export interface CreateArtifactAnnotationCommand {
@@ -386,6 +405,7 @@ export function useCreateArtifactAnnotation(
 }
 
 export interface CreateArtifactAnnotationsBulkCommand {
+  readonly labelMutation?: EvidenceLabelMutationV1;
   /** The target set is submitted as one atomic server operation. */
   readonly artifactIds: readonly string[];
   readonly body: string;
@@ -446,7 +466,7 @@ function bulkAnnotationResultMatches(
       || returned.has(item.artifactId)
     ) return false;
     returned.add(item.artifactId);
-    if (item.outcome === "not_found") continue;
+    if (item.outcome === "not_found" || item.outcome === "already_desired") continue;
     if (
       item.annotation.caseId !== investigationId
       || item.annotation.artifactId !== item.artifactId
@@ -465,6 +485,8 @@ function bulkAnnotationResultMatches(
 export function useCreateArtifactAnnotationsBulk(
   options: UseCreateArtifactAnnotationsBulkOptions,
 ): CreateArtifactAnnotationsBulkController {
+  const renderScope = useMemo(() => Object.freeze({}), [options.identityKey, options.authorityKey, options.investigationId, options.canAnnotate, options.readOnly]);
+  const epochRef = useRef(renderScope);
   const [stored, setStored] = useState<ScopedMutationState<ArtifactAnnotationBulkResultV1>>(
     () => emptyScopedMutationState(),
   );
@@ -473,6 +495,11 @@ export function useCreateArtifactAnnotationsBulk(
   const mountedRef = useRef(true);
   const latestRef = useRef(options);
   latestRef.current = options;
+  if (epochRef.current !== renderScope) {
+    epochRef.current = renderScope;
+    slotRef.current.invalidate();
+    activeRef.current = null;
+  }
 
   const invalidate = useCallback(() => {
     slotRef.current.invalidate();
@@ -504,6 +531,7 @@ export function useCreateArtifactAnnotationsBulk(
   const create = useCallback(async (
     command: CreateArtifactAnnotationsBulkCommand,
   ): Promise<CommandOutcome<ArtifactAnnotationBulkResultV1>> => {
+    if (epochRef.current !== renderScope) return { status: "ignored", reason: "stale" };
     if (activeRef.current !== null) return { status: "ignored", reason: "busy" };
     const start = latestRef.current;
     let artifactIds: string[];
@@ -553,6 +581,7 @@ export function useCreateArtifactAnnotationsBulk(
     const isCurrent = (): boolean => {
       const latest = latestRef.current;
       return mountedRef.current
+        && epochRef.current === renderScope
         && activeRef.current === token
         && slotRef.current.isCurrent(token)
         && latest.identityKey === scope.identityKey
@@ -566,6 +595,7 @@ export function useCreateArtifactAnnotationsBulk(
       const input: CreateArtifactAnnotationsBulkInput = {
         artifactIds,
         body,
+        ...(command.labelMutation === undefined ? {} : {labelMutation: Object.freeze({...command.labelMutation})}),
         ...(privacyClass === undefined ? {} : { privacyClass }),
         ...(clientTime === undefined ? {} : { clientTime }),
         ...(sourceId === undefined ? {} : { sourceId }),
@@ -591,7 +621,8 @@ export function useCreateArtifactAnnotationsBulk(
           scope.investigationId,
           artifactIds,
           result.value,
-        );
+        ) && result.value.labelMutation?.label === input.labelMutation?.label && result.value.labelMutation?.operation === input.labelMutation?.operation
+          && (input.labelMutation === undefined || (result.value.privacyClass === input.privacyClass && result.value.idempotencyKey === input.idempotencyKey));
       } catch {
         identityMatches = false;
       }
@@ -616,7 +647,7 @@ export function useCreateArtifactAnnotationsBulk(
     } finally {
       if (activeRef.current === token) activeRef.current = null;
     }
-  }, []);
+  }, [renderScope]);
 
   const currentScopeKey = options.readOnly
     || !options.canAnnotate

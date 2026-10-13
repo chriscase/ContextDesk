@@ -50,6 +50,8 @@ jobs:
       COLLAB_LIVE_VERCEL: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: record the exact qualification checkout
+        run: git show --no-patch --format='%H%n%T%n%P' HEAD
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -60,6 +62,52 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - name: prove the label rollback concurrency assertion detects the missing lock
+        run: |
+          label_sql=server/src/db/migrations/033_evidence_label_events.down.sql
+          label_backup=$(mktemp)
+          label_report=$(mktemp)
+          cp "$label_sql" "$label_backup"
+          trap 'cp "$label_backup" "$label_sql"; rm -f "$label_backup" "$label_report"' EXIT
+          sed '/^LOCK TABLE artifact_annotations IN ACCESS EXCLUSIVE MODE;$/d' "$label_backup" > "$label_sql"
+          if (cd server && ../node_modules/.bin/vitest run src/db/migrate.test.ts --testNamePattern='label rollback waits.*COMMIT' --reporter=json --outputFile="$label_report"); then
+            echo 'Missing-lock mutation unexpectedly passed'
+            exit 1
+          fi
+          node --input-type=module - "$label_report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const assertion = report.testResults.flatMap(file => file.assertionResults)
+            .find(test => test.fullName.includes('label rollback waits') && test.fullName.includes('COMMIT'));
+          console.log(JSON.stringify({ failedTests: report.numFailedTests,
+            regression: assertion?.fullName, status: assertion?.status,
+            diagnostic: assertion?.failureMessages.map(message => message.split('\n')[0]) }));
+          if (report.numFailedTests !== 1 || assertion?.status !== 'failed'
+            || assertion.failureMessages.length === 0 || report.testResults.some(file => file.message)) {
+            throw new Error('Expected exactly the targeted missing-lock concurrency assertion to fail');
+          }
+          JS
+      - name: repeat Goal 10 backend concurrency and client timing regressions five times
+        run: |
+          for run in $(seq 1 5); do
+            echo "Goal 10 independent regression pass $run"
+            (cd server && ../node_modules/.bin/vitest run src/modules/cases/evidence-labels.test.ts src/modules/portable-investigations/portable-investigations.test.ts src/db/migrate.test.ts --testNamePattern='structured evidence labels|label commits during archive assembly|label rollback waits')
+            (cd web && ../node_modules/.bin/vitest run src/investigations/strategies/shared/EvidenceLabelWorkspace.test.tsx src/investigations/runtime/controllers/use-artifact-annotations.test.tsx)
+          done
+      - name: install Chromium for the Goal 10 real-server journey
+        run: npx playwright install --with-deps chromium
+        working-directory: collab/e2e
+      - name: repeat the Goal 10 real-server Chromium journey three times without retries
+        env:
+          CD_GOAL10_JOINED: "1"
+        run: |
+          for run in $(seq 1 3); do
+            echo "Goal 10 independent Chromium journey $run"
+            npx playwright test --config evidence-labels.playwright.config.ts --reporter=line
+          done
+        working-directory: collab/e2e
+      - name: verify temporary mutations left committed source unchanged
+        run: git diff --exit-code
       - name: prepare report directories
         run: mkdir -p .ci-qualify/raw .ci-qualify/sanitized
       - name: qualify memory

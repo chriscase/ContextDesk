@@ -252,12 +252,20 @@ pub trait TriageEngine: Send + Sync {
     type Preflight: Send;
 
     /// Resolve and authorize everything needed to execute this exact request.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn preflight(
         &self,
         request: &ValidatedTriageRequest,
     ) -> Result<Self::Preflight, TriageEngineFailure>;
 
     /// Execute a preflighted request and return the authoritative replay.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn execute(
         &self,
         request: ValidatedTriageRequest,

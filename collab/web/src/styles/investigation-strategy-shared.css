@@ -832,3 +832,10 @@
     transition: none !important;
   }
 }
+
+.strategy-kit__label-review { display: grid; gap: .75rem; min-width: 0; border-top: 1px solid var(--border); padding-top: 1rem; }
+.strategy-kit__label-review > div { padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; overflow-wrap: anywhere; }
+.strategy-kit__label-review form { display: grid; gap: .5rem; max-width: 48rem; }
+.strategy-kit__label-review :is(input,select) { box-sizing: border-box; width: 100%; min-width: 0; padding: .6rem; border: 1px solid var(--border); border-radius: .4rem; color: var(--text); background: var(--surface); }
+.strategy-kit__annotation-workspace input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (forced-colors: active) { .strategy-kit__label-review :is(input,select,button) { border: 1px solid ButtonText; } .strategy-kit__annotation-workspace input:focus-visible {outline-color: Highlight;} }

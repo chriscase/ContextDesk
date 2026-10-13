@@ -7,10 +7,12 @@ already shipped, rechecks dependencies and risks, selects the highest-value
 ready slice, freezes its exact base, and starts that slice when it does not
 conflict with protected work.
 
-Baseline for Goal 09: `main` `5650f0666a42e0adfaecedd1b4d9286002dde3ba`,
-tree `16fea5e5f43844daba7da7d09ad6ed651cd6eab8`. Goal 08 joined main
-through merged PR #1187. Earlier baseline observations remain in their frozen
-contracts and receipts.
+Baseline for Goal 10: `main` `c672948b8b74471b197ecf848a26fecadd0eece9`,
+tree `806a1613e4a9b048ba9808b49155f0d3449b3f3d`. Goals 08 and 09 joined main
+through merged PRs #1187 and #1188. Earlier observations remain in frozen
+contracts and receipts. The separate Windows temporary-corpus cleanup failure
+and historical Catalog focus synchronization candidate #1176 are reliability
+work, not part of this product slice.
 
 ## Delivery loop
 
@@ -114,13 +116,13 @@ entry and existing save commands remain authoritative. Historical #1174 is
 source material only and stays unchanged. No catalog, software-impact identity,
 new server query, or administrator deduplication shipped in this slice.
 
-Goal 09 is the current unmerged slice: [trusted benchmark promotion and offline
+Goal 09 shipped through merged [PR #1188](https://github.com/chriscase/ContextDesk/pull/1188): [trusted benchmark promotion and offline
 handoff](../goals/09-TRUSTED-BENCHMARK-HANDOFF.md) on
 `integrate/trusted-benchmark-handoff-v1`. It adds explicit promotion of an
 accepted Experiment Lab decision, version review, and a separately authorized
 owner-only identity-preserving file that the existing offline bench can import.
 The alias-only share-safe review export remains separate. Historical #1175
-remains source material. Neither a human benchmark nor evidence alignment is a
+was closed without merging after integration; its branch remains retained. Neither a human benchmark nor evidence alignment is a
 correctness verdict, and this slice does not measure provider or review quality.
 
 ## Deferred successor queue
@@ -129,16 +131,22 @@ Trusted Investigation Discovery shipped through merged PR #1181. The desktop
 investigation-team save-status synchronization shipped through merged PR #1182.
 Activity Center first-frame scope safety shipped through #1183. S3 recovery
 shipped through #1184. Unmerged historical branches remain source material.
-Goal 09 is the active unmerged slice above; the candidates below and #1158
-remain deferred and are not authorized by this checkpoint.
+Goal 10 is the current unmerged slice: [structured evidence labels and shared
+review workspace](../goals/10-STRUCTURED-EVIDENCE-LABELS.md) on
+`integrate/evidence-label-workspace-v1`. It extends the shipped annotation table,
+bulk note transaction, Runtime seam and workspace with exact add/remove labels,
+privacy-aware current projection and durable history, and Keystone adoption.
+Bulk notes and Investigation First selection are already shipped foundations.
 
-1. **Evidence annotation workspace and safe bulk metadata.** Build on the
-   shipped append-only annotation contract: compact review, structured tags or
-   labels, cross-artifact selection, and safe bulk actions without mutating
-   artifact identity or bypassing case permissions.
-2. **Investigation search and facets.** Collection-wide recorded status, entity,
-   software impact, contributor, and date filters shipped through #1181. Tags
-   still need a canonical contract before they are a backlog item of their own.
+The following successors and #1158 remain deferred:
+
+1. **Investigation label search and facets.** Consume Goal 10's canonical exact,
+   case-sensitive label contract after integration. Do not create duplicate
+   label truth. Recorded status/entity/software impact/contributor/date filters
+   already shipped through #1181.
+2. **Portable label round-trip.** A separately versioned portable contract and
+   qualification are required. Goal 10 refuses exact operations that would lose
+   label history; it does not version the archive.
 3. **Product/version/build catalog quality.** Shipped Goal 08 covers bounded reuse of
    already loaded recorded values. Administrator-assisted deduplication and a
    complete catalog remain separate proposals; avoid a second software-impact

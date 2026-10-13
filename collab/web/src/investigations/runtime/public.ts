@@ -95,3 +95,7 @@ export type {
   InvestigationOperationsQueueQueryV1,
   InvestigationOperationsQueueRowV1,
 } from "@cd-collab/contracts/investigation-operations-queue";
+
+// Canonical label semantics flow through Runtime into the presentation-only workspace.
+import { parseEvidenceLabel, projectEvidenceLabels } from "./annotation-contract.js";
+export const evidenceLabelModel = Object.freeze({parse: parseEvidenceLabel, project: projectEvidenceLabels});

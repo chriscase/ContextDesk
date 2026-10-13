@@ -11238,6 +11238,10 @@ trait DemoLogInstallBackend: Send + Sync {
         corpus_id: &str,
         cancel: &cd_core::process_progress::CancelFlag,
     ) -> Result<DemoMarkerPublishOutcome, DemoTransactionError>;
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn ingest(
         &self,
         resource: PathBuf,
