@@ -16,7 +16,7 @@
       }
     ],
     "promptScaffoldHash": null,
-    "excludedByDefault": ["corroboration", "resolution"]
+    "excludedByDefault": ["external_run", "corroboration", "resolution"]
   },
   "excerpts": [
     {

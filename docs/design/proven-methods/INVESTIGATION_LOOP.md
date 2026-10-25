@@ -13,12 +13,127 @@ Proposal ranking, supersede/resolve history surfacing, and walkthroughs remain
 unsupported-claim detection, HTML/PDF export, and an evidence appendix remain
 #532.
 
-The current local integration also adds a strategy-neutral evidence workspace:
-case-bound files remain owned by the evidence provider (filesystem or the
-S3-compatible provider), while append-only artifact annotations stay in the
-collaboration database with privacy filtering and replay-safe write intents.
-The browser receives only versioned, server-confirmed metadata and never gains
-storage, authorization, or audit authority.
+### Trusted export and outside-response handoff (Goal 06 shipped through #1185)
+
+The War Room's Decide export support prepares a versioned brief or selected-evidence
+prompt package through the existing server projection, capability checks and
+share-safe scan. The browser uses the same nested envelope and inventory
+parsers as the server through a browser-safe entry, binds the checked result
+to its requested case/kind/privacy/selection, and presents recorded facts
+before a person deliberately downloads JSON or byte-matching Markdown.
+Private bodies in share-safe packages stay omitted. Prepared files are scoped
+to the authenticated identity, authority and available lifecycle; a stale
+callback cannot create a new download after that scope changes. The browser
+releases temporary download URLs on replacement, unmount and a bounded timer.
+
+Capture's existing manual import can record a synthetic outside response with
+its source, redaction confirmation, importer-described visibility and the
+package snapshot identity. That binding reports what the importer entered; it
+is not proof that an external model received the package, nor a correctness or
+corroboration judgment. A human assessment does not change the legacy
+unverified banner; the separate Save review control does. A brief has no
+package snapshot. Neither file is a portable investigation archive; portable
+restore keeps its own dry-run and typed confirmation path.
+
+### Trusted human review of imported responses (Goal 07 shipped through #1186)
+
+War Room Capture places a focused, append-only Human assessments panel beside
+the exact imported run. The provenance inspector distinguishes recorded source,
+importer and operator, reported snapshot and visibility, and missing details;
+a package hash or trace claim is not proof of model exposure or correctness.
+Corroborates and Contradicts require an eligible recorded citation;
+Insufficient evidence may have none. The server records actor, time, sequence,
+original links and bounded rationale in the same transaction as timeline,
+audit and durable replay intent. A later disagreement is another attributed
+record, not an automatic vote, resolution, or replacement for Save review.
+
+After a conflict or unknown outcome, the browser freezes the draft and key,
+requires an explicit successful same-scope history read after that result, and
+offers a deliberate same-intent retry. The current sequence may change while
+the judgment, links, rationale and key remain fixed. A confirmed replay returns
+the original applied record without another row. Human assessment rows are not
+represented in the portable archive version: affected exact archive operations
+refuse rather than silently omitting history. Brief and prompt-package exports
+are partial handoffs and do not transfer assessments. This slice is a local
+shipped behavior, not a measured quality or verified-model-execution claim.
+
+### Recorded software context reuse (Goal 08 shipped through #1187)
+
+Existing War Room, Investigation First, and Beacon creation and War Room and
+Keystone Situation editors may suggest exact strings from the currently loaded
+authorized investigation records. A product draft constrains versions; exact
+product and version drafts constrain builds. Up to 100 first-observed values
+and recorded product/version/build tuples are shown, with an omitted indicator.
+An explicit tuple action changes only the local three-field draft and never
+saves by itself. The loaded set can be partial, filtered, or stale; it is not a
+canonical catalog or software-impact verdict. Free entry remains valid. The
+Investigation First create form trims outer whitespace; the other existing
+paths retain nonblank context literals subject to server validation. Keystone
+retains its existing version-checked Situation save and has no create workflow.
+
+### Trusted benchmark promotion and offline handoff (Goal 09 shipped through #1188)
+
+War Room Decide gives a case lead an explicit promotion of an accepted
+Experiment Lab decision. Only eligible decision evidence is initially selected;
+the operator can remove items or add optional roles and dimensions. The client
+rechecks selection before submitting a frozen request. The existing server
+fingerprint replays an identical promotion without another version or timeline
+event. A lost or conflicted result requires a fresh same-scope history read;
+finding the exact recorded version avoids another write. Neither an empty read
+nor a browser download click proves rollback or file persistence.
+
+A separately authorized exact-version export returns an owner-only envelope
+around the unchanged gold record. Its identities and attribution allow the
+existing offline triage bench to match a task and snapshot. The alias-only
+share-safe Experiment Lab review export remains separate and cannot be
+reversed into original IDs. Bench alignment reports evidence relationships,
+not answer correctness or measured review benefit. The owner-only file is not
+a portable investigation archive or Goal 07 assessment transfer. See the
+[benchmark loop](../../benchmarks/GOLD_BACKTEST_LOOP_V1.md) and the
+[Goal 09 contract](../../goals/09-TRUSTED-BENCHMARK-HANDOFF.md).
+
+### Structured evidence labels (Goal 10 draft integration, unmerged)
+
+The shipped strategy-neutral evidence workspace and transactional bulk notes
+remain the foundation. Typed label events extend the same append-only annotation
+rows and retry records. The annotation envelope binds event identity, case,
+artifact, exact label, add/remove operation, privacy, actor, server time and
+source. Labels accept 1–120 trimmed safe characters without case folding or
+normalization aliases; add/remove supports one frozen set of 1–64 artifacts.
+
+A case transaction locks ordering and commits events, parent intent and audit
+atomically. Event order belongs to the artifact/privacy lane, so gaps cannot
+expose hidden history. Public and protected history each have a checked 25,000
+event allocation; protected capacity cannot change public write outcomes. The
+server projects visible history with the canonical shared projector. Removing
+preserves the historical add; exact duplicates collapse, and case variants
+remain distinct. No artifact bytes or metadata identity is rewritten.
+
+The existing `investigation:write`, case access and `evidence:private:read`
+model is sufficient. No capability is added. Owner-only labels and labels on
+private evidence stay out of mixed public activity entirely; their protected
+history and generic bulk audit remain durable. Read/replay filtering uses current
+authority. Investigation First and Keystone reuse the same workspace. Beacon
+has no selected-evidence Runtime surface; War Room's technical selection uses
+its direct transport, so no additional inventory/read is invented.
+
+Network, response-parse and explicit uncertain commit outcomes freeze semantics.
+A successful same-scope history read initiated later is required for recovery.
+Confirmed desired state sends no second mutation; otherwise explicit retry uses
+the same operation and idempotency identity. Each new unknown revokes permission.
+Render-time scope epochs and handler tokens reject retained callbacks, including
+identity/authority replacement and A→B→A before passive cleanup.
+
+Portable v1 does not represent labels. Exact export refuses authoritative label
+history (including removed/private history), rechecking after assembly because
+protected label commits do not change the public timeline. Migration 033 locks
+the annotation table before its downgrade guard: a concurrent committed label
+refuses rollback and preserves its payload; an aborted insert permits rollback.
+Dry-run blocks an incoming label
+history claim and issues no apply token. Existing trusted handoff, assessments
+and benchmark file export are preserved. Label facets and portable round-trip
+are separately deferred. See [Goal 10](../../goals/10-STRUCTURED-EVIDENCE-LABELS.md)
+and the [evidence review guide](../../help/war-room/war-room-evidence-review.md).
 
 <a id="operations-queue-coordination-foundation-partial-existing-server-integration"></a>
 
@@ -75,7 +190,12 @@ The coordination writer foundation is a **local integration** of the existing co
 `/api/cases/:id/coordination` use live session capabilities, concealed case
 access, a case-row lock, a materialized projection, insert-only successful
 idempotency envelopes, and atomic timeline/audit writes. Generic activity maps
-the event to a factual investigation update.
+the event to a factual investigation update. Overview's Activity Center
+conceals the previous identity, authority, filter, and read scope on the
+render that receives the new scope, before passive effects run. A same-scope
+refresh may keep the prior rows only as loading or as an explicit failure.
+A disabled or no-read account does not request activity, cases, or locator
+resolution.
 
 The subsequent **local Operations Queue integration** adds a joined,
 server-ordered read query and a first-class `/operations` shell area. That
@@ -262,7 +382,7 @@ view state.
 | Accepted-state report projection + Markdown export   | **Partial** | [`report.rs`](../../../crates/cd-core/src/investigations/report.rs) `assemble_investigation_report`                                                                                  | Fuller #532 vocabulary, patches/undo, claim detection, HTML/PDF, evidence appendix |
 | War Room Log workbench saved views, bookmarks, and share-safe locators | **Local integration** | Contract `investigation-workbench.ts` (`cd-collab.log_workbench_view.v1`, `cd-collab.log_workbench_bookmark.v1`, `cd-collab.log_workbench_share_safe_locator.v1`), server `collab/server/src/modules/workbench/`, Analyze UI `LogWorkbench.tsx`. Saved views are records, not authorization tokens, and applying one restores filters, time window, sort, grouping, and display. Locators reauthorize on resolve; unauthorized and missing tokens are indistinguishable and disclose no path. Stale bookmarks explain rather than silently retarget. Chronology pins are insert-only (`pinned` vs recorded `human_ground_truth`). Resource kinds `log_workbench_view`, `log_workbench_bookmark`, and `log_workbench_line` route to Analyze `triage-log-workbench`. | Desktop Explorer saved-view recipes remain a separate path. Heuristic text similarity is labeled and cannot be recorded as ground truth. |
 | War Room investigation-scoped file/ZIP/directory intake | **Local integration** | Collab contract `investigation-corpus-intake.ts`, module `collab/server/src/modules/corpus-intake/`, Capture UI `CorpusIntakePanel.tsx`. Concurrent distinct-key commits sharing a digest reclassify `duplicateDigest` after the per-digest lock from live artifacts. ZIP names consult language bit `0x0800`: valid UTF-8 with the bit is accepted, unmarked non-ASCII and invalid UTF-8 are rejected as `invalid_encoding`, local/central encoding-bit disagreement is malformed, and Info-ZIP Unicode Path extra `0x7075` is the canonical name when present (CRC-checked, fatal UTF-8; traversal or local/central extra disagreement fail closed). | Parallel portable-investigation restore lane is out of scope here. PostgreSQL `withAtomic` now binds store queries to the transaction via async-local storage. In-process post-promote timeline/audit failure rolls back staged blobs. A process crash after promote and before COMMIT leaves a durable pending-write journal; recovery reclaims those hashes when no artifact, snapshot, or imported-run row references them, and keeps them when a later retry or successful COMMIT does. |
-| War Room evidence workspace and artifact annotations | **Local integration** | Versioned artifact metadata is served through the shared Runtime V1 gateway; Investigation First provides compact inventory rows, bounded previews, privacy-aware append-only notes, and an explicit history/retry affordance. The server stores notes in an insert-only table, filters `owner_only` rows at read time, and binds caller idempotency keys to the case, artifact, privacy, source, and body digest inside one transaction. Evidence bytes continue to use the provider seam documented in the [S3 evidence-store guide](../../help/war-room/war-room-s3-evidence-store.md); the database remains authoritative for identity, access, provenance, and audit. | Richer annotations (structured tags, mentions, and cross-artifact linking), migration/retention policy, and bulk annotation workflows remain future work. |
+| War Room evidence workspace and artifact annotations | **Local integration** | Versioned artifact metadata is served through the shared Runtime V1 gateway; Investigation First provides compact inventory rows, bounded previews, privacy-aware append-only notes, and an explicit history/retry affordance. The server stores notes in an insert-only table, filters `owner_only` rows at read time, and binds caller idempotency keys to the case, artifact, privacy, source, and body digest inside one transaction. Evidence bytes continue to use the provider seam documented in the [S3 evidence-store guide](../../help/war-room/war-room-s3-evidence-store.md); the database remains authoritative for identity, access, provenance, and audit. | Bulk notes already ship. Goal 10 adds structured labels and shared Keystone review as an unmerged draft; label facets, mentions, cross-artifact links, portable label round-trip and migration/retention policy remain separate. |
 | War Room addressable workstream record | **Local integration** | Collab contract `workstream.ts` (`cd-collab.workstream_view.v1`), server projection `collab/server/src/modules/triage-runs/workstreams.ts` behind `GET /api/cases/:id/workstreams`, Analyze UI `Workstreams.tsx` | Readable projection covers recorded triage-run lanes only; human, programmatic, external-import, and host-run workstreams are representable in the contract but no writer produces them yet. |
 | War Room activity feed and resource locators | **Local integration** | Collab contract `investigation-activity.ts`, module `collab/server/src/modules/activity/`, Overview consumer in `Cases.tsx`, APIs `GET /api/investigation-activity` and `GET /api/investigation-resources/resolve`. Kind-strict resolve is stable across reload and portable restore with destination identity remapping, including remapped `decision_revision` ids from live `experiment_decision_*` writes that address the decision id rather than the experiment id, remapped `gold` ids from `experiment_gold_promoted` (`targetNamespace=gold`, Decide `decision-heading`), remapped `helpfulness` ids from `experiment_helpfulness_recorded` (`targetNamespace=helpfulness`, Compare `cross-exam-heading`), remapped `${experimentId}:${traceId}` `interaction_trace` locators from `experiment_trace_imported` (`targetNamespace=experiment`, Compare `candidate-comparison-heading`), remapped `experiment` locators from `experiment_imported` (`targetNamespace=experiment`, Compare `candidate-comparison-heading`), remapped `${jobId}:${candidateId}` `workstream_attempt` locators, and remapped `intake_batch` ids from `corpus_intake_committed` (`targetNamespace=intake_batch`, Capture `corpus-intake` / `kind=intake-batch`), and remapped `evidence_context` snapshot ids from `snapshot_frozen` (`targetNamespace=snapshot`, Analyze `triage-evidence-board` / `kind=snapshot`), and remapped `imported_ai_run` imported-run ids from `external_run_imported` (`targetNamespace=imported_ai_run`), and remapped observation/discussion contribution ids from `contribution_*` (`targetNamespace=contribution`), and remapped `evidence_item` ids from `evidence_*` (`targetNamespace=evidence`; upload summary contributions are omitted from activity so copy-link cannot address a contribution id as evidence), and remapped job-level `workstream` ids from `triage_job_*` (`targetNamespace=triage_job`), and remapped revised/tombstoned/status contribution locators from live `contribution_revised` / `contribution_tombstoned` / `hypothesis_status` payloads that include `kind` and revision (message, hypothesis, note, action; kind-strict resolve; superseded hypotheses stay `hypothesis_updated` rather than `decision_superseded`), and remapped corroboration `imported_ai_run` ids from live `run_corroboration` (`targetNamespace=imported_ai_run`; portable export/dry-run/apply refuse corroboration as not exact-applyable so restore cannot project reviewed activity over unverified dest runs). | Locators round-trip to shipped stage/section/item identities (Discussion, workstream/run records, Capture intake batches, Capture imported analysis, Analyze frozen snapshots, Decide gold snapshots, Compare helpfulness observations, Compare imported comparison traces, Compare strategy comparisons) and reauthorize by resource kind at resolve time. UI filtering/pagination remains residual; locators are not tokens. |
 | War Room server/contracts integrity | **Local integration** | Snapshot-bound accepted-decision board projection, insert-only contribution write intents, contribution revision CAS, **memory experiment decisions unique on `(experimentId, revision)` matching PostgreSQL**, **human trace annotations persist unique `(experimentId, candidateId, sequence)` inside `withExperimentAtomic` after locking the experiment (memory uniqueness; PostgreSQL `SELECT ... FOR UPDATE` on `experiment_packages`; merge keeps stored sequences so `parseInteractionTrace` does not depend on read-time renumbering)**, **concurrent first gold promotions lock the experiment before listing versions so identical fingerprints stay idempotent and a forked first gold is `stale_gold` (409) rather than PostgreSQL `23505` on `gold_references_experiment_version_idx` (unique-constraint failures still map to `stale_gold`)**, **concurrent first interaction traces lock the experiment before `findTrace` so identical fingerprints stay idempotent and a forked first trace is `trace_conflict` (409) rather than PostgreSQL `23505` on `experiment_traces_candidate_idx` (unique-constraint / insert-only failures still map to `trace_conflict`); `traceFingerprint` is key-order canonical so PostgreSQL jsonb round-trips match memory**, **experiment import/decision/trace/gold writes join `cases.withAtomic` (memory capture/restore awaited through `Promise.resolve` so SQLite-wrapped stores roll back; PostgreSQL via `activeCaseQueryable`)**, **`createCase` / status / membership / legal-hold and import run/corroboration join the same atomic boundary (SQLite-wrapped run `capture`/`restore` awaited)**, **first-use human catalog sources minted during `addContribution`, `addEvidence`, and corpus intake join `cases.withAtomic` (memory rolls back only those minted source ids and this-transaction audit rows so a concurrent standalone `catalog.create` survives; PostgreSQL `PgCatalogStore` uses `activeCaseQueryable`; SQLite persists catalog `remove` after case ROLLBACK)**, **triage job create/cancel, claim+started, candidate persist/start, finish, unauthorized-recovery refusal, and stale-lease recovery join `cases.withAtomic` (memory capture/restore; PostgreSQL via `activeCaseQueryable`; `queueMicrotask(execute)` stays outside so execution cannot start before COMMIT; a started-timeline failure rolls the claim back to queued instead of inventing `runner_error`; owned running runner errors and stale-lease recovery persist `triage_job_finished` with `humanFinding: false`)**, staged ordinary `addEvidence`/`importRun` transactions, held-evidence `expectedHash` fail-closed before metadata/blob commit, **`file_server_ref` abandons the unpaired reference file when metadata rolls back and restores the prior reference when recheck timeline/audit fails**, atomic snapshot/hypothesis/tombstone writes, SQLite `withAtomic` persistence of every successful mutator (not only `status=updated`), honest `sameSnapshot`, and lease-guarded triage job updates that refuse expired workers and recovered requesters who lost case membership, **concurrent `setStatus` / `setLegalHold` write only the intended column inside `withAtomic` so a racing status write cannot restore a stale legal-hold (memory and PostgreSQL)**, **and running progress `update` preserves the later of store vs payload `leaseExpiresAt` so a concurrent heartbeat cannot be shortened by a stale candidate persist (memory and PostgreSQL)** in `collab/server` + `collab/contracts`. Recovered queued jobs re-resolve current profile/status/provenance, roles/local grants, case access, `run:strategies`, and `evidence:private:read` through an injected authz seam before claiming a lease, reading evidence bytes, or calling a provider; stale admin/private authority is never inherited. Concurrent notes/comments persist without lost writes; a forked contribution revision is refused. Human trace annotations keep unique stored sequences under concurrent annotate (memory and PostgreSQL). Frozen snapshots keep their evidence identities after later intake. **Portable export addresses `experiment_decision_*` timeline at the decision id (`targetNamespace=decision`; live propose/accept writes use that same decision `targetId`, and persist refuses resealed archives that drop it), addresses `experiment_gold_promoted` at the gold snapshot id (`targetNamespace=gold`) rather than the experiment id, addresses `experiment_helpfulness_recorded` at the observation id (`targetNamespace=helpfulness`) rather than the experiment id, addresses `experiment_trace_imported` at `${experimentId}:${traceId}` (`targetNamespace=experiment`) rather than the experiment id, keeps `triage_candidate_*` `${jobId}:${candidateId}` targets, remapping the job prefix at apply, and persist refuses resealed archives that drop that composite or collapse it to a bare job id, and addresses `corpus_intake_committed` at the intake-batch id (`targetNamespace=intake_batch`), remapping that id at apply instead of hashing it as `evidence`/`intake-batch:`, and persist refuses resealed archives that drop `snapshot_frozen` `targetNamespace=snapshot` and `external_run_imported` `targetNamespace=imported_ai_run`, and `contribution_*` / `hypothesis_status` `targetNamespace=contribution`, and `evidence_*` `targetNamespace=evidence`, and `triage_job_*` bare job ids (`targetNamespace=triage_job`; persist refuses dropped or attempt-composite targets), and reconstructs contribution (including `hypothesis_status` and remapped `links`) and decision timeline payloads onto the matching portable revision (not the first `id` match), remaps portable `hypothesisLinks` onto destination evidence/contribution ids, and binds each restored imported run to its own remapped `external_run` contribution rather than `contributions[0]`, and preserves imported-run prompt bytes, completeness, privacy class, remapped snapshot fingerprint, redaction flag, claimed traces, visibility/uncertainty/timing/cost notes, and remapped importer/operator identities, remapped experiment importer identities, and experiment candidate labels/roles/run-status, agreement notes/anchors, snapshot proof, and nested interaction traces (optional portable fields; archives without them keep unknown/null completeness, `redacted: false`, empty claimed traces, applying-actor importers, `imported-historical` candidate labels, empty agreement, unknown snapshot proof, and empty experiment traces), and refuses portable export, dry-run, and apply of `run_corroboration` because imported-run corroboration is not exact-applyable (portable runs have no corroboration rows, and persist never invents links).** **Pending-write journals record newly created CAS hashes before promotion; boot and the next exclusive write batch reclaim unreferenced journaled hashes while keeping hashes referenced by artifacts, snapshots, or imported runs.** | Portable exact restore of imported-run corroboration (state plus remapped artifact/contribution links) remains unsupported. Archives exported before imported-run prompt/completeness/snapshot/redaction/operator, experiment importer, or experiment package candidate/agreement/snapshot-proof/traces fields keep destination unknown/null completeness, `redacted: false`, empty claimed traces, applying-actor importers, `imported-historical` candidate labels, empty agreement, unknown snapshot proof, and empty experiment traces. Human trace annotations remain unrestored as separate author/sequence rows. directory fsync of the pending-write journal, SQLite shared-connection concurrent catalog writes during an open case `BEGIN`, and web discussion key reuse remain residual. If `triage_job_finished` projection also fails after a runner error, the job stays running so stale-lease recovery can record the terminal state. Unauthorized recovery (suspended/disabled/historical, membership loss, revoked run or private-read, unavailable profile/grant store) fails closed into an honest terminal job without a provider call or `owner_only` byte read.
@@ -761,6 +881,27 @@ is told what the workspace offers instead of meeting an unexplained failure.
 Reimplementations that add a purge should expect to revisit legal hold,
 audit retention, and the portable archive together; none of the three assumes
 an investigation can stop existing.
+
+## 15a. Uncertain S3 evidence uploads — unmerged Goal 05
+
+Draft [#1184](https://github.com/chriscase/ContextDesk/pull/1184) adds an explicit
+review step in Investigation First and Beacon. Runtime identifies successful
+inventory reads by generation; presentations freeze one File plus metadata,
+block direct/automatic replay and retain the same scope's intent through read
+failure. Retry is an explicit action after review. Local finish is not server
+rollback. Identity/authority/case/access/lifecycle changes release intent and
+fence obsolete callbacks, including A-to-B-to-A scope reuse.
+
+The byte store uses one canonical-copy attempt below the installed SDK retry
+middleware, preserves unresolved journals and protects subsequently referenced
+content. Metadata remains database-authoritative; object presence or a filename
+match is not a committed artifact. The
+[receipt](../../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md) separates provider
+doubles, actual SDK-handler tests, durable SQLite/object reopen, HTTP-injected
+browser proof and the joined synthetic application journey. No live AWS fault,
+global metadata exactly-once, durable browser intent or new retention policy is
+claimed. Accepted discovery and Activity Center work remains shipped; this
+unmerged recovery goal does not reopen it.
 
 ## 16. Open residuals
 

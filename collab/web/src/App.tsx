@@ -43,6 +43,7 @@ import {
   parsePathname,
   restoreAfterSignIn,
   sameLocation,
+  shareableCollectionQuery,
   titleFor,
   type AreaId,
   type ShellLocation,
@@ -63,9 +64,11 @@ import { BrandMark } from "./graphics.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
 import {
   InvestigationRuntimeProvider,
+  selectResourceView,
   useInvestigationRuntime,
 } from "./investigations/runtime/public.js";
 import { RuntimeHandoffPanel } from "./investigations/strategies/runtime-handoff.js";
+import { RuntimeExternalRunJudgments } from "./investigations/strategies/runtime-external-run-judgments.js";
 import {
   InvestigationStrategyRenderer,
 } from "./investigations/strategies/StrategyRenderer.js";
@@ -122,6 +125,8 @@ interface WarRoomStrategyBindings {
   readonly capabilities: readonly string[];
   readonly readOnly: boolean;
   readonly participant: { username: string; roles: string[] };
+  readonly identityKey: string;
+  readonly authorityKey: string;
   readonly onStageChange: (stage: WorkLocation["stage"]) => void;
   readonly onDeepNavigate: (stage: WorkLocation["stage"], focus: NonNullable<WorkLocation["focus"]>) => void;
   readonly onActivityOpen: (
@@ -143,18 +148,37 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
   );
   if (bindings === null) return null;
 
+  const focusedImportedRunId = props.stage === "capture"
+    && props.focus?.itemKind === "imported-run"
+    && typeof props.focus.item === "string"
+    && props.focus.item.length > 0
+      ? props.focus.item
+      : null;
+  const humanAssessmentsPanel = focusedImportedRunId === null || props.focusCaseId === null
+    ? undefined
+    : <RuntimeExternalRunJudgments
+        caseId={props.focusCaseId}
+        runId={focusedImportedRunId}
+        onDeepNavigate={bindings.onDeepNavigate}
+      />;
+
   return (
     <>
       <Cases
+        key={runtime.presentationScopeKey}
         roles={bindings.roles}
         capabilities={bindings.capabilities}
         readOnly={bindings.readOnly}
         participant={bindings.participant}
+        identityKey={bindings.identityKey}
+        authorityKey={bindings.authorityKey}
+        recordedContextView={selectResourceView(runtime.resources.investigations)}
         view={props.view}
         focusCaseId={props.focusCaseId}
         stage={props.stage}
         {...(props.focus ? { focus: props.focus } : {})}
         {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })}
+        {...(humanAssessmentsPanel === undefined ? {} : { humanAssessmentsPanel })}
         onOpenCase={props.onOpenCase}
         onStageChange={bindings.onStageChange}
         onDeepNavigate={bindings.onDeepNavigate}
@@ -171,6 +195,7 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
               collectionQuery: props.collectionQuery,
               onCollectionQueryChange: props.onCollectionQueryChange,
               onCollectionNextPage: collection.nextPage,
+              collectionCursorRestartNotice: collection.cursorRestartNotice,
             })}
         lifecycleBinding={{
           lifecycle: runtime.resources.lifecycle,
@@ -526,6 +551,7 @@ export function App() {
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
   );
+  const [collectionQueryRejection, setCollectionQueryRejection] = useState<string | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [startSignal, setStartSignal] = useState(0);
   const [focusedCaseTitle, setFocusedCaseTitle] = useState<string | null>(null);
@@ -533,6 +559,9 @@ export function App() {
   const [leaveRequest, setLeaveRequest] = useState(false);
   const locationRef = useRef(location);
   locationRef.current = location;
+  useEffect(() => {
+    setCollectionQueryRejection(null);
+  }, [location]);
   const profileDirtyRef = useRef(false);
   profileDirtyRef.current = profileDirty;
   const pendingLeaveRef = useRef<
@@ -974,6 +1003,8 @@ export function App() {
     capabilities,
     readOnly: staticReadOnly,
     participant: { username: session.username, roles },
+    identityKey: session.identityId,
+    authorityKey: investigationAuthorityKey(session, staticReadOnly),
     onStageChange: (stage) =>
       isWorkLocation(locationRef.current) && locationRef.current.caseId
         ? navigate({
@@ -1227,6 +1258,9 @@ export function App() {
                   </section>
                 ) : (
                   <WarRoomStrategyContext.Provider value={warRoomBindings}>
+                    {collectionQueryRejection ? (
+                      <p className="app-notice" role="alert">{collectionQueryRejection}</p>
+                    ) : null}
                     <InvestigationStrategyRenderer
                       strategy={surfaceStrategy}
                       registrations={INVESTIGATION_STRATEGY_REGISTRATIONS}
@@ -1252,13 +1286,22 @@ export function App() {
                       {...(work.caseId === null
                         ? {
                             collectionQuery: work.collectionQuery ?? DEFAULT_COLLECTION_QUERY,
-                            onCollectionQueryChange: (collectionQuery) =>
+                            onCollectionQueryChange: (collectionQuery) => {
+                              if (shareableCollectionQuery(collectionQuery) === null) {
+                                setCollectionQueryRejection(
+                                  "That filter was not applied. The previous search is still in effect.",
+                                );
+                                return;
+                              }
+                              setCollectionQueryRejection(null);
                               navigate({
                                 area: "investigations",
                                 caseId: null,
-                                stage: "situation",
+                                stage: work.stage,
+                                ...(work.focus ? { focus: work.focus } : {}),
                                 collectionQuery,
-                              }, "replace"),
+                              }, "replace");
+                            },
                           }
                         : {})}
                       onOpenAdvancedTools={(caseId, stage) => {

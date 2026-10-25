@@ -25,3 +25,5 @@ export type {
   ArtifactAnnotationListV1,
   ArtifactAnnotationV1,
 } from "./artifact-annotation.js";
+
+export * from "./evidence-labels.js";

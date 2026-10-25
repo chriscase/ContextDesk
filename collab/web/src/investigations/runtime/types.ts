@@ -28,4 +28,4 @@ export type MutationState<TResult = void> =
   | { status: "idle" }
   | { status: "running" }
   | { status: "succeeded"; value: TResult }
-  | { status: "failed"; error: RuntimeFailure };
+  | { status: "failed"; error: RuntimeFailure; evidenceReadGeneration?: number };

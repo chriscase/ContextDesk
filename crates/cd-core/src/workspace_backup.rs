@@ -323,6 +323,10 @@ impl BackupRunSummary {
 #[async_trait]
 pub trait BackupConfirmationGate: Send + Sync {
     /// Return true only after the user affirmatively approves this exact plan.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn confirm(&self, summary: &BackupPlanSummary) -> bool;
 }
 

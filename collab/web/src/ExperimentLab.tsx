@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  goldPromotionFingerprint,
+  parseGoldReference,
+  parseGoldReferenceExport,
+  type GoldReferenceV1,
+} from "@cd-collab/contracts/gold";
 import type { MouseEvent, ReactNode } from "react";
 import { pathFor, type RouteItemKind, type WorkFocus } from "./app-location.js";
 import { ArtifactExcerpt } from "./evidence-excerpt.js";
@@ -31,6 +37,7 @@ interface ExperimentView {
   createdAt?: string;
   taskFingerprint: string;
   snapshotFingerprint: string;
+  snapshotProof?: { basis: string };
   candidates: CandidateRow[];
   agreement: {
     sharedAnchors: { evidenceRef: string; role: string; candidateIds: string[] }[];
@@ -73,6 +80,7 @@ interface ExperimentView {
     promotedByUsername: string;
     notes: string[];
   } | null;
+  golds?: GoldReferenceV1[];
   alignments: {
     candidateId: string;
     status: string;
@@ -520,6 +528,9 @@ function normalizedSnapshotFingerprint(value: string): string {
 }
 
 function snapshotEvidenceRefsFor(view: ExperimentView, snapshots: SnapshotView[]): string[] {
+  // A matching fingerprint alone does not prove that this experiment was
+  // recorded against this host-frozen snapshot. Mirror the server boundary.
+  if (view.snapshotProof?.basis !== "host_frozen_snapshot") return [];
   const fingerprint = normalizedSnapshotFingerprint(view.snapshotFingerprint);
   const snapshot = snapshots.find(
     (candidate) => normalizedSnapshotFingerprint(candidate.fingerprint) === fingerprint,
@@ -550,16 +561,25 @@ function EvidencePicker(props: {
   legend: string;
   roles?: boolean;
   additionalRefs?: readonly string[];
+  initialSelectedRefs?: readonly string[];
+  locked?: boolean;
 }) {
-  const [query, setQuery] = useState("");
-  const [selectedRefs, setSelectedRefs] = useState<Set<string>>(() => new Set());
-  const fieldsetRef = useRef<HTMLFieldSetElement>(null);
-  const previousViewId = useRef(props.view.id);
   // Resolve the whole set at once: picking one reference at a time cannot see
   // that two of them would render under the same name, and a chooser whose
   // options read identically cannot be used to choose.
   const refs = [...new Set([...evidenceRefsFor(props.view), ...(props.additionalRefs ?? [])])]
     .sort((left, right) => left.localeCompare(right));
+  const availableRefs = new Set(refs);
+  const initialSelection = [...new Set(
+    (props.initialSelectedRefs ?? []).filter((ref) => availableRefs.has(ref)),
+  )].sort((left, right) => left.localeCompare(right));
+  const initialSelectionKey = JSON.stringify(initialSelection);
+  const [query, setQuery] = useState("");
+  const [selectedRefs, setSelectedRefs] = useState<Set<string>>(() => new Set(initialSelection));
+  const seededInitialRefs = useRef(new Set(initialSelection));
+  const selectionWasReset = useRef(false);
+  const fieldsetRef = useRef<HTMLFieldSetElement>(null);
+  const previousViewId = useRef(props.view.id);
   const identityLookup = identityContext(props.view, props.artifacts, {});
   const identities = new Map(
     disambiguateIdentities(refs.map((ref) => evidenceIdentity(ref, identityLookup)))
@@ -588,6 +608,7 @@ function EvidencePicker(props: {
     const form = fieldsetRef.current?.form;
     if (!form) return undefined;
     const reset = () => {
+      selectionWasReset.current = true;
       setSelectedRefs(new Set());
       setQuery("");
     };
@@ -602,8 +623,19 @@ function EvidencePicker(props: {
     setQuery("");
   }, [props.view.id]);
 
+  useEffect(() => {
+    // A matching snapshot may arrive later. Seed each accepted ref only once;
+    // neither refresh nor a new resource object can undo manual deselection.
+    if (props.locked || selectionWasReset.current) return;
+    const pending = (JSON.parse(initialSelectionKey) as string[])
+      .filter((ref) => !seededInitialRefs.current.has(ref));
+    if (!pending.length) return;
+    for (const ref of pending) seededInitialRefs.current.add(ref);
+    setSelectedRefs((current) => new Set([...current, ...pending]));
+  }, [initialSelectionKey, props.locked]);
+
   return (
-    <fieldset className="experiment-lab__evidence-picker" ref={fieldsetRef}>
+    <fieldset className="experiment-lab__evidence-picker" ref={fieldsetRef} disabled={props.locked}>
       <legend>{props.legend}</legend>
       <label className="experiment-lab__evidence-search">
         <span>Search recorded evidence</span>
@@ -667,6 +699,484 @@ function EvidencePicker(props: {
         <p className="experiment-lab__empty">No recorded evidence matches this search.</p>
       )}
     </fieldset>
+  );
+}
+
+interface BenchmarkIntent {
+  caseId: string;
+  experimentId: string;
+  packageId: string;
+  taskFingerprint: string;
+  snapshotFingerprint: string;
+  decisionId: string;
+  expectedRevision: number;
+  expectedGoldVersion: number;
+  evidenceAnchors: string[];
+  expectedRelationships: { evidenceRef: string; role: string }[];
+  helpfulnessDimensions: string[];
+}
+
+function goldMatchesIntent(gold: GoldReferenceV1, intent: BenchmarkIntent): boolean {
+  return gold.caseId === intent.caseId && gold.experimentId === intent.experimentId &&
+    gold.packageId === intent.packageId && gold.taskFingerprint === intent.taskFingerprint &&
+    gold.snapshotFingerprint === intent.snapshotFingerprint &&
+    gold.acceptedDecisionId === intent.decisionId &&
+    gold.acceptedDecisionRevision === intent.expectedRevision &&
+    goldPromotionFingerprint(gold) === goldPromotionFingerprint({
+      acceptedDecisionId: intent.decisionId,
+      acceptedDecisionRevision: intent.expectedRevision,
+      evidenceAnchors: intent.evidenceAnchors,
+      expectedRelationships: intent.expectedRelationships,
+      helpfulnessDimensions: intent.helpfulnessDimensions,
+    });
+}
+
+const BENCHMARK_BLOB_TTL_MS = 5_000;
+
+function BenchmarkPromotion(props: {
+  caseId: string;
+  view: ExperimentView;
+  accepted: ExperimentView["decisions"][number];
+  artifacts: EvidenceArtifactView[];
+  snapshotRefs: string[];
+  canPromote: boolean;
+  canDownload: boolean;
+  refresh: () => Promise<boolean>;
+}) {
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
+  const attemptRef = useRef(0);
+  const alive = useRef(true);
+  const formRef = useRef<HTMLFormElement>(null);
+  const [uncertain, setUncertain] = useState<{ intent: BenchmarkIntent; attempt: number } | null>(null);
+  // Keep both the values and their visible evidence choices in the submitted
+  // editing context. Late resources/refreshes belong to the next editable draft.
+  const [frozenEditor, setFrozenEditor] = useState<{
+    view: ExperimentView; artifacts: EvidenceArtifactView[]; snapshotRefs: string[];
+    accepted: typeof props.accepted; intent: BenchmarkIntent;
+  } | null>(null);
+  // Event handlers retained by the browser/React can outlive their render.
+  // A synchronous ref keeps an earlier form or retry handler from bypassing a
+  // newer unknown outcome before React publishes the next render.
+  const uncertainRef = useRef<{ intent: BenchmarkIntent; attempt: number } | null>(null);
+  const [reviewPermission, setReviewPermission] = useState<{
+    attempt: number; expectedGoldVersion: number;
+  } | null>(null);
+  const [recorded, setRecorded] = useState<GoldReferenceV1 | null>(null);
+  const [selectedGoldId, setSelectedGoldId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const downloadPending = useRef(false);
+  const blobLease = useRef<{ url: string; timer: number | null } | null>(null);
+  const selectedGoldRef = useRef<string | null>(null);
+  const history = [...(props.view.golds ?? [])];
+  if (recorded && !history.some((gold) => gold.goldId === recorded.goldId)) history.push(recorded);
+  history.sort((a, b) => b.version - a.version);
+  const effectiveGoldId = selectedGoldId ?? props.view.gold?.goldId ?? recorded?.goldId ?? null;
+  const selectedGold = history.find((gold) => gold.goldId === effectiveGoldId) ?? null;
+  const intentLocked = frozenEditor !== null && (pending || uncertain !== null);
+  const editor = intentLocked && frozenEditor ? frozenEditor : props;
+  const shownGoldVersion = intentLocked
+    ? reviewPermission?.expectedGoldVersion ?? frozenEditor?.intent.expectedGoldVersion ?? 0
+    : props.view.gold?.version ?? 0;
+
+  const revokeBlob = useCallback(() => {
+    const lease = blobLease.current;
+    if (!lease) return;
+    blobLease.current = null;
+    if (lease.timer !== null) window.clearTimeout(lease.timer);
+    URL.revokeObjectURL(lease.url);
+  }, []);
+
+  useLayoutEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      revokeBlob();
+    };
+  }, [revokeBlob]);
+  useLayoutEffect(() => {
+    selectedGoldRef.current = effectiveGoldId;
+    revokeBlob();
+  }, [effectiveGoldId, revokeBlob]);
+
+  async function freshSources(intent: BenchmarkIntent): Promise<{ latest: ExperimentView; eligible: Set<string> }> {
+    const root = `/api/cases/${intent.caseId}`;
+    const [experimentsResponse, evidenceResponse, snapshotsResponse] = await Promise.all([
+      protectedApiFetch(`${root}/experiments`),
+      protectedApiFetch(`${root}/evidence`),
+      protectedApiFetch(`${root}/snapshots`),
+    ]);
+    if (!experimentsResponse.ok || !evidenceResponse.ok || !snapshotsResponse.ok) {
+      throw new Error("Current benchmark evidence could not be checked; no promotion was sent.");
+    }
+    const experimentsBody = (await experimentsResponse.json()) as { experiments?: ExperimentView[] };
+    const evidenceBody = (await evidenceResponse.json()) as { artifacts?: EvidenceArtifactView[] };
+    const snapshotsBody = (await snapshotsResponse.json()) as { snapshots?: SnapshotView[] };
+    const latest = experimentsBody.experiments?.find((row) => row.id === intent.experimentId);
+    if (!latest || latest.packageId !== intent.packageId ||
+        latest.taskFingerprint !== intent.taskFingerprint ||
+        latest.snapshotFingerprint !== intent.snapshotFingerprint) {
+      throw new Error("The comparison changed or is no longer available; no promotion was sent.");
+    }
+    const accepted = [...latest.decisions].reverse().find((row) => row.status === "accepted");
+    if (accepted?.id !== intent.decisionId || accepted.revision !== intent.expectedRevision) {
+      throw new Error("The accepted decision changed. Reopen its new editing context before promoting.");
+    }
+    const visibleArtifacts = new Set((evidenceBody.artifacts ?? []).map((row) => row.id));
+    const snapshotRefs = snapshotEvidenceRefsFor(latest, snapshotsBody.snapshots ?? [])
+      .filter((ref) => visibleArtifacts.has(ref));
+    return { latest, eligible: new Set([...evidenceRefsFor(latest), ...snapshotRefs]) };
+  }
+
+  async function postFrozen(intent: BenchmarkIntent, alreadyPending = false): Promise<void> {
+    if (!alive.current || !props.canPromote || (!alreadyPending && pendingRef.current)) return;
+    pendingRef.current = true;
+    setPending(true);
+    const attempt = ++attemptRef.current;
+    setReviewPermission(null);
+    uncertainRef.current = null;
+    setUncertain(null);
+    setProblem(null);
+    setNotice(null);
+    try {
+      const response = await protectedApiFetch(
+        `/api/cases/${intent.caseId}/experiments/${intent.experimentId}/gold`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            decisionId: intent.decisionId,
+            expectedRevision: intent.expectedRevision,
+            expectedGoldVersion: intent.expectedGoldVersion,
+            evidenceAnchors: intent.evidenceAnchors,
+            expectedRelationships: intent.expectedRelationships,
+            helpfulnessDimensions: intent.helpfulnessDimensions,
+          }),
+        },
+      );
+      if (!alive.current || attempt !== attemptRef.current) return;
+      if (!response.ok) {
+        const message = await responseError(response, "Benchmark promotion was not confirmed");
+        if (!alive.current || attempt !== attemptRef.current) return;
+        setProblem(message);
+        if (response.status === 409 || response.status >= 500) {
+          uncertainRef.current = { intent, attempt };
+          setUncertain(uncertainRef.current);
+        }
+        return;
+      }
+      const gold = parseGoldReference(await response.json());
+      if (!goldMatchesIntent(gold, intent)) {
+        throw new Error("The successful response did not match the submitted benchmark intent.");
+      }
+      if (!alive.current || attempt !== attemptRef.current) return;
+      setRecorded(gold);
+      setSelectedGoldId(gold.goldId);
+      setFrozenEditor(null);
+      formRef.current?.reset();
+      setNotice(`Benchmark v${gold.version} recorded. Its attribution and original version are preserved.`);
+      const refreshed = await props.refresh();
+      if (alive.current && !refreshed) {
+        setProblem("Benchmark recorded, but the history refresh failed. Reopen or retry the history read.");
+      }
+    } catch {
+      if (alive.current && attempt === attemptRef.current) {
+        uncertainRef.current = { intent, attempt };
+        setUncertain(uncertainRef.current);
+        setProblem("The result is unconfirmed. The server may have recorded the benchmark. Read current history before any deliberate retry.");
+      }
+    } finally {
+      if (alive.current && attempt === attemptRef.current) {
+        pendingRef.current = false;
+        setPending(false);
+      }
+    }
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!alive.current || !props.canPromote || pendingRef.current || uncertainRef.current) return;
+    const data = new FormData(event.currentTarget);
+    const evidenceAnchors = data.getAll("evidenceRefs").map(String);
+    if (!evidenceAnchors.length) {
+      setProblem("Select at least one recorded evidence item. No promotion was sent.");
+      return;
+    }
+    const intent: BenchmarkIntent = {
+      caseId: props.caseId,
+      experimentId: props.view.id,
+      packageId: props.view.packageId,
+      taskFingerprint: props.view.taskFingerprint,
+      snapshotFingerprint: props.view.snapshotFingerprint,
+      decisionId: props.accepted.id,
+      expectedRevision: props.accepted.revision,
+      expectedGoldVersion: props.view.gold?.version ?? 0,
+      evidenceAnchors,
+      expectedRelationships: evidenceAnchors.flatMap((evidenceRef) => {
+        const role = String(data.get(`evidenceRole:${evidenceRef}`) ?? "").trim();
+        return role ? [{ evidenceRef, role }] : [];
+      }),
+      helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
+        .split(",").map((row) => row.trim()).filter(Boolean),
+    };
+    setFrozenEditor({ view: props.view, artifacts: props.artifacts, snapshotRefs: props.snapshotRefs,
+      accepted: props.accepted, intent });
+    pendingRef.current = true;
+    setPending(true);
+    setProblem(null);
+    try {
+      const { latest, eligible } = await freshSources(intent);
+      if (!alive.current) return;
+      const missing = intent.evidenceAnchors.filter((ref) => !eligible.has(ref));
+      if (missing.length) {
+        setProblem(`${missing.length} selected evidence reference${missing.length === 1 ? " is" : "s are"} no longer eligible. Review and correct the selection; nothing was submitted.`);
+        return;
+      }
+      if (latest.gold?.version !== props.view.gold?.version) {
+        setProblem("The benchmark version changed. Review current history before trying this frozen selection.");
+        const attempt = ++attemptRef.current;
+        uncertainRef.current = { intent, attempt };
+        setUncertain(uncertainRef.current);
+        setReviewPermission(null);
+        return;
+      }
+      await postFrozen(intent, true);
+    } catch (error) {
+      if (alive.current) setProblem(error instanceof Error ? error.message : "Current evidence could not be checked.");
+    } finally {
+      // postFrozen releases its own lock. A failed preflight releases here.
+      if (alive.current && pendingRef.current) {
+        pendingRef.current = false;
+        setPending(false);
+      }
+      if (alive.current && !uncertainRef.current) setFrozenEditor(null);
+    }
+  }
+
+  async function readHistory(): Promise<void> {
+    const issue = uncertain;
+    if (!issue || pendingRef.current || !alive.current) return;
+    const attempt = issue.attempt;
+    setProblem(null);
+    try {
+      const response = await protectedApiFetch(`/api/cases/${issue.intent.caseId}/experiments`);
+      if (!response.ok) throw new Error("The authoritative history read failed.");
+      const body = (await response.json()) as { experiments?: ExperimentView[] };
+      if (!alive.current || pendingRef.current || attempt !== attemptRef.current) return;
+      const view = body.experiments?.find((row) => row.id === issue.intent.experimentId);
+      if (!view || view.packageId !== issue.intent.packageId ||
+          view.taskFingerprint !== issue.intent.taskFingerprint ||
+          view.snapshotFingerprint !== issue.intent.snapshotFingerprint) {
+        throw new Error("The comparison is no longer available in this scope.");
+      }
+      const accepted = [...view.decisions].reverse().find((row) => row.status === "accepted");
+      if (accepted?.id !== issue.intent.decisionId || accepted.revision !== issue.intent.expectedRevision) {
+        throw new Error("The accepted decision changed. Reopen the new editing context.");
+      }
+      const golds = (view.golds ?? []).map((row) => parseGoldReference(row));
+      const recovered = golds.find((gold) => goldMatchesIntent(gold, issue.intent));
+      if (recovered) {
+        setRecorded(recovered);
+        setSelectedGoldId(recovered.goldId);
+        uncertainRef.current = null;
+        setUncertain(null);
+        setFrozenEditor(null);
+        setReviewPermission(null);
+        setNotice(`Recovered recorded benchmark v${recovered.version}; no second promotion was sent.`);
+        const refreshed = await props.refresh();
+        if (alive.current && !refreshed) setProblem("Recorded benchmark recovered, but display refresh failed.");
+        return;
+      }
+      setReviewPermission({ attempt, expectedGoldVersion: view.gold?.version ?? 0 });
+      setNotice("No matching version appeared in this read. This does not prove rollback. Review the current version before deliberately retrying the same selection.");
+    } catch (error) {
+      if (alive.current && attempt === attemptRef.current) {
+        setReviewPermission(null);
+        setProblem(error instanceof Error ? error.message : "History could not be checked.");
+      }
+    }
+  }
+
+  async function replayReviewed(): Promise<void> {
+    const issue = uncertain;
+    const permission = reviewPermission;
+    if (!issue || !permission || permission.attempt !== issue.attempt ||
+        permission.attempt !== attemptRef.current || uncertainRef.current?.attempt !== permission.attempt ||
+        pendingRef.current || !alive.current || !props.canPromote) return;
+    // The review permits only the frozen semantic request. Its CAS precondition
+    // may advance after explicit review; selected evidence is checked afresh.
+    const intent = { ...issue.intent, expectedGoldVersion: permission.expectedGoldVersion };
+    setFrozenEditor((current) => current ? { ...current, intent } : current);
+    pendingRef.current = true;
+    setPending(true);
+    setProblem(null);
+    try {
+      const { eligible } = await freshSources(intent);
+      if (!alive.current) return;
+      const missing = intent.evidenceAnchors.filter((ref) => !eligible.has(ref));
+      if (missing.length) {
+        setProblem("A selected evidence reference is no longer eligible. Correct the selection before a new intent; no replay was sent.");
+        return;
+      }
+      await postFrozen(intent, true);
+    } catch (error) {
+      if (alive.current) setProblem(error instanceof Error ? error.message : "Current evidence could not be checked.");
+    } finally {
+      if (alive.current && pendingRef.current) {
+        pendingRef.current = false;
+        setPending(false);
+      }
+      if (alive.current && !uncertainRef.current) setFrozenEditor(null);
+    }
+  }
+
+  async function downloadGold(): Promise<void> {
+    const chosen = selectedGold;
+    if (!chosen || !props.canDownload || !alive.current || downloadPending.current ||
+        selectedGoldRef.current !== chosen.goldId) return;
+    downloadPending.current = true;
+    setDownloading(true);
+    setProblem(null);
+    revokeBlob();
+    try {
+      const response = await protectedApiFetch(
+        `/api/cases/${props.caseId}/experiments/${props.view.id}/gold/${encodeURIComponent(chosen.goldId)}/export`,
+        { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ version: chosen.version }) },
+      );
+      if (!response.ok) throw new Error(await responseError(response, "Owner-only benchmark export was denied"));
+      const bytes = await response.text();
+      const envelope = parseGoldReferenceExport(JSON.parse(bytes) as unknown);
+      if (!goldMatchesIntent(envelope.gold, {
+        caseId: props.caseId,
+        experimentId: props.view.id,
+        packageId: props.view.packageId,
+        taskFingerprint: props.view.taskFingerprint,
+        snapshotFingerprint: props.view.snapshotFingerprint,
+        decisionId: chosen.acceptedDecisionId,
+        expectedRevision: chosen.acceptedDecisionRevision,
+        expectedGoldVersion: chosen.version,
+        evidenceAnchors: chosen.evidenceAnchors,
+        expectedRelationships: chosen.expectedRelationships ?? [],
+        helpfulnessDimensions: chosen.helpfulnessDimensions ?? [],
+      }) || envelope.gold.goldId !== chosen.goldId || envelope.gold.version !== chosen.version) {
+        throw new Error("Exported benchmark identity did not match the selected recorded version.");
+      }
+      if (!alive.current || !props.canDownload || selectedGoldRef.current !== chosen.goldId) return;
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/json;charset=utf-8" }));
+      blobLease.current = { url, timer: null };
+      try {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `contextdesk-owner-only-gold-v${chosen.version}-${chosen.goldId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 48)}.json`;
+        anchor.rel = "noopener";
+        document.body.appendChild(anchor);
+        try { anchor.click(); } finally { anchor.remove(); }
+        blobLease.current.timer = window.setTimeout(revokeBlob, BENCHMARK_BLOB_TTL_MS);
+        setNotice("Owner-only benchmark download started. Check the saved file before offline import.");
+      } catch (error) {
+        revokeBlob();
+        throw error;
+      }
+    } catch (error) {
+      if (alive.current) setProblem(error instanceof Error ? error.message : "No benchmark file was prepared.");
+    } finally {
+      downloadPending.current = false;
+      if (alive.current) setDownloading(false);
+    }
+  }
+
+  return (
+    <div className="experiment-lab__benchmark-handoff">
+      {props.canPromote ? (
+        <details className="experiment-lab__tools">
+          <summary>Version the human benchmark</summary>
+          <p className="experiment-lab__section-note">
+            Accepted decision r{editor.accepted.revision}: “{truncateText(editor.accepted.text)}”.
+            Review the initial evidence selection. This human benchmark is not a correctness verdict.
+          </p>
+          {intentLocked ? <p>Selection, roles, and dimensions are locked for this promotion.</p> : null}
+          <form ref={formRef} className="composer" onSubmit={(event) => void submit(event)}>
+            <EvidencePicker
+              view={editor.view}
+              artifacts={editor.artifacts}
+              legend="Evidence anchors for this human benchmark"
+              additionalRefs={editor.snapshotRefs}
+              initialSelectedRefs={editor.accepted.evidenceRefs}
+              locked={intentLocked}
+              roles
+            />
+            <label>
+              Optional helpfulness dimensions, comma separated
+              <input className="login__input" name="helpfulnessDimensions" disabled={intentLocked} />
+            </label>
+            <p>Expected current benchmark version: {shownGoldVersion}.</p>
+            <button className="login__submit" type="submit" disabled={pending || uncertain !== null}>
+              {pending ? "Checking and promoting…" : "Promote accepted decision to gold"}
+            </button>
+          </form>
+        </details>
+      ) : null}
+      {uncertain ? (
+        <div className="experiment-lab__benchmark-recovery">
+          <p>The previous promotion outcome is unconfirmed or conflicted. Its selection, roles, and dimensions stay locked in the benchmark form.</p>
+          <button type="button" disabled={pending} onClick={() => void readHistory()}>
+            Read current benchmark history
+          </button>
+          {reviewPermission?.attempt === uncertain.attempt ? (
+            <>
+              <button type="button" disabled={pending} onClick={() => void replayReviewed()}>
+                Retry the same selection using reviewed version {reviewPermission.expectedGoldVersion}
+              </button>
+              <button type="button" disabled={pending} onClick={() => {
+                uncertainRef.current = null;
+                setUncertain(null);
+                setFrozenEditor(null);
+                setReviewPermission(null);
+                setNotice("Frozen retry discarded. Review the current selection before submitting a new intent.");
+              }}>
+                Edit a new benchmark intent
+              </button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+      {recorded ? <p role="status">Recorded benchmark v{recorded.version}; open version details for its exact identity.</p> : null}
+      {history.length ? (
+        <div className="experiment-lab__benchmark-history">
+          <label>
+            Recorded benchmark version
+            <select value={effectiveGoldId ?? ""} onChange={(event) => {
+              revokeBlob();
+              setSelectedGoldId(event.currentTarget.value);
+            }}>
+              {history.map((gold) => <option key={gold.goldId} value={gold.goldId}>
+                v{gold.version} · {gold.goldId === props.view.gold?.goldId ? "latest" : "historical"}
+              </option>)}
+            </select>
+          </label>
+          {selectedGold ? (
+            <details>
+              <summary>Recorded version details</summary>
+              <p>Gold ID {selectedGold.goldId}; accepted decision {selectedGold.acceptedDecisionId} r{selectedGold.acceptedDecisionRevision}; promoted by {selectedGold.promotedByUsername} at {selectedGold.createdAt}.</p>
+              <p>Task {selectedGold.taskFingerprint}; snapshot {selectedGold.snapshotFingerprint}; anchors {selectedGold.evidenceAnchors.join(", ")}.</p>
+            </details>
+          ) : null}
+          {props.canDownload && selectedGold ? (
+            <div>
+              <p>Owner-only identity-preserving file. It contains internal identifiers and attribution; do not share it publicly by default. The share-safe lab export is separate.</p>
+              <button type="button" disabled={downloading} onClick={() => void downloadGold()}>
+                {downloading ? "Preparing owner-only file…" : `Download owner-only benchmark v${selectedGold.version}`}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {notice ? <p role="status">{notice}</p> : null}
+      {problem ? <p role="alert">{problem}</p> : null}
+    </div>
   );
 }
 
@@ -1340,6 +1850,8 @@ export function ExperimentLab(props: {
   caseId: string;
   canWrite: boolean;
   canLead: boolean;
+  canBenchmarkPromote?: boolean;
+  canBenchmarkExport?: boolean;
   readOnly?: boolean;
   caseTitle?: string;
   caseStatus?: string;
@@ -1407,7 +1919,7 @@ export function ExperimentLab(props: {
   const loadedCaseId = useRef(props.caseId);
   const refreshGeneration = useRef(0);
 
-  const refresh = useCallback(async (preferredId?: string) => {
+  const refresh = useCallback(async (preferredId?: string): Promise<boolean> => {
     const generation = ++refreshGeneration.current;
     const isCurrent = () => generation === refreshGeneration.current;
     try {
@@ -1415,17 +1927,19 @@ export function ExperimentLab(props: {
       if (!res.ok) {
         const message = await responseError(res, "Experiment history could not be loaded");
         if (isCurrent()) setError(message);
-        return;
+        return false;
       }
       const body = (await res.json()) as { experiments?: ExperimentView[] };
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
       const nextExperiments = body.experiments ?? [];
       setExperiments(nextExperiments);
       if (preferredId && nextExperiments.some((row) => row.id === preferredId)) {
         setActive(preferredId);
       }
+      return true;
     } catch {
       if (isCurrent()) setError("Experiment history could not be loaded");
+      return false;
     }
   }, [props.caseId]);
 
@@ -2059,50 +2573,6 @@ export function ExperimentLab(props: {
       setExported(body);
     } catch {
       setError("Share-safe export failed because the response could not be read");
-    }
-  }
-
-  async function promoteGold(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!current) return;
-    const accepted = [...current.decisions].reverse().find((row) => row.status === "accepted");
-    if (!accepted) return;
-    const form = event.currentTarget;
-    const data = new FormData(form);
-    const evidenceAnchors = data.getAll("evidenceRefs").map(String);
-    if (!evidenceAnchors.length) {
-      setError("Select at least one recorded evidence item for the human benchmark");
-      return;
-    }
-    const expectedGold = String(data.get("expectedGoldVersion") ?? "").trim();
-    setError(null);
-    try {
-      const res = await protectedApiFetch(`/api/cases/${props.caseId}/experiments/${current.id}/gold`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          decisionId: accepted.id,
-          expectedRevision: accepted.revision,
-          expectedGoldVersion: expectedGold ? Number(expectedGold) : current.gold?.version ?? 0,
-          evidenceAnchors,
-          expectedRelationships: evidenceAnchors.flatMap((evidenceRef) => {
-            const role = String(data.get(`evidenceRole:${evidenceRef}`) ?? "").trim();
-            return role ? [{ evidenceRef, role }] : [];
-          }),
-          helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
-            .split(",")
-            .map((item) => item.trim())
-            .filter(Boolean),
-        }),
-      });
-      if (!res.ok) {
-        setError(await responseError(res, "Gold promotion failed"));
-        return;
-      }
-      form.reset();
-      await refresh();
-    } catch {
-      setError("Gold promotion failed");
     }
   }
 
@@ -3844,37 +4314,18 @@ export function ExperimentLab(props: {
               </button>
             </details>
           ) : null}
-          {canLead && current.decisions.some((row) => row.status === "accepted") ? (
-            <details className="experiment-lab__tools">
-              <summary>Version the human benchmark</summary>
-              <form className="composer" onSubmit={(event) => void promoteGold(event)}>
-                <EvidencePicker
-                  view={current}
-                  artifacts={evidenceArtifacts}
-                  legend="Evidence anchors for this human benchmark"
-                  additionalRefs={snapshotEvidenceRefs}
-                  roles
-                />
-                <input
-                  className="login__input"
-                  name="helpfulnessDimensions"
-                  placeholder="optional helpfulness dimensions, comma separated"
-                />
-                {current.gold ? (
-                  <input
-                    className="login__input"
-                    name="expectedGoldVersion"
-                    type="number"
-                    min={1}
-                    defaultValue={current.gold.version}
-                    aria-label="expected gold version"
-                  />
-                ) : null}
-                <button className="login__submit" type="submit">
-                  Promote accepted decision to gold
-                </button>
-              </form>
-            </details>
+          {acceptedDecision ? (
+            <BenchmarkPromotion
+              key={`${props.caseId}:${current.id}:${acceptedDecision.id}:${acceptedDecision.revision}:${props.canBenchmarkPromote ?? canLead}:${props.canBenchmarkExport === true}`}
+              caseId={props.caseId}
+              view={current}
+              accepted={acceptedDecision}
+              artifacts={evidenceArtifacts}
+              snapshotRefs={snapshotEvidenceRefs}
+              canPromote={props.canBenchmarkPromote ?? canLead}
+              canDownload={props.canBenchmarkExport === true}
+              refresh={() => refresh(current.id)}
+            />
           ) : null}
           </section>
           {canExport ? (

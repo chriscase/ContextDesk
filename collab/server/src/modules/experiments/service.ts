@@ -6,6 +6,7 @@ import {
   EXPERIMENT_PACKAGE_SCHEMA_ID,
   GOLD_IS_HUMAN_BENCHMARK,
   GOLD_REFERENCE_SCHEMA_ID,
+  GOLD_REFERENCE_EXPORT_SCHEMA_ID,
   HELPFULNESS_DIMENSIONS,
   HELPFULNESS_OBSERVATION_SCHEMA_ID,
   INTERACTION_TRACE_SCHEMA_ID,
@@ -14,6 +15,7 @@ import {
   goldPromotionFingerprint,
   parseExperimentDecision,
   parseGoldReference,
+  parseGoldReferenceExport,
   parseHelpfulnessObservation,
   parseInteractionTrace,
   parseLabExportV2,
@@ -38,6 +40,7 @@ import {
   type ExperimentSummaryV1,
   type ExternalRunV1,
   type GoldReferenceV1,
+  type GoldReferenceExportV1,
   type HelpfulnessDimension,
   type HelpfulnessObservationV1,
   type InteractionTraceV1,
@@ -1216,6 +1219,35 @@ export class ExperimentService {
       outcome: "success",
     });
     return gold;
+    });
+  }
+
+  /** Exact stored, identity-preserving benchmark for an authorized owner. */
+  async exportGold(
+    caseId: string,
+    experimentId: string,
+    goldId: string,
+    version: number,
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<GoldReferenceExportV1> {
+    const experiment = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
+    const stored = (await this.store.listGolds(experimentId))
+      .find((candidate) => candidate.goldId === goldId && candidate.version === version);
+    if (!stored) throw new ExperimentNotFoundError("benchmark version not found");
+    const gold = parseGoldReference(stored);
+    if (
+      gold.caseId !== caseId || gold.experimentId !== experimentId ||
+      gold.packageId !== experiment.packageId ||
+      gold.taskFingerprint !== experiment.taskFingerprint ||
+      gold.snapshotFingerprint !== experiment.snapshotFingerprint
+    ) {
+      throw new Error("stored benchmark identity does not match experiment");
+    }
+    return parseGoldReferenceExport({
+      schemaId: GOLD_REFERENCE_EXPORT_SCHEMA_ID,
+      privacyClass: "owner_only",
+      gold,
     });
   }
 

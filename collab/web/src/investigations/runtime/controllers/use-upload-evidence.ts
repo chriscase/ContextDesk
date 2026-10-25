@@ -46,7 +46,7 @@ export interface UseUploadEvidenceOptions {
   /** Publish only the authoritative upload envelope members. Must not throw. */
   readonly onUploaded: (artifact: ArtifactV1, summary: ContributionV1) => void;
   /** Refresh evidence for this exact investigation. Must not throw. */
-  readonly onRefreshEvidence: (investigationId: string) => void;
+  readonly onRefreshEvidence: (investigationId: string) => number | void;
   /** Refresh collection metadata/counts after the authoritative upload. */
   readonly onRefreshInvestigations: () => void;
   /** Atomically deny the active case when a mutation proves access loss. */
@@ -191,13 +191,14 @@ export function useUploadEvidence(
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
 
       if (!result.ok) {
+        let evidenceReadGeneration: number | void = undefined;
         if (result.error.kind === "not_found" || result.error.kind === "auth_lost") {
           latestRef.current.onScopeDenied(scope.investigationId, result.error);
         } else if (
           result.error.kind === "unavailable"
           && result.error.reason === "commit_outcome_unknown"
         ) {
-          latestRef.current.onRefreshEvidence(scope.investigationId);
+          evidenceReadGeneration = latestRef.current.onRefreshEvidence(scope.investigationId);
           if (!isCurrent()) return { status: "ignored", reason: "stale" };
           latestRef.current.onRefreshInvestigations();
           if (!isCurrent()) return { status: "ignored", reason: "stale" };
@@ -205,6 +206,7 @@ export function useUploadEvidence(
         const outcome: CommandOutcome<EvidenceUploadSuccessV1> = {
           status: "failed",
           error: result.error,
+          ...(typeof evidenceReadGeneration === "number" ? { evidenceReadGeneration } : {}),
         };
         setStoredState(scopedMutationState(scopeKey, {
           status: "failed",

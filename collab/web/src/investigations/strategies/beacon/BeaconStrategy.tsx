@@ -1,20 +1,22 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
 import {
   selectResourceView,
   useInvestigationRuntime,
-  type ArtifactKind,
   type CaseV1,
   type CommandOutcome,
   type ContributionV1,
-  type PrivacyClass,
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
 import {
+  CollectionDiscoveryFilters,
+  collectionEmptyMessage,
+  shareableQueryNarrows,
   useInvestigationCollectionQuery,
   type InvestigationCollectionQueryPresentation,
 } from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
+import { EvidenceUploadReconciliationForm } from "../shared/index.js";
 import {
   StrategyActionRow,
   StrategyBadge,
@@ -24,6 +26,7 @@ import {
   StrategyStateNotice,
   StrategySurface,
 } from "../shared/index.js";
+import { RecordedContextFields, recordedContextCatalogFromView, type RecordedContextDraft } from "../shared/index.js";
 
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
 
@@ -63,28 +66,9 @@ function contributionLabel(contribution: ContributionV1): string {
   return "Observation";
 }
 
-function PriorValueField(props: {
-  readonly id: string;
-  readonly label: string;
-  readonly value: string;
-  readonly options: readonly string[];
-  readonly onChange: (value: string) => void;
-}) {
-  const normalized = props.value.trim().toLocaleLowerCase();
-  const existing = normalized !== "" && props.options.some((option) => option.toLocaleLowerCase() === normalized);
-  const hintId = `${props.id}-hint`;
-  return <div className="beacon__field"><label htmlFor={props.id}>{props.label}</label>
-    <input
-      id={props.id}
-      value={props.value}
-      list={`${props.id}-options`}
-      aria-describedby={hintId}
-      onChange={(event) => props.onChange(event.target.value)}
-    />
-    <datalist id={`${props.id}-options`}>{props.options.map((option) => <option key={option} value={option} />)}</datalist>
-    <small id={hintId} aria-live="polite">{props.value.trim() ? existing ? "Existing recorded value selected." : "New value; it will be recorded exactly as entered." : "Choose a prior value or enter a new one."}</small>
-  </div>;
-}
+const EMPTY_CONTEXT: RecordedContextDraft = {
+  productName: "", version: "", build: "", component: "", environment: "", organization: "",
+};
 
 function CreateCard({ startSignal }: { readonly startSignal?: number }) {
   const runtime = useInvestigationRuntime();
@@ -93,17 +77,14 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
   const [observation, setObservation] = useState("");
   const [affected, setAffected] = useState("");
   const [impact, setImpact] = useState("");
-  const [product, setProduct] = useState("");
-  const [build, setBuild] = useState("");
+  const [context, setContext] = useState<RecordedContextDraft>(EMPTY_CONTEXT);
   const investigations = selectResourceView(runtime.resources.investigations);
-  const priorValues = useMemo(() => {
-    const cases = investigations.availability === "available" ? investigations.value : [];
-    const unique = (values: readonly (string | null | undefined)[]) => [...new Set(values.flatMap((value) => value?.trim() ? [value.trim()] : []))].sort((left, right) => left.localeCompare(right));
-    return {
-      products: unique(cases.map((item) => item.investigationContext?.productName)),
-      builds: unique(cases.map((item) => item.investigationContext?.build)),
-    };
-  }, [investigations]);
+  const catalog = recordedContextCatalogFromView(investigations, runtime.capabilities.canRead);
+  const scopeKey = runtime.presentationScopeKey;
+
+  useLayoutEffect(() => {
+    setTitle(""); setObservation(""); setAffected(""); setImpact(""); setContext(EMPTY_CONTEXT);
+  }, [scopeKey]);
 
   useEffect(() => { if (startSignal) titleRef.current?.focus(); }, [startSignal]);
 
@@ -116,17 +97,10 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
       problemStatement: observation,
       affectedParties: affected,
       impact,
-      investigationContext: product.trim() || build.trim() ? {
-        productName: product,
-        version: "",
-        build,
-        component: "",
-        environment: "",
-        organization: "",
-      } : null,
+      investigationContext: Object.values(context).some((value) => value.trim()) ? context : null,
     });
     if (result.status === "succeeded") {
-      setTitle(""); setObservation(""); setAffected(""); setImpact(""); setProduct(""); setBuild("");
+      setTitle(""); setObservation(""); setAffected(""); setImpact(""); setContext(EMPTY_CONTEXT);
     }
   }
 
@@ -150,7 +124,14 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
         <label className="beacon__field beacon__field--wide"><span>What did you observe?</span><textarea value={observation} onChange={(event) => setObservation(event.target.value)} rows={3} placeholder="Record the signal without guessing at the cause" /></label>
         <label className="beacon__field"><span>Who or what is affected?</span><input value={affected} onChange={(event) => setAffected(event.target.value)} /></label>
         <label className="beacon__field"><span>Recorded impact</span><input value={impact} onChange={(event) => setImpact(event.target.value)} /></label>
-        <details className="beacon__advanced beacon__field--wide"><summary>Optional technical context</summary><div className="beacon__advanced-grid"><PriorValueField id="beacon-product" label="Product" value={product} options={priorValues.products} onChange={setProduct} /><PriorValueField id="beacon-build" label="Build" value={build} options={priorValues.builds} onChange={setBuild} /></div></details>
+        <details className="beacon__advanced beacon__field--wide"><summary>Optional technical context</summary><div className="beacon__advanced-grid">
+          <RecordedContextFields scopeKey={`${scopeKey}:create`} draft={context} catalog={catalog}
+            fieldClassName="beacon__field" tupleClassName="recorded-context__tuple beacon__field--wide"
+            labels={{ productName: "Product" }}
+            onFieldChange={(field, value) => setContext((current) => ({ ...current, [field]: value }))}
+            onTupleApply={(tuple) => setContext((current) => ({ ...current,
+              productName: tuple.productName, version: tuple.version, build: tuple.build }))} />
+        </div></details>
         <div className="beacon__submit beacon__field--wide"><button type="submit" disabled={running || !runtime.commands.createInvestigation}>{running ? "Creating…" : runtime.commands.createInvestigation ? "Create and open" : "Preparing create…"}</button><span>Blank values remain explicitly not recorded.</span></div>
       </form>
     </StrategyPanel>
@@ -222,13 +203,14 @@ function Browse({
       <div className="beacon__browse-filters">
         <label className="beacon__search"><span>Find an investigation</span><input ref={focusRef} type="search" value={query} onChange={(event) => updateQuery({ q: event.target.value })} placeholder="Title, problem, product, or build" /></label>
         <label className="beacon__field"><span>Status</span><select value={status} onChange={(event) => updateQuery({ status: event.target.value as BrowseStatus })}><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label>
+        {collection.enabled && collectionQuery !== undefined ? <CollectionDiscoveryFilters query={collectionQuery} onQueryChange={onCollectionQueryChange} facets={collectionView.availability === "available" ? collectionView.value.facets : null} showEntity cursorRestartNotice={collection.cursorRestartNotice} /> : null}
         {collection.enabled ? <label className="beacon__checkbox"><input type="checkbox" checked={includeArchived} onChange={(event) => updateQuery({ includeArchived: event.target.checked })} /><span>Include archived</span></label> : null}
       </div>
       {statusFacets.length > 0 ? <div className="beacon__facets" aria-label="Recorded status counts">{statusFacets.map((facet) => <button key={facet.key} type="button" aria-pressed={status === facet.key} onClick={() => updateQuery({ status: status === facet.key ? "all" : facet.key as BrowseStatus })}><span>{facet.key}</span><strong>{facet.count}</strong></button>)}</div> : null}
       {view.availability === "idle" || view.availability === "loading" ? <StrategyStateNotice busy>Loading investigations…</StrategyStateNotice> : null}
       {view.availability === "unavailable" ? <StrategyStateNotice tone="danger" role="alert" title="Investigation list unavailable" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>{failureCopy(view.error, "The investigation list")}</StrategyStateNotice> : null}
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Refresh failed" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>The previously loaded list is still shown.</StrategyStateNotice> : null}
-      {view.availability === "available" && filtered.length === 0 ? <StrategyStateNotice>{normalized ? "No investigations match this search." : "No investigations have been recorded yet."}</StrategyStateNotice> : null}
+      {view.availability === "available" && filtered.length === 0 ? <StrategyStateNotice>{collectionEmptyMessage(collection.enabled && collectionQuery !== undefined ? shareableQueryNarrows(collectionQuery) : normalized.length > 0 || status !== "all")}</StrategyStateNotice> : null}
       {view.availability === "available" && filtered.length > 0 ? <ul className="beacon__case-list">{filtered.map((item) => <li key={item.id}><button type="button" onClick={() => onOpenCase(item.id)}><span><strong>{titleOf(item)}</strong><small>{recorded(item.problemStatement)}</small></span><span className="beacon__case-state"><StrategyBadge tone={item.status === "resolved" ? "success" : item.status === "open" ? "accent" : "neutral"}>{item.status}</StrategyBadge><small>{dateLabel(item.createdAt)}</small></span></button></li>)}</ul> : null}
       {collection.enabled ? <CollectionPagination key={JSON.stringify(collection.input)} view={collectionView} onNextPage={collection.nextPage} /> : null}
     </StrategyPanel>
@@ -269,46 +251,10 @@ function EntryComposer({ investigation }: { readonly investigation: CaseV1 }) {
 
 function EvidenceCard() {
   const runtime = useInvestigationRuntime();
+  const uploadInvestigation = selectResourceView(runtime.resources.investigation);
+  const uploadLifecycle = selectResourceView(runtime.resources.lifecycle);
   const view = selectResourceView(runtime.resources.evidence);
-  const [kind, setKind] = useState<ArtifactKind>("attachment");
-  const [summary, setSummary] = useState("");
-  const [privacyClass, setPrivacyClass] = useState<PrivacyClass | "">(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
-  const [feedback, setFeedback] = useState<{ tone: "danger" | "success"; text: string } | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
   const busy = runtime.mutations.uploadEvidence.status === "running";
-  useEffect(() => {
-    if (!runtime.capabilities.canReadPrivate && privacyClass === "owner_only") {
-      // Do not silently broaden a private draft to share-safe. The person
-      // attaching it must make a new disclosure choice after authority loss.
-      setPrivacyClass("");
-      if (fileRef.current) fileRef.current.value = "";
-      setFeedback({ tone: "danger", text: "Private evidence access changed. Choose a privacy level again before attaching this file." });
-    }
-  }, [privacyClass, runtime.capabilities.canReadPrivate]);
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const command = runtime.commands.uploadEvidence;
-    const file = fileRef.current?.files?.[0] ?? null;
-    if (!command || !file || busy || !privacyClass) return;
-    // Revalidate privacy at the action boundary. A passive state repair alone
-    // leaves one render window in which revoked private-read authority could
-    // otherwise submit a stale owner-only draft.
-    if (privacyClass === "owner_only" && !runtime.capabilities.canReadPrivate) {
-      setPrivacyClass("");
-      if (fileRef.current) fileRef.current.value = "";
-      setFeedback({ tone: "danger", text: "Private evidence access changed. Choose a privacy level again before attaching this file." });
-      return;
-    }
-    setFeedback(null);
-    const result = await command({ file, kind, summary, privacyClass });
-    if (result.status === "succeeded") {
-      setSummary("");
-      if (fileRef.current) fileRef.current.value = "";
-      setFeedback({ tone: "success", text: `${file.name} was attached to the evidence inventory.` });
-    } else {
-      setFeedback({ tone: "danger", text: commandFailureCopy(result, "The upload") });
-    }
-  }
   return (
     <StrategyPanel title="Supporting material" titleId="beacon-evidence-title" description="Attach logs, emails, and files to the shared evidence inventory." busy={busy}>
       {view.availability === "idle" || view.availability === "loading" ? <StrategyStateNotice busy>Loading evidence…</StrategyStateNotice> : null}
@@ -316,7 +262,11 @@ function EvidenceCard() {
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Evidence refresh failed" action={<button type="button" onClick={runtime.refresh.evidence}>Retry</button>}>The previously loaded inventory remains visible.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length === 0 ? <StrategyStateNotice>No supporting material has been recorded yet.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length > 0 ? <ul className="beacon__evidence-list">{view.value.map((item) => <li key={item.id}><span><strong>{item.filename || item.uri || "Unnamed evidence"}</strong><small>{item.kind} · {item.mediaType || "media type not recorded"} · {item.privacyClass === "owner_only" ? "owner only" : "share safe"}</small></span><StrategyBadge>{item.verificationStatus || "verification not recorded"}</StrategyBadge></li>)}</ul> : null}
-      {runtime.capabilities.canUpload ? <form className="beacon__upload" onSubmit={(event) => void submit(event)}><label className="beacon__field"><span>File (server-configured limit)</span><input ref={fileRef} type="file" required /></label><label className="beacon__field"><span>Kind</span><select value={kind} onChange={(event) => setKind(event.target.value as ArtifactKind)}><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option></select></label><label className="beacon__field"><span>Privacy</span><select value={privacyClass} required onChange={(event) => { const next = event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : event.target.value === "share_safe" ? "share_safe" : ""; setPrivacyClass(next); if (next && feedback?.text.startsWith("Private evidence access changed")) setFeedback(null); }}><option value="">Choose privacy</option><option value="share_safe">Share safe</option>{runtime.capabilities.canReadPrivate ? <option value="owner_only">Owner only</option> : null}</select></label><label className="beacon__field beacon__field--wide"><span>Why does this matter?</span><input value={summary} onChange={(event) => setSummary(event.target.value)} required /></label>{feedback ? <StrategyStateNotice tone={feedback.tone} role={feedback.tone === "danger" ? "alert" : "status"}>{feedback.text}</StrategyStateNotice> : null}<button type="submit" disabled={busy || !privacyClass || !runtime.commands.uploadEvidence}>{busy ? "Attaching…" : runtime.commands.uploadEvidence ? "Attach evidence" : "Preparing upload…"}</button></form> : <StrategyStateNotice title="Evidence upload is read-only">You can review supporting material, but your current access cannot attach a file.</StrategyStateNotice>}
+      <EvidenceUploadReconciliationForm variant="beacon"
+        scopeKey={[runtime.presentationScopeKey, uploadInvestigation.availability === "available" ? uploadInvestigation.value.id : "unavailable", runtime.capabilities.canRead, runtime.capabilities.canUpload, runtime.capabilities.canReadPrivate, uploadLifecycle.availability === "available" ? JSON.stringify(uploadLifecycle.value) : uploadLifecycle.availability].join("\0")}
+        canRead={runtime.capabilities.canRead} canUpload={runtime.capabilities.canUpload} canReadPrivate={runtime.capabilities.canReadPrivate}
+        readCompletion={runtime.resources.evidenceReadCompletion ?? { requested: 0, succeeded: -1, failed: -1 }}
+        refreshEvidence={runtime.refresh.evidence} upload={runtime.commands.uploadEvidence} />
     </StrategyPanel>
   );
 }
@@ -425,7 +375,9 @@ function Detail(props: InvestigationStrategyShellProps) {
           <RuntimeHandoffPanel investigation={selected} />
         </div>
         <aside className="beacon__side">
-          <StrategyPanel title="Current Situation" titleId="beacon-situation-title"><dl className="beacon__facts"><div><dt>Observed problem</dt><dd>{recorded(selected.problemStatement)}</dd></div><div><dt>Affected</dt><dd>{recorded(selected.affectedParties)}</dd></div><div><dt>Impact</dt><dd>{recorded(selected.impact)}</dd></div><div><dt>Product / build</dt><dd>{[selected.investigationContext?.productName, selected.investigationContext?.build].filter(Boolean).join(" · ") || "Not recorded"}</dd></div></dl></StrategyPanel>
+          <StrategyPanel title="Current Situation" titleId="beacon-situation-title"><dl className="beacon__facts"><div><dt>Observed problem</dt><dd>{recorded(selected.problemStatement)}</dd></div><div><dt>Affected</dt><dd>{recorded(selected.affectedParties)}</dd></div><div><dt>Impact</dt><dd>{recorded(selected.impact)}</dd></div><div><dt>Product / build</dt><dd>{[selected.investigationContext?.productName, selected.investigationContext?.build].filter(Boolean).join(" · ") || "Not recorded"}</dd></div>
+            {(["productName", "version", "build", "component", "environment", "organization"] as const).map((field) => <div key={field}><dt>{{ productName: "Product", version: "Version", build: "Build", component: "Component", environment: "Environment", organization: "Organization" }[field]}</dt><dd>{recorded(selected.investigationContext?.[field])}</dd></div>)}
+          </dl></StrategyPanel>
           <PromoteCard investigation={selected} contributions={entries} />
         </aside>
       </div>

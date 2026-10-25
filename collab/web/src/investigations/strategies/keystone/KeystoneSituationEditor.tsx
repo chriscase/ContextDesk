@@ -12,6 +12,7 @@ import type {
   InvestigationSituationCommand,
   MutationState,
 } from "../../runtime/public.js";
+import { RecordedContextFields, type RecordedContextCatalog } from "../shared/index.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
 type InvestigationContextField = keyof InvestigationContext;
@@ -29,6 +30,7 @@ export interface KeystoneSituationEditorProps {
   readonly identityKey: string;
   /** The latest canonical case published to this presentation. */
   readonly investigation: CaseV1;
+  readonly recordedContextCatalog?: RecordedContextCatalog;
   /** Null is the complete, fail-closed read-only presentation seam. */
   readonly updateSituation: UpdateSituation | null;
   readonly mutation: MutationState<CaseV1>;
@@ -373,6 +375,7 @@ function SituationRecord({ investigation }: { readonly investigation: CaseV1 }) 
 export function KeystoneSituationEditor({
   identityKey,
   investigation,
+  recordedContextCatalog = { status: "not-requested", records: [], partial: true },
   updateSituation,
   mutation,
   onSuccess,
@@ -489,7 +492,8 @@ export function KeystoneSituationEditor({
 
   function updateContext(field: InvestigationContextField, value: string) {
     setStoredState((current) => {
-      const scoped = current.scope === scope ? current : initialState(scope, investigation);
+      if (currentScopeRef.current !== scope || current.scope !== scope) return current;
+      const scoped = current;
       return {
         ...scoped,
         draft: {
@@ -722,20 +726,22 @@ export function KeystoneSituationEditor({
 
           <fieldset>
             <legend>Structured investigation context</legend>
-            <p>Enter recorded values directly. This editor does not infer or suggest domain values.</p>
+            <p>Reuse a value from loaded authorized investigations or enter a value manually. The existing Situation save remains separate.</p>
             <div className="keystone-situation-editor__context-fields">
-              {CONTEXT_FIELDS.map(({ field, label }) => (
-                <label key={field}>
-                  <span>{label}</span>
-                  <input
-                    type="text"
-                    maxLength={200}
-                    disabled={running}
-                    value={state.draft.investigationContext[field]}
-                    onChange={(event) => updateContext(field, event.target.value)}
-                  />
-                </label>
-              ))}
+              <RecordedContextFields scopeKey={scope} draft={state.draft.investigationContext}
+                catalog={recordedContextCatalog} maxLength={200} disabled={running}
+                labels={Object.fromEntries(CONTEXT_FIELDS.map(({ field, label }) => [field, label])) as Partial<Record<InvestigationContextField, string>>}
+                onFieldChange={updateContext}
+                onTupleApply={(tuple) => {
+                  if (currentScopeRef.current !== scope) return;
+                  setStoredState((current) => current.scope !== scope ? current : {
+                    ...current,
+                    draft: { ...current.draft, investigationContext: { ...current.draft.investigationContext,
+                      productName: tuple.productName, version: tuple.version, build: tuple.build } },
+                    failure: current.conflicted ? current.failure : null,
+                    ignored: null,
+                  });
+                }} />
             </div>
           </fieldset>
 

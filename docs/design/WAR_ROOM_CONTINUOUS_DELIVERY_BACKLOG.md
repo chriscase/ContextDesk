@@ -7,8 +7,12 @@ already shipped, rechecks dependencies and risks, selects the highest-value
 ready slice, freezes its exact base, and starts that slice when it does not
 conflict with protected work.
 
-Baseline for this reconciliation: `main`
-`3b7b3b63cce2c762495024e3bdaa0bf406f5b723` (Attention & Handoff merged).
+Baseline for Goal 10: `main` `c672948b8b74471b197ecf848a26fecadd0eece9`,
+tree `806a1613e4a9b048ba9808b49155f0d3449b3f3d`. Goals 08 and 09 joined main
+through merged PRs #1187 and #1188. Earlier observations remain in frozen
+contracts and receipts. The separate Windows temporary-corpus cleanup failure
+and historical Catalog focus synchronization candidate #1176 are reliability
+work, not part of this product slice.
 
 ## Delivery loop
 
@@ -42,7 +46,7 @@ planning pause.
 Old design documents and open branches may predate these foundations. Their
 “missing” lists are evidence to recheck, not current backlog truth.
 
-## Active slice — Investigation Activity Center
+## Shipped foundation — Investigation Activity Center
 
 **Outcome:** make `/` a useful cross-investigation command surface rather than
 a second rendering of the selected Investigations experience.
@@ -67,8 +71,10 @@ Required behavior:
   only with an explicit stale/failure notice.
 - Opening an activity reauthorizes its locator, then follows only a validated
   canonical investigation route.
-- Identity/capability/filter changes abort and fence old requests. A no-read
-  account performs no activity, case, or resolve request.
+- Identity/capability/filter changes abort and fence old requests. The first
+  render after that change conceals the previous rows, cursor, failure, and
+  load-more control before passive effects run. A no-read account performs no
+  activity, case, or resolve request.
 - Keyboard, focus, semantic structure, 390/560-pixel reflow, forced colors,
   and reduced motion are release evidence, not prose-only aspirations.
 
@@ -76,29 +82,88 @@ The browser contract exports activity DTOs and parsers without Node crypto or
 cursor decoding. Cursor generation, fingerprinting, and request validation
 remain server-only.
 
-## Provisional successor queue
+## Shipped handoffs and active unmerged benchmark slice
 
-This order is re-evaluated after the Activity Center lands.
+Goal 05 is shipped through merged [PR #1184](https://github.com/chriscase/ContextDesk/pull/1184).
+Its [frozen contract](../goals/05-S3-EVIDENCE-RECONCILIATION.md) and
+[receipt](../goals/S3_EVIDENCE_RECONCILIATION_RECEIPT.md) retain their qualification
+limits. Historical #1159, #1166, #1168, #1170, and #1173 are closed
+superseded sources, not open prerequisites. The old duplicate-push Software
+Impact caption observation remains separate reliability evidence.
 
-1. **Evidence annotation workspace and safe bulk metadata.** Build on the
-   shipped append-only annotation contract: compact review, structured tags or
-   labels, cross-artifact selection, and safe bulk actions without mutating
-   artifact identity or bypassing case permissions.
-2. **Investigation search and facets.** Move useful list filtering to a typed,
-   paged server query: recorded status, entity, software impact, contributor,
-   and dates. Add tags only with a canonical contract and audited writes.
-3. **Product/version/build catalog quality.** Reuse recorded values across
-   investigations, expose administrator-assisted deduplication later, and
-   avoid creating a second software-impact truth model.
+Goal 06 shipped through merged [PR #1185](https://github.com/chriscase/ContextDesk/pull/1185).
+Its [contract](../goals/06-TRUSTED-EXPORT-HANDOFF.md) and
+[receipt](../goals/TRUSTED_EXPORT_HANDOFF_RECEIPT.md) preserve the export and
+manual-import evidence. Historical #1177 and #1179 remain source material.
+
+Goal 07 shipped through merged [PR #1186](https://github.com/chriscase/ContextDesk/pull/1186). It adds a focused, append-only human
+assessment history for a manually imported response while preserving the
+separate legacy Save review status and resolution. The authoritative server
+records actor, time, citations, sequence, audit and replay intent; War Room
+Capture presents provenance, disagreement and deliberate reconciliation after
+an uncertain response. The [frozen contract](../goals/07-TRUSTED-HUMAN-REVIEW.md)
+and [receipt](../goals/TRUSTED_HUMAN_REVIEW_RECEIPT.md) retain the review gates. Assessment rows remain outside the portable
+archive schema, so affected exact operations must refuse rather than drop
+history. This shipment is not a claim of measured triage quality. Historical
+#1177 and #1179 remain unchanged source branches; the accepted Goal 06/07
+behavior shipped through #1185/#1186, not by merging those branches.
+
+Goal 08 shipped through merged [PR #1187](https://github.com/chriscase/ContextDesk/pull/1187): [recorded software context reuse](../goals/08-RECORDED-SOFTWARE-CONTEXT-REUSE.md).
+It reuses exact values and
+product/version/build combinations from already loaded authorized records in
+existing create and Situation editors. Suggestions can be partial; manual
+entry and existing save commands remain authoritative. Historical #1174 is
+source material only and stays unchanged. No catalog, software-impact identity,
+new server query, or administrator deduplication shipped in this slice.
+
+Goal 09 shipped through merged [PR #1188](https://github.com/chriscase/ContextDesk/pull/1188): [trusted benchmark promotion and offline
+handoff](../goals/09-TRUSTED-BENCHMARK-HANDOFF.md) on
+`integrate/trusted-benchmark-handoff-v1`. It adds explicit promotion of an
+accepted Experiment Lab decision, version review, and a separately authorized
+owner-only identity-preserving file that the existing offline bench can import.
+The alias-only share-safe review export remains separate. Historical #1175
+was closed without merging after integration; its branch remains retained. Neither a human benchmark nor evidence alignment is a
+correctness verdict, and this slice does not measure provider or review quality.
+
+## Deferred successor queue
+
+Trusted Investigation Discovery shipped through merged PR #1181. The desktop
+investigation-team save-status synchronization shipped through merged PR #1182.
+Activity Center first-frame scope safety shipped through #1183. S3 recovery
+shipped through #1184. Unmerged historical branches remain source material.
+Goal 10 is the current unmerged slice: [structured evidence labels and shared
+review workspace](../goals/10-STRUCTURED-EVIDENCE-LABELS.md) on
+`integrate/evidence-label-workspace-v1`. It extends the shipped annotation table,
+bulk note transaction, Runtime seam and workspace with exact add/remove labels,
+privacy-aware current projection and durable history, and Keystone adoption.
+Bulk notes and Investigation First selection are already shipped foundations.
+
+The following successors and #1158 remain deferred:
+
+1. **Investigation label search and facets.** Consume Goal 10's canonical exact,
+   case-sensitive label contract after integration. Do not create duplicate
+   label truth. Recorded status/entity/software impact/contributor/date filters
+   already shipped through #1181.
+2. **Portable label round-trip.** A separately versioned portable contract and
+   qualification are required. Goal 10 refuses exact operations that would lose
+   label history; it does not version the archive.
+3. **Product/version/build catalog quality.** Shipped Goal 08 covers bounded reuse of
+   already loaded recorded values. Administrator-assisted deduplication and a
+   complete catalog remain separate proposals; avoid a second software-impact
+   truth model.
 4. **Evidence storage operations.** Add copy-verify migration, health history,
    and later retention/trash policy. A migration must never delete its source
    automatically.
 5. **Additional UI strategy only when differentiated.** A fifth strategy must
    pass a measured task comparison against the four shipped choices and use
    public runtime seams only. Novel appearance is not enough.
-6. **Portable and administrative depth.** Extend archive/export and policy
-   surfaces only where shipped investigation or storage data cannot yet be
-   operated safely.
+6. **Portable and administrative depth.** Represent human assessments in a
+   future versioned archive only after an exact, privacy-preserving round trip
+   is designed and qualified. Extend other archive/export and policy surfaces
+   only where shipped investigation or storage data cannot yet be operated safely.
+7. **Measured review quality.** Compare whether cited human review improves
+   triage decisions with a separately authorized evaluation; this goal records
+   assessments but makes no benchmark or automatic correctness claim.
 
 ## Ranking rules
 

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  evidenceLabelModel,
   selectEvidenceInventory,
   selectResourceView,
   useInvestigationRuntime,
@@ -7,9 +8,15 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
-import { useInvestigationCollectionQuery } from "../collection-query.js";
+import {
+  CollectionDiscoveryFilters,
+  collectionEmptyMessage,
+  shareableQueryNarrows,
+  useInvestigationCollectionQuery,
+} from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
+  EvidenceAnnotationWorkspace,
   StrategyActionRow,
   StrategyBadge,
   CollectionPagination,
@@ -22,6 +29,7 @@ import { KeystoneEvidenceGrid } from "./KeystoneEvidenceGrid.js";
 import { KeystoneHypothesisComposer } from "./KeystoneHypothesisComposer.js";
 import { KeystoneInspector } from "./KeystoneInspector.js";
 import { KeystoneSituationEditor } from "./KeystoneSituationEditor.js";
+import { recordedContextCatalogFromView } from "../shared/index.js";
 import {
   filterEvidence,
   filterInvestigations,
@@ -129,11 +137,13 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   );
   const identityScopeKey = JSON.stringify([
     "keystone-identity-v1",
+    runtime.presentationScopeKey,
     runtime.identity.id,
     runtime.identity.username,
   ]);
   const scope = JSON.stringify([
     "keystone-case-v1",
+    runtime.presentationScopeKey,
     runtime.identity.id,
     runtime.identity.username,
     props.focusCaseId,
@@ -336,6 +346,15 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                 <option value="archived">Archived</option>
               </select>
             </label>
+            {collectionEnabled && collectionQuery !== undefined ? (
+              <CollectionDiscoveryFilters
+                query={collectionQuery}
+                onQueryChange={props.onCollectionQueryChange}
+                facets={collectionView.availability === "available" ? collectionView.value.facets : null}
+                showEntity
+                cursorRestartNotice={collection.cursorRestartNotice}
+              />
+            ) : null}
             {collectionEnabled ? (
               <label className="keystone-strategy__checkbox">
                 <input
@@ -396,10 +415,16 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
             </StrategyStateNotice>
           ) : null}
           {listView.availability === "available" && filteredCases.length === 0 ? (
-            <StrategyStateNotice title={browseCases.length === 0 ? "No investigations recorded" : "No matching investigations"}>
-              {browseCases.length === 0
-                ? "The available collection is empty."
-                : "Try a different search or recorded status."}
+            <StrategyStateNotice title={(
+              collectionEnabled && collectionQuery !== undefined
+                ? shareableQueryNarrows(collectionQuery)
+                : browseQuery.trim().length > 0 || browseStatus !== "all"
+            ) ? "No matching investigations" : "No investigations recorded"}>
+              {collectionEmptyMessage(
+                collectionEnabled && collectionQuery !== undefined
+                  ? shareableQueryNarrows(collectionQuery)
+                  : browseQuery.trim().length > 0 || browseStatus !== "all",
+              )}
             </StrategyStateNotice>
           ) : null}
           {listView.availability === "available" && filteredCases.length > 0 ? (
@@ -530,12 +555,17 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
             />
           </>
         ) : null}
+        <EvidenceAnnotationWorkspace labelModel={evidenceLabelModel} scopeKey={scope} evidence={evidenceRows.map(row => row.evidence)} selectedArtifactIds={workingSet}
+          annotations={selectResourceView(runtime.resources.artifactAnnotations)} readCompletion={runtime.resources.annotationReadCompletion}
+          canAnnotate={runtime.capabilities.canContribute} canReadPrivate={runtime.capabilities.canReadPrivate} readOnly={!runtime.capabilities.canContribute}
+          bulkCommand={runtime.commands.createArtifactAnnotations} bulkMutation={runtime.mutations.createArtifactAnnotations} bulkErrorCopy={null}
+          onRefresh={runtime.refresh.artifactAnnotations} onClearSelection={() => setWorkingSetState({scope,ids:[]})} />
         <div className="keystone-strategy__working-set" aria-labelledby="keystone-working-set-title">
           <div>
             <h4 ref={workingSetHeadingRef} id="keystone-working-set-title" tabIndex={-1}>Working set</h4>
             <p>
               Temporary for this signed-in identity and investigation. Selection alone sends nothing;
-              cited evidence IDs are submitted only when you explicitly record a hypothesis.
+              evidence IDs are submitted only when you explicitly record a hypothesis, save a note, or add/remove a label.
             </p>
           </div>
           {workingSet.length === 0 ? <span>No evidence selected</span> : (
@@ -589,6 +619,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
               <KeystoneSituationEditor
                 identityKey={identityScopeKey}
                 investigation={investigationValue}
+                recordedContextCatalog={recordedContextCatalogFromView(investigations, runtime.capabilities.canRead)}
                 updateSituation={runtime.commands.updateSituation}
                 mutation={runtime.mutations.updateSituation}
               />

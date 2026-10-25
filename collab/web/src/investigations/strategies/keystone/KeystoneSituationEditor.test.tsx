@@ -399,7 +399,7 @@ describe("Keystone K2 situation correction", () => {
         organization: "",
       },
     });
-    expect(screen.queryByRole("option")).toBeNull();
+    expect(document.querySelectorAll("datalist option")).toHaveLength(0);
   });
 
   it("submits an explicitly cleared question list as an empty array", async () => {

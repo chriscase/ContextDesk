@@ -17,6 +17,10 @@ import type {
   InvestigationCoordinationV1,
   LifecycleAction,
 } from "@cd-collab/contracts/investigation-runtime";
+import type {
+  ExternalRunJudgmentListV1,
+  ExternalRunJudgmentSuccessV1,
+} from "@cd-collab/contracts/external-run-judgment";
 import {
   createContext,
   useCallback,
@@ -37,6 +41,7 @@ import {
   useCreateContribution,
   useCreateInvestigation,
   useEvidencePreview,
+  useExternalRunJudgments,
   useArtifactAnnotations,
   useCreateArtifactAnnotation,
   useCreateArtifactAnnotationsBulk,
@@ -48,6 +53,7 @@ import {
   useUpdateSituation,
   useUploadEvidence,
   type CreateContributionCommand,
+  type ExternalRunJudgmentCommand,
   type CreateArtifactAnnotationCommand,
   type CreateArtifactAnnotationsBulkCommand,
   type PreviewEvidenceCommand,
@@ -65,6 +71,7 @@ import {
   investigationBulkAnnotationGateway,
   investigationCollectionQueryGateway,
   investigationCoordinationGateway,
+  investigationExternalRunJudgmentGateway,
   investigationOperationsQueueGateway,
   investigationWriteGateway,
   snapshotInvestigationCollectionQueryInput,
@@ -96,21 +103,31 @@ export type InvestigationSituationCommand = UpdateSituationCommand;
 export type InvestigationCoordinationActionCommand = InvestigationCoordinationCommand;
 export type InvestigationNamedCoordinationSelfCommand = NamedCoordinationSelfCommand;
 export type InvestigationNamedCoordinationParticipantCommand = NamedCoordinationParticipantCommand;
+export type InvestigationExternalRunJudgmentCommand = ExternalRunJudgmentCommand;
 
 export interface InvestigationRuntimeResources {
   readonly investigations: ResourceState<readonly CaseV1[]>;
   readonly investigationCollection: ResourceState<InvestigationCollectionPageV1>;
   readonly investigationCollectionQuery: InvestigationCollectionQueryV1 | null;
+  /** Null unless a rejected cursor was replaced by a fresh first page. */
+  readonly investigationCollectionNotice: string | null;
   readonly operationsQueue: ResourceState<InvestigationOperationsQueuePageV1>;
   readonly operationsQueueQuery: InvestigationOperationsQueueQueryV1 | null;
   /** Monotonic request start signal for the currently visible queue scope. */
   readonly operationsQueueRequestGeneration: number;
   readonly investigation: ResourceState<CaseV1>;
   readonly evidence: ResourceState<readonly ArtifactV1[]>;
+  /** Read provenance; absent in legacy injected Runtime snapshots. */
+  readonly evidenceReadCompletion?: { readonly requested: number; readonly succeeded: number; readonly failed: number };
   readonly contributions: ResourceState<readonly ContributionV1[]>;
   readonly lifecycle: ResourceState<InvestigationLifecycleV1>;
   readonly coordination: ResourceState<InvestigationCoordinationV1>;
   readonly artifactAnnotations: ResourceState<readonly ArtifactAnnotationV1[]>;
+  readonly annotationReadCompletion?: {readonly requested: number; readonly succeeded: number; readonly failed: number};
+  readonly externalRunJudgments: ResourceState<ExternalRunJudgmentListV1>;
+  readonly externalRunJudgmentsRunId: string | null;
+  /** Optional for older injected Runtime snapshots; absent never proves a fresh read. */
+  readonly externalRunJudgmentsCompletedReadGeneration?: number | null;
 }
 
 export interface InvestigationRuntimeMutations {
@@ -124,6 +141,7 @@ export interface InvestigationRuntimeMutations {
   readonly namedCoordinationParticipant: MutationState<InvestigationCoordinationActionSuccessV1>;
   readonly createArtifactAnnotation: MutationState<ArtifactAnnotationV1>;
   readonly createArtifactAnnotations: MutationState<ArtifactAnnotationBulkResultV1>;
+  readonly externalRunJudgment: MutationState<ExternalRunJudgmentSuccessV1>;
 }
 
 export interface InvestigationRuntimeRefresh {
@@ -131,11 +149,12 @@ export interface InvestigationRuntimeRefresh {
   readonly investigationCollection: () => void;
   readonly operationsQueue: () => void;
   readonly investigation: () => void;
-  readonly evidence: () => void;
+  readonly evidence: () => number | void;
   readonly contributions: () => void;
   readonly lifecycle: () => void;
   readonly coordination: () => void;
   readonly artifactAnnotations: () => Promise<void>;
+  readonly externalRunJudgments: () => number | void;
   readonly activeInvestigation: () => void;
 }
 
@@ -170,6 +189,10 @@ export interface InvestigationRuntimeCommands {
   readonly createArtifactAnnotations: ((
     command: InvestigationArtifactAnnotationsBulkCommand,
   ) => Promise<CommandOutcome<ArtifactAnnotationBulkResultV1>>) | null;
+  readonly queryExternalRunJudgments: ((runId: string) => void) | null;
+  readonly createExternalRunJudgment: ((
+    command: InvestigationExternalRunJudgmentCommand,
+  ) => Promise<CommandOutcome<ExternalRunJudgmentSuccessV1>>) | null;
   /** Additive collection-query command; omit it only in pre-query snapshots. */
   readonly queryInvestigations?: ((
     input: InvestigationCollectionQueryInput,
@@ -355,11 +378,39 @@ export function InvestigationRuntimeProvider({
     () => investigationOperationsQueueGateway(gateway),
     [gateway],
   );
-  const [collectionQueryInput, setCollectionQueryInput] =
-    useState<InvestigationCollectionQueryInput | null>(null);
+  const externalRunJudgmentGateway = useMemo(
+    () => investigationExternalRunJudgmentGateway(gateway),
+    [gateway],
+  );
+  const [collectionQueryRequest, setCollectionQueryRequest] = useState<{
+    readonly identityKey: string;
+    readonly authorityKey: string;
+    readonly input: InvestigationCollectionQueryInput;
+  } | null>(null);
   const requestInvestigationCollection = useCallback((input: InvestigationCollectionQueryInput) => {
-    setCollectionQueryInput(snapshotInvestigationCollectionQueryInput(input));
-  }, []);
+    const snapshot = snapshotInvestigationCollectionQueryInput(input);
+    setCollectionQueryRequest((current) => {
+      const baseKey = (value: InvestigationCollectionQueryInput) =>
+        JSON.stringify({ ...value, cursor: undefined });
+      if (
+        current !== null
+        && snapshot.cursor
+        && baseKey(current.input) !== baseKey(snapshot)
+      ) {
+        return current;
+      }
+      return Object.freeze({
+        identityKey,
+        authorityKey,
+        input: snapshot,
+      });
+    });
+  }, [authorityKey, identityKey]);
+  const collectionQueryInput = collectionQueryRequest !== null
+    && collectionQueryRequest.identityKey === identityKey
+    && collectionQueryRequest.authorityKey === authorityKey
+    ? collectionQueryRequest.input
+    : null;
   const [operationsQueueRequest, setOperationsQueueRequest] = useState<{
     readonly identityKey: string;
     readonly authorityKey: string;
@@ -388,10 +439,12 @@ export function InvestigationRuntimeProvider({
     canManageLifecycle: projected.canManageLifecycle,
     canCoordinateSelf: projected.canCoordinateSelf,
     canCoordinateParticipants: projected.canCoordinateParticipants,
+    canRecordRunJudgment: projected.canRecordRunJudgment,
   }), [
     projected.canContribute,
     projected.canCoordinateParticipants,
     projected.canCoordinateSelf,
+    projected.canRecordRunJudgment,
     projected.canCreate,
     projected.canEditSituation,
     projected.canManageLifecycle,
@@ -416,6 +469,8 @@ export function InvestigationRuntimeProvider({
   const canCoordinateSelf = capabilities.canRead && capabilities.canCoordinateSelf;
   const canCoordinateParticipants =
     capabilities.canRead && capabilities.canCoordinateParticipants;
+  const canRecordRunJudgment =
+    capabilities.canRead && capabilities.canRecordRunJudgment;
   const activeCaseId = active && capabilities.canRead ? focusCaseId : null;
 
   // Collection reads belong only to the canonical investigations surface.
@@ -511,8 +566,9 @@ export function InvestigationRuntimeProvider({
 
   const refreshEvidenceFor = useCallback((investigationId: string) => {
     if (activeCaseId === investigationId) {
-      activeInvestigation.refreshEvidence();
+      const generation = activeInvestigation.refreshEvidence();
       activeInvestigation.refreshContributions();
+      return generation;
     }
   }, [
     activeCaseId,
@@ -543,6 +599,10 @@ export function InvestigationRuntimeProvider({
     activeScopeUnavailable || activeInvestigation.investigation.status !== "ready"
       ? null
       : activeCaseId;
+  const assessmentWritable = canRecordRunJudgment
+    && activeReadyCaseId !== null
+    && activeInvestigation.investigation.status === "ready"
+    && activeInvestigation.investigation.value.status !== "archived";
 
   const artifactAnnotationsController = useArtifactAnnotations({
     gateway: annotationGateway,
@@ -581,7 +641,7 @@ export function InvestigationRuntimeProvider({
       // confirmed rows locally may iterate the bounded result, but it never
       // schedules one request per target.
       for (const item of result.items) {
-        if (item.outcome !== "not_found") {
+        if (item.outcome !== "not_found" && item.outcome !== "already_desired") {
           artifactAnnotationsController.publish(item.annotation);
         }
       }
@@ -709,14 +769,27 @@ export function InvestigationRuntimeProvider({
     onRefreshQueue: operationsQueue.refresh,
     onScopeDenied: activeInvestigation.denyScope,
   });
+  const externalRunJudgmentsController = useExternalRunJudgments({
+    gateway: externalRunJudgmentGateway,
+    identityKey,
+    authorityKey,
+    investigationId: activeScopeUnavailable ? null : activeCaseId,
+    active,
+    canRead: capabilities.canRead && !activeScopeUnavailable,
+    canRecordRunJudgment: assessmentWritable,
+    readOnly,
+    onScopeDenied: activeInvestigation.denyScope,
+  });
   const refreshAll = useCallback(() => {
     activeInvestigation.refreshAll();
     coordinationController.refresh();
     artifactAnnotationsController.refresh();
+    externalRunJudgmentsController.refresh();
   }, [
     activeInvestigation.refreshAll,
     artifactAnnotationsController.refresh,
     coordinationController.refresh,
+    externalRunJudgmentsController.refresh,
   ]);
 
   const value = useMemo<InvestigationRuntime>(() => deepFreezeDto({
@@ -727,6 +800,7 @@ export function InvestigationRuntimeProvider({
       investigations: investigationList.investigations,
       investigationCollection: investigationCollection.page,
       investigationCollectionQuery: investigationCollection.query,
+      investigationCollectionNotice: investigationCollection.cursorRestartNotice,
       operationsQueue: operationsQueue.page,
       operationsQueueQuery: operationsQueue.query,
       operationsQueueRequestGeneration: operationsQueue.latestRequestGeneration,
@@ -736,6 +810,9 @@ export function InvestigationRuntimeProvider({
       evidence: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : activeInvestigation.evidence,
+      evidenceReadCompletion: activeScopeUnavailable
+        ? { requested: activeInvestigation.evidenceReadCompletion.requested, succeeded: -1, failed: -1 }
+        : activeInvestigation.evidenceReadCompletion,
       contributions: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : activeInvestigation.contributions,
@@ -745,9 +822,16 @@ export function InvestigationRuntimeProvider({
       coordination: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : coordinationController.coordination,
+      annotationReadCompletion: artifactAnnotationsController.readCompletion,
       artifactAnnotations: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : artifactAnnotationsController.annotations,
+      externalRunJudgments: activeMissingFromAuthoritativeList
+        ? { status: "failed", error: { kind: "not_found", status: 404 } }
+        : externalRunJudgmentsController.judgments,
+      externalRunJudgmentsRunId: externalRunJudgmentsController.runId,
+      externalRunJudgmentsCompletedReadGeneration:
+        externalRunJudgmentsController.completedReadGeneration,
     },
     mutations: {
       create: createController.state,
@@ -760,6 +844,7 @@ export function InvestigationRuntimeProvider({
       namedCoordinationParticipant: namedCoordinationParticipantController.state,
       createArtifactAnnotation: artifactAnnotationController.state,
       createArtifactAnnotations: artifactAnnotationsBulkController.state,
+      externalRunJudgment: externalRunJudgmentsController.state,
     },
     evidencePreview: {
       state: previewController.state,
@@ -776,6 +861,7 @@ export function InvestigationRuntimeProvider({
       lifecycle: activeInvestigation.refreshLifecycle,
       coordination: coordinationController.refresh,
       artifactAnnotations: artifactAnnotationsController.refresh,
+      externalRunJudgments: externalRunJudgmentsController.refresh,
       activeInvestigation: refreshAll,
     },
     commands: {
@@ -836,6 +922,15 @@ export function InvestigationRuntimeProvider({
         && !activeScopeUnavailable
         ? artifactAnnotationsBulkController.create
         : null,
+      queryExternalRunJudgments: capabilities.canRead
+        && active
+        && activeCaseId !== null
+        && !activeScopeUnavailable
+        ? externalRunJudgmentsController.query
+        : null,
+      createExternalRunJudgment: assessmentWritable
+        ? externalRunJudgmentsController.create
+        : null,
       queryInvestigations: capabilities.canRead ? requestInvestigationCollection : null,
       queryOperationsQueue: capabilities.canRead ? requestOperationsQueue : null,
     },
@@ -843,6 +938,7 @@ export function InvestigationRuntimeProvider({
     activeReadyCaseId,
     activeInvestigation.contributions,
     activeInvestigation.evidence,
+    activeInvestigation.evidenceReadCompletion,
     activeInvestigation.investigation,
     activeInvestigation.lifecycle,
     activeInvestigation.refreshAll,
@@ -851,6 +947,7 @@ export function InvestigationRuntimeProvider({
     activeInvestigation.refreshInvestigation,
     activeInvestigation.refreshLifecycle,
     artifactAnnotationsController.annotations,
+    artifactAnnotationsController.readCompletion,
     artifactAnnotationsController.refresh,
     activeInvestigation.scopeDenied,
     activeMissingFromAuthoritativeList,
@@ -863,6 +960,7 @@ export function InvestigationRuntimeProvider({
     canCreate,
     canEditSituation,
     canManageLifecycle,
+    assessmentWritable,
     canUpload,
     capabilities,
     contributionController.create,
@@ -873,9 +971,16 @@ export function InvestigationRuntimeProvider({
     artifactAnnotationController.state,
     artifactAnnotationsBulkController.create,
     artifactAnnotationsBulkController.state,
+    externalRunJudgmentsController.create,
+    externalRunJudgmentsController.judgments,
+    externalRunJudgmentsController.query,
+    externalRunJudgmentsController.refresh,
+    externalRunJudgmentsController.runId,
+    externalRunJudgmentsController.state,
     identity,
     investigationCollection.page,
     investigationCollection.query,
+    investigationCollection.cursorRestartNotice,
     investigationCollection.refresh,
     operationsQueue.page,
     operationsQueue.query,

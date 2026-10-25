@@ -1,6 +1,7 @@
 import { checkObject, f, type ObjectShape, ContractViolation } from "./parse.js";
 
 export const GOLD_REFERENCE_SCHEMA_ID = "cd-collab.gold_reference.v1" as const;
+export const GOLD_REFERENCE_EXPORT_SCHEMA_ID = "cd-collab.gold_reference_export.v1" as const;
 export const GOLD_ALIGNMENT_SCHEMA_ID = "cd-collab.gold_alignment.v1" as const;
 
 export const GOLD_IS_HUMAN_BENCHMARK =
@@ -53,6 +54,24 @@ export interface GoldReferenceV1 {
   promotedById: string;
   promotedByUsername: string;
   createdAt: string;
+}
+
+/** Identity-preserving owner-only handoff; never a share-safe lab export. */
+export interface GoldReferenceExportV1 {
+  schemaId: typeof GOLD_REFERENCE_EXPORT_SCHEMA_ID;
+  privacyClass: "owner_only";
+  gold: GoldReferenceV1;
+}
+
+export function parseGoldReferenceExport(raw: unknown): GoldReferenceExportV1 {
+  checkObject("$", {
+    schemaId: f.req(f.en(GOLD_REFERENCE_EXPORT_SCHEMA_ID)),
+    privacyClass: f.req(f.en("owner_only")),
+    gold: f.req(f.obj(goldReferenceShape)),
+  }, raw);
+  const envelope = raw as GoldReferenceExportV1;
+  parseGoldReference(envelope.gold);
+  return envelope;
 }
 
 export interface CandidateGoldAlignmentV1 {

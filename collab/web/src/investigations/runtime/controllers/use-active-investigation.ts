@@ -23,10 +23,17 @@ interface ActiveInvestigationScope {
   readonly investigationId: string;
 }
 
+export interface EvidenceReadCompletion {
+  readonly requested: number;
+  readonly succeeded: number;
+  readonly failed: number;
+}
+
 interface ResourceLane<T> {
+  readonly completion: EvidenceReadCompletion;
   readonly state: ResourceState<T>;
   readonly publish: (publish: (value: T) => T) => void;
-  readonly refresh: () => void;
+  readonly refresh: () => number;
 }
 
 export interface UseActiveInvestigationOptions {
@@ -43,6 +50,7 @@ export interface UseActiveInvestigationOptions {
 export interface ActiveInvestigationController {
   readonly investigation: ResourceState<CaseV1>;
   readonly evidence: ResourceState<readonly ArtifactV1[]>;
+  readonly evidenceReadCompletion: EvidenceReadCompletion;
   readonly contributions: ResourceState<readonly ContributionV1[]>;
   readonly lifecycle: ResourceState<InvestigationLifecycleV1>;
   /** True after any case-bound endpoint proves this scope inaccessible. */
@@ -58,7 +66,7 @@ export interface ActiveInvestigationController {
   /** Publish a server-confirmed lifecycle snapshot only for the active case. */
   readonly publishLifecycle: (lifecycle: InvestigationLifecycleV1) => void;
   readonly refreshInvestigation: () => void;
-  readonly refreshEvidence: () => void;
+  readonly refreshEvidence: () => number | void;
   readonly refreshContributions: () => void;
   readonly refreshLifecycle: () => void;
   readonly refreshAll: () => void;
@@ -103,6 +111,12 @@ function useResourceLane<T>(
     createResourceState<ActiveInvestigationScope, T>(),
   );
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const requested = useRef(0);
+  const [completion, setCompletion] = useState<{
+    scope: ActiveInvestigationScope;
+    succeeded: number;
+    failed: number;
+  } | null>(null);
 
   useEffect(() => {
     if (scope === null) {
@@ -112,10 +126,16 @@ function useResourceLane<T>(
     }
 
     const token = requestSlot.current.begin(scope);
+    const generation = requested.current;
     setResource((current) => beginResourceLoad(current, scope));
     void load(token.signal)
       .then((result) => {
         if (!requestSlot.current.isCurrent(token)) return;
+        setCompletion((current) => ({
+          scope,
+          succeeded: result.ok ? generation : current?.scope === scope ? current.succeeded : -1,
+          failed: result.ok ? -1 : generation,
+        }));
         if (
           !result.ok
           && (result.error.kind === "not_found" || result.error.kind === "auth_lost")
@@ -128,6 +148,7 @@ function useResourceLane<T>(
       })
       .catch(() => {
         if (!requestSlot.current.isCurrent(token)) return;
+        setCompletion((current) => ({ scope, succeeded: current?.scope === scope ? current.succeeded : -1, failed: generation }));
         setResource((current) => failResourceLoad(
           current,
           scope,
@@ -141,7 +162,11 @@ function useResourceLane<T>(
   }, [load, onTerminalFailure, refreshGeneration, scope]);
 
   const refresh = useCallback(() => {
-    setRefreshGeneration((current) => current + 1);
+    // Fence a read already in flight synchronously, before the next effect.
+    requestSlot.current.invalidate();
+    requested.current += 1;
+    setRefreshGeneration(requested.current);
+    return requested.current;
   }, []);
 
   const publish = useCallback((publication: (value: T) => T) => {
@@ -154,6 +179,11 @@ function useResourceLane<T>(
   }, [scope]);
 
   return {
+    completion: {
+      requested: requested.current,
+      succeeded: scope !== null && completion?.scope === scope ? completion.succeeded : -1,
+      failed: scope !== null && completion?.scope === scope ? completion.failed : -1,
+    },
     state: scope !== null && resource.key === scope ? resource.state : { status: "idle" },
     publish,
     refresh,
@@ -305,6 +335,7 @@ export function useActiveInvestigation({
   return {
     investigation: deniedState ?? investigation.state,
     evidence: deniedState ?? evidence.state,
+    evidenceReadCompletion: scopeDenied ? { requested: evidence.completion.requested, succeeded: -1, failed: -1 } : evidence.completion,
     contributions: deniedState ?? contributions.state,
     lifecycle: deniedState ?? lifecycle.state,
     scopeDenied,

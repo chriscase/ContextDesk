@@ -11,6 +11,7 @@ import {
   type InvestigationCollectionQueryInput,
   type InvestigationGateway,
 } from "../gateway.js";
+import type { RuntimeFailure } from "../errors.js";
 import type { ResourceState } from "../types.js";
 import { RequestSlot } from "./request-slot.js";
 import {
@@ -208,15 +209,50 @@ function collectionBaseQueryKey(query: InvestigationCollectionQueryV1): string {
   }) ?? "invalid";
 }
 
+function isRejectedCursor(error: RuntimeFailure): boolean {
+  return error.kind === "stale_cursor" || error.kind === "malformed_cursor";
+}
+
+export const COLLECTION_CURSOR_RESTART_NOTICE =
+  "The previous page marker was rejected. These results were loaded again from the start of this search and do not include the discarded page.";
+
+function restartCollectionQuery(
+  query: InvestigationCollectionQueryV1,
+): InvestigationCollectionQueryInput {
+  return {
+    q: query.q,
+    status: query.status,
+    includeArchived: query.includeArchived,
+    entityId: query.entityId,
+    impactIdentity: query.impactIdentity,
+    contributorId: query.contributorId,
+    recordedFrom: query.recordedFrom,
+    recordedTo: query.recordedTo,
+    limit: query.limit,
+    cursor: null,
+  };
+}
+
 function accumulatedPage(
   previous: InvestigationCollectionPageV1,
   next: InvestigationCollectionPageV1,
 ): InvestigationCollectionPageV1 {
-  const items = [...previous.items, ...next.items];
+  const seen = new Set<string>();
+  const items: CaseV1[] = [];
+  for (const item of previous.items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    items.push(item);
+  }
+  for (const item of next.items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    items.push(item);
+  }
   Object.freeze(items);
   // Facets and the hidden-archive count are computed over the authorized
   // collection, not the individual cursor page. Keep the newest server
-  // projection while accumulating only the ordered page items.
+  // projection while accumulating unique identities in first-seen order.
   return Object.freeze({
     ...next,
     items,
@@ -240,6 +276,12 @@ export interface InvestigationCollectionQueryController {
   readonly latestRequestGeneration: number;
   readonly successfulSnapshotGeneration: number;
   readonly refresh: () => void;
+  /**
+   * Operator-visible explanation when a rejected cursor replaced the page.
+   * Null for an ordinary load, and null whenever the visible scope does not
+   * match the resource that produced the notice.
+   */
+  readonly cursorRestartNotice: string | null;
 }
 
 /**
@@ -286,11 +328,13 @@ export function useInvestigationCollectionQuery({
     readonly generation: number;
   }>({ key: null, generation: 0 });
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [cursorRestartNotice, setCursorRestartNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!enabled || queryKey === null) {
       requestSlot.current.invalidate();
       accumulatedPageRef.current = null;
+      setCursorRestartNotice(null);
       setResource(createResourceState<
         InvestigationCollectionQueryScope,
         InvestigationCollectionPageV1
@@ -311,6 +355,7 @@ export function useInvestigationCollectionQuery({
       ? prior.page
       : undefined;
     setLatestRequest({ key: scope, generation: requestGeneration });
+    if (previousPage === undefined) setCursorRestartNotice(null);
     setResource((current) => previousPage === undefined
       ? beginResourceLoad(current, scope)
       : { key: scope, state: { status: "loading", previous: previousPage } });
@@ -324,8 +369,52 @@ export function useInvestigationCollectionQuery({
     }
 
     void gateway.queryInvestigations(parsed.value, { signal: token.signal })
-      .then((result) => {
+      .then(async (result) => {
         if (!requestSlot.current.isCurrent(token)) return;
+        if (
+          !result.ok
+          && isRejectedCursor(result.error)
+          && parsed.value.cursor !== null
+        ) {
+          // A rejected cursor must not keep or append the pages it followed.
+          accumulatedPageRef.current = null;
+          setCursorRestartNotice(null);
+          setResource((current) => current.key === scope
+            ? { key: scope, state: { status: "loading" } }
+            : current);
+          let restarted: Awaited<ReturnType<InvestigationCollectionQueryGateway["queryInvestigations"]>>;
+          try {
+            restarted = await gateway.queryInvestigations(
+              restartCollectionQuery(parsed.value),
+              { signal: token.signal },
+            );
+          } catch {
+            if (!requestSlot.current.isCurrent(token)) return;
+            setResource((current) => failResourceLoad(current, scope, { kind: "unexpected" }));
+            return;
+          }
+          if (!requestSlot.current.isCurrent(token)) return;
+          if (restarted.ok) {
+            accumulatedPageRef.current = {
+              identityKey,
+              authorityKey,
+              queryKey: baseQueryKey,
+              page: restarted.value,
+            };
+            setCursorRestartNotice(COLLECTION_CURSOR_RESTART_NOTICE);
+            setResource((current) => succeedResourceLoad(current, scope, restarted.value));
+            setSuccessfulSnapshot({
+              key: scope,
+              generation: requestGeneration,
+            });
+            return;
+          }
+          if (restarted.error.kind === "not_found" || restarted.error.kind === "auth_lost") {
+            accumulatedPageRef.current = null;
+          }
+          setResource((current) => failResourceLoad(current, scope, restarted.error));
+          return;
+        }
         if (result.ok) {
           const page = parsed.value.cursor !== null && previousPage !== undefined
             ? accumulatedPage(previousPage, result.value)
@@ -336,6 +425,7 @@ export function useInvestigationCollectionQuery({
             queryKey: baseQueryKey,
             page,
           };
+          setCursorRestartNotice(null);
           setResource((current) => succeedResourceLoad(current, scope, page));
           setSuccessfulSnapshot({
             key: scope,
@@ -382,5 +472,6 @@ export function useInvestigationCollectionQuery({
         ? successfulSnapshot.generation
         : 0,
     refresh,
+    cursorRestartNotice: visible ? cursorRestartNotice : null,
   };
 }

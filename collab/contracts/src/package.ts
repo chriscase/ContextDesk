@@ -1,11 +1,11 @@
-import { checkObject, f, type ObjectShape } from "./parse.js";
+import { checkObject, ContractViolation, f, type ObjectShape } from "./parse.js";
 import { PRIVACY_CLASSES } from "./case.js";
 
 export const PACKAGE_SCHEMA_ID = "cd-collab.prompt_package.v1" as const;
 export const PACKAGE_MANIFEST_SCHEMA_ID = "cd-collab.package_manifest.v1" as const;
 export const PACKAGE_ITEM_KINDS = ["artifact", "contribution"] as const;
 export type PackageItemKind = (typeof PACKAGE_ITEM_KINDS)[number];
-export const PACKAGE_DEFAULT_EXCLUSIONS = ["corroboration", "resolution"] as const;
+export const PACKAGE_DEFAULT_EXCLUSIONS = ["external_run", "corroboration", "resolution"] as const;
 
 export interface PackageManifestItemV1 {
   kind: PackageItemKind;
@@ -86,5 +86,41 @@ export function parsePackageManifest(raw: unknown): PackageManifestV1 {
 
 export function parsePromptPackage(raw: unknown): PromptPackageV1 {
   checkObject("$", promptPackageShape, raw);
-  return raw as PromptPackageV1;
+  const pkg = raw as PromptPackageV1;
+  if (pkg.caseId !== pkg.manifest.caseId || pkg.privacyClass !== pkg.manifest.variant) {
+    throw new ContractViolation("$.manifest", "package identity or privacy differs from manifest");
+  }
+  if (!/^[a-f0-9]{64}$/.test(pkg.snapshotIdentity)) {
+    throw new ContractViolation("$.snapshotIdentity", "expected lowercase SHA-256 identity");
+  }
+  if ((pkg.promptScaffold === null) !== (pkg.manifest.promptScaffoldHash === null) ||
+      (pkg.manifest.promptScaffoldHash !== null &&
+       !/^[a-f0-9]{64}$/.test(pkg.manifest.promptScaffoldHash))) {
+    throw new ContractViolation("$.manifest.promptScaffoldHash", "scaffold hash presence or format differs");
+  }
+  if (pkg.manifest.items.length === 0 || pkg.manifest.items.length !== pkg.excerpts.length) {
+    throw new ContractViolation("$.manifest.items", "manifest and excerpts must contain the same nonempty selection");
+  }
+  const seen = new Set<string>();
+  pkg.manifest.items.forEach((item, index) => {
+    const excerpt = pkg.excerpts[index]!;
+    const key = `${item.kind}:${item.id}`;
+    // A file-server reference can be recorded without a verified or expected
+    // hash. Its empty hash is an honest sparse sentinel when no body travels.
+    if (!item.id || (item.contentHash === "" &&
+        (item.kind !== "artifact" || excerpt.content !== null)) || seen.has(key) ||
+        item.kind !== excerpt.kind || item.id !== excerpt.id ||
+        item.contentHash !== excerpt.contentHash || item.privacyClass !== excerpt.privacyClass) {
+      throw new ContractViolation(`$.manifest.items[${index}]`, "manifest and excerpt identity differs or repeats");
+    }
+    seen.add(key);
+    if (excerpt.bodyIncluded !== (excerpt.content !== null)) {
+      throw new ContractViolation(`$.excerpts[${index}].bodyIncluded`, "included body must match content presence");
+    }
+    if (pkg.privacyClass === "share_safe" && item.privacyClass === "owner_only" &&
+        (excerpt.bodyIncluded || excerpt.content !== null)) {
+      throw new ContractViolation(`$.excerpts[${index}].content`, "owner-only content cannot be included in share-safe package");
+    }
+  });
+  return pkg;
 }

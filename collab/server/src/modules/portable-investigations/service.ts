@@ -71,6 +71,7 @@ export const PORTABLE_CONTRACT_UNSUPPORTED = [
   "source_membership_and_source_identity_ownership",
   "imported_opaque_run_details",
   "imported_run_corroboration",
+  "external_run_judgments",
   "imported_content_privacy_is_not_contract_bound",
   "discussion_containers_presence_and_live_chat_state",
   "derived_alignment_details_and_interaction_traces",
@@ -89,6 +90,7 @@ export type PortableServerErrorCode =
   | "not_found"
   | "archive_size_limit"
   | "unsupported_state"
+  | "label_history_unsupported"
   | "integrity_failure"
   | "archive_invalid"
   | "apply_refused"
@@ -666,10 +668,19 @@ function applySupportReasons(
   if (bundle.discussions.length > 0) {
     block("$.investigation.discussions", "discussion containers are unsupported");
   }
+  if (bundle.timeline.some(row => row.kind === "artifact_label_changed")) {
+    block("$.investigation.timeline", "structured evidence label history cannot round-trip in this archive version");
+  }
   if (bundle.timeline.some((row) => row.kind === "run_corroboration")) {
     block(
       "$.investigation.timeline",
       "imported-run corroboration is not exact-applyable",
+    );
+  }
+  if (bundle.timeline.some((row) => row.kind === "external_run_judgment_recorded")) {
+    block(
+      "$.investigation.timeline",
+      "external-run judgments are not exact-applyable",
     );
   }
   if (bundle.timeline.some((row, index) => row.seq !== index + 1)) {
@@ -709,6 +720,14 @@ export class PortableInvestigationService {
   ): Promise<PortableArchiveV1> {
     const caseRow = await this.deps.cases.getCase(caseId, actor, isAdmin);
     if (!caseRow) throw new PortableServerError("not_found", "investigation not found");
+    // Refusal is uniform for every case: checking hidden label existence would itself leak metadata.
+    if (!canReadPrivate) throw new PortableServerError("unsupported_state", "exact portable export requires private-evidence read authority");
+    if (await this.deps.cases.hasLabelHistory(caseId)) {
+      throw new PortableServerError("label_history_unsupported", "this portable archive version cannot carry structured label history; exact export refused");
+    }
+    if (await this.deps.imports.caseHasStoredJudgments(caseId)) {
+      throw new PortableServerError("unsupported_state", "external-run judgments are not exact-applyable");
+    }
 
     const [latestContributions, artifacts, snapshots, timeline, importedRuns, jobs, experiments] =
       await Promise.all([
@@ -720,6 +739,20 @@ export class PortableInvestigationService {
         this.deps.triageRuns.list(caseId, actor, isAdmin),
         this.deps.experiments.list(caseId, actor, isAdmin),
       ]);
+    const judgmentLists = await Promise.all(
+      importedRuns.map((run) => this.deps.imports.listRunJudgments(
+        caseId,
+        run.id,
+        actor,
+        isAdmin,
+      )),
+    );
+    if (judgmentLists.some((list) => list.judgments.length > 0)) {
+      throw new PortableServerError(
+        "unsupported_state",
+        "external-run judgments are not exact-applyable",
+      );
+    }
     const contributionChains = await Promise.all(
       latestContributions.map((row) => this.deps.cases.provenance(caseId, row.id)),
     );
@@ -1258,6 +1291,12 @@ export class PortableInvestigationService {
           "imported-run corroboration is not exact-applyable",
         );
       }
+      if (row.kind === "external_run_judgment_recorded") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "external-run judgments are not exact-applyable",
+        );
+      }
       if (
         (/^contribution_/.test(row.kind) || row.kind === "hypothesis_status")
         && addressed?.namespace !== "contribution"
@@ -1460,6 +1499,14 @@ export class PortableInvestigationService {
       const encodedBytes = Buffer.byteLength(JSON.stringify(archive), "utf8");
       if (encodedBytes > MAX_PORTABLE_ARCHIVE_BYTES) {
         throw new PortableServerError("archive_size_limit", "portable archive exceeds size limit");
+      }
+      if (await this.deps.imports.caseHasStoredJudgments(caseId)) {
+        throw new PortableServerError("unsupported_state", "external-run judgments are not exact-applyable");
+      }
+      // Protected label writes do not alter the case or public timeline. Recheck
+      // their authoritative history after every other asynchronous assembly read.
+      if (await this.deps.cases.hasLabelHistory(caseId)) {
+        throw new PortableServerError("label_history_unsupported", "this portable archive version cannot carry structured label history; exact export refused");
       }
       return archive;
     } catch (error) {

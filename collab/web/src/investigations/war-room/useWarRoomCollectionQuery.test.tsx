@@ -1,5 +1,5 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { useLayoutEffect, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InvestigationRuntimeGatewayHarness,
@@ -77,12 +77,78 @@ describe("War Room collection query adapter", () => {
       q: "checkout",
       status: ["monitoring"],
       includeArchived: true,
+      contributorId: "identity-erin",
+      recordedFrom: "2026-08-01T00:00:00.000Z",
+      recordedTo: "2026-08-31T23:59:59.999Z",
     });
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
     expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({
       q: "checkout",
       status: ["monitoring"],
       includeArchived: true,
+      contributorId: "identity-erin",
+      recordedFrom: "2026-08-01T00:00:00.000Z",
+      recordedTo: "2026-08-31T23:59:59.999Z",
+    });
+  });
+
+  it("sends impactIdentity and does not refetch semantically identical values", async () => {
+    const identity = {
+      productName: "ContextDesk",
+      version: "4.2",
+      build: "2026.02",
+      component: "web",
+      environment: "test",
+    };
+    const queryInvestigations = vi.fn<NonNullable<InvestigationGateway["queryInvestigations"]>>(
+      async () => gatewayOk(page()),
+    );
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    const provider = (query: CollectionQueryLocation) => (
+      <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <Probe query={query} />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>
+    );
+    const rendered = render(provider({
+      ...DEFAULT_COLLECTION_QUERY,
+      impactIdentity: {
+        productName: "  ContextDesk  ",
+        version: " 4.2 ",
+        build: " 2026.02 ",
+        component: " web ",
+        environment: " test ",
+      },
+    }));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({ impactIdentity: identity });
+
+    await act(async () => {
+      rendered.rerender(provider({
+        ...DEFAULT_COLLECTION_QUERY,
+        impactIdentity: { ...identity },
+      }));
+    });
+    expect(queryInvestigations).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(provider({
+      ...DEFAULT_COLLECTION_QUERY,
+      impactIdentity: { ...identity, environment: "staging" },
+    }));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[1]?.[0]).toMatchObject({
+      impactIdentity: { ...identity, environment: "staging" },
     });
   });
 
@@ -324,5 +390,75 @@ describe("War Room collection query adapter", () => {
     expect(queryInvestigations.mock.calls[1]?.[0].cursor).toBe("eyJwYWdlIjoyfQ");
     expect(queryInvestigations.mock.calls[2]?.[0]).toEqual(queryInvestigations.mock.calls[1]?.[0]);
     expect(queryInvestigations.mock.calls[2]?.[0].q).toBe("checkout");
+  });
+
+  it("hides the previous page before the query effect and ignores a stored continuation", async () => {
+    const [seed] = makeCaseList().cases;
+    const queryInvestigations = vi.fn<NonNullable<InvestigationGateway["queryInvestigations"]>>(
+      async (input) => gatewayOk({
+        ...page(),
+        items: [{ ...seed!, id: input.q === "other" ? "case-other" : "case-checkout", title: input.q ?? "" }],
+        nextCursor: input.q === "other" ? null : "eyJwYWdlIjoyfQ",
+      }),
+    );
+    const paints: string[] = [];
+    const stored = { next: () => undefined as void, refresh: () => undefined as void };
+    function ScopeProbe({
+      query,
+      releaseStored,
+    }: {
+      readonly query: CollectionQueryLocation;
+      readonly releaseStored: boolean;
+    }) {
+      const collection = useWarRoomCollectionQuery(query);
+      if (!releaseStored) {
+        stored.next = collection.nextPage;
+        stored.refresh = collection.refresh;
+      }
+      useLayoutEffect(() => {
+        if (!releaseStored) return;
+        stored.next();
+        stored.refresh();
+      }, [releaseStored]);
+      const text = collection.view.availability === "available"
+        ? collection.view.value.items.map((item) => item.id).join(",")
+        : `${collection.view.availability}:${collection.cursorRestartNotice ?? ""}`;
+      paints.push(text);
+      return <output data-testid="scope-page">{text}</output>;
+    }
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    function provider(query: CollectionQueryLocation, releaseStored: boolean) {
+      return (
+        <InvestigationRuntimeGatewayHarness gateway={gateway}>
+          <InvestigationRuntimeProvider
+            identityKey="alice"
+            identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+            authorityKey="authority-v1"
+            capabilities={["investigation:read"]}
+            readOnly={false}
+            active
+            focusCaseId={null}
+            isInvestigationLocation
+            onOpenCreated={vi.fn()}
+          >
+            <ScopeProbe query={query} releaseStored={releaseStored} />
+          </InvestigationRuntimeProvider>
+        </InvestigationRuntimeGatewayHarness>
+      );
+    }
+    const rendered = render(provider(DEFAULT_COLLECTION_QUERY, false));
+    await waitFor(() => expect(screen.getByTestId("scope-page").textContent).toBe("case-checkout"));
+    const mark = paints.length;
+    const before = queryInvestigations.mock.calls.length;
+    rendered.rerender(provider({ ...DEFAULT_COLLECTION_QUERY, q: "other" }, true));
+    expect(paints[mark]).toBe("loading:");
+    expect(paints.slice(mark).join(" ")).not.toContain("case-checkout");
+    expect(screen.getByTestId("scope-page").textContent).not.toContain("case-checkout");
+    const added = queryInvestigations.mock.calls.slice(before).map((call) => ({
+      q: call[0]?.q ?? null,
+      cursor: call[0]?.cursor ?? null,
+    }));
+    expect(added).toEqual([{ q: "other", cursor: null }]);
+    await waitFor(() => expect(screen.getByTestId("scope-page").textContent).toBe("case-other"));
   });
 });

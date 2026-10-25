@@ -1,3 +1,4 @@
+import { projectEvidenceLabels } from "@cd-collab/contracts";
 import { Readable } from "node:stream";
 import type { Multipart, MultipartFile } from "@fastify/multipart";
 import {
@@ -67,6 +68,7 @@ import {
   requestsInvestigationCollectionPage,
   requestsInvestigationOperationsQueuePage,
 } from "./collection-query.js";
+import { isS3CommitOutcomeUnknown, S3EvidenceError } from "../../evidence/s3-store.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -221,9 +223,13 @@ function domainError(
     void reply.code(409);
     return err.refusal;
   }
-  if (err instanceof CaseStoreCommitOutcomeUnknownError) {
+  if (err instanceof CaseStoreCommitOutcomeUnknownError || isS3CommitOutcomeUnknown(err)) {
     void reply.code(503);
     return { error: "commit_outcome_unknown" };
+  }
+  if (err instanceof S3EvidenceError) {
+    void reply.code(503);
+    return { error: "storage_unavailable" };
   }
   if (err instanceof ContractViolation) {
     void reply.code(400);
@@ -651,6 +657,10 @@ function streamUploadError(
   if (/aborted/i.test(message)) {
     void reply.code(400);
     return { error: "upload_aborted" };
+  }
+  if (isS3CommitOutcomeUnknown(err)) {
+    void reply.code(503);
+    return { error: "commit_outcome_unknown" };
   }
   if (
     /evidence (blob|metadata)|failed verification|s3 evidence|hash verification failed after storage/i
@@ -1126,7 +1136,7 @@ export async function registerCaseRoutes(
     return {
       schemaId: TIMELINE_SCHEMA_ID,
       caseId: id,
-      events: await deps.domain.listTimeline(id),
+      events: await deps.domain.listTimeline(id, ctx.has("evidence:private:read")),
     };
   });
 
@@ -1781,17 +1791,8 @@ export async function registerCaseRoutes(
     if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
     }
-    return {
-      schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
-      caseId: id,
-      annotations: await deps.domain.listArtifactAnnotations(
-        id,
-        ctx.actor,
-        ctx.isAdmin,
-        undefined,
-        ctx.has("evidence:private:read"),
-      ),
-    };
+    const annotations = await deps.domain.listArtifactAnnotations(id, ctx.actor, ctx.isAdmin, undefined, ctx.has("evidence:private:read"));
+    return { schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID, caseId: id, annotations, currentLabels: projectEvidenceLabels(annotations) };
   });
 
   app.get("/api/cases/:id/evidence/:eid/annotations", async (request, reply) => {
@@ -1844,7 +1845,11 @@ export async function registerCaseRoutes(
     }
     try {
       const body = parseArtifactAnnotationBulkRequest(request.body);
-      return await deps.domain.addArtifactAnnotationsBulk(caseId, ctx.actor, body, request.ip);
+      if (body.labelMutation !== undefined && body.privacyClass === "owner_only" && !ctx.has("evidence:private:read")) {
+        void reply.code(403);
+        return authError("forbidden");
+      }
+      return await deps.domain.addArtifactAnnotationsBulk(caseId, ctx.actor, body, request.ip, ctx.has("evidence:private:read"));
     } catch (err) {
       return domainError(reply, err);
     }

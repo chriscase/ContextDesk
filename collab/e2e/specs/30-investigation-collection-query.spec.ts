@@ -145,7 +145,7 @@ test.describe("Investigation collection query qualification", () => {
       expect(requested.searchParams.get("status")).toBe("open");
 
       await page.goto(`/investigations?q=${encodeURIComponent(`${token}-missing`)}&status=open`);
-      await expect(page.getByText("No investigations match this search.")).toBeVisible();
+      await expect(page.getByText("No investigations match the current search or filter.")).toBeVisible();
       await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
     } finally {
       await restoreStrategyPolicy(page, previous);

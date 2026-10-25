@@ -573,6 +573,21 @@ describe("GET /api/cases collection query", () => {
       expect(unknownQueueKey.statusCode).toBe(400);
       expect(JSON.parse(unknownQueueKey.body).error).toBe("invalid");
 
+      const invertedRange = await app.inject({
+        method: "GET",
+        url: collectionUrl({
+          recordedFrom: "2026-08-31T00:00:00.000Z",
+          recordedTo: "2026-08-01T00:00:00.000Z",
+        }),
+        headers: { cookie: alice },
+      });
+      expect(invertedRange.statusCode).toBe(400);
+      expect(JSON.parse(invertedRange.body)).toEqual({
+        error: "invalid",
+        detail: "$.recordedTo: range end must not precede range start",
+      });
+      expect(JSON.parse(invertedRange.body)).not.toHaveProperty("items");
+
       const malformedCursor = await app.inject({
         method: "GET",
         url: collectionUrl({ cursor: "not-a-cursor" }),

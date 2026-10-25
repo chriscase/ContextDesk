@@ -61,9 +61,22 @@ export function parseExportEnvelope(raw: unknown): ExportEnvelopeV1 {
   checkValue("$.privacyClass", f.en(...PRIVACY_CLASSES), rec.privacyClass);
   checkValue("$.exportedAt", f.str, rec.exportedAt);
   checkValue("$.markdown", f.str, rec.markdown);
+  if (!(typeof rec.exportedAt === "string" && rec.exportedAt.trim() &&
+        !Number.isNaN(Date.parse(rec.exportedAt)))) {
+    throw new ContractViolation("$.exportedAt", "expected a recorded export time");
+  }
   const kind = rec.kind as ExportKind;
   const payload =
     kind === "brief" ? parseBrief(rec.payload) : parsePromptPackage(rec.payload);
+  if (payload.privacyClass !== rec.privacyClass) {
+    throw new ContractViolation("$.payload.privacyClass", "payload privacy differs from envelope");
+  }
+  if (kind === "brief" && !("header" in payload && payload.header.caseId)) {
+    throw new ContractViolation("$.payload.header.caseId", "missing brief case identity");
+  }
+  if (kind === "package" && !("caseId" in payload && payload.caseId)) {
+    throw new ContractViolation("$.payload.caseId", "missing package case identity");
+  }
   return {
     schemaId: EXPORT_ENVELOPE_SCHEMA_ID,
     kind,
@@ -91,5 +104,17 @@ const inventoryShape: ObjectShape = {
 
 export function parseExportInventory(raw: unknown): ExportInventoryV1 {
   checkObject("$", inventoryShape, raw);
-  return raw as ExportInventoryV1;
+  const inventory = raw as ExportInventoryV1;
+  if (!inventory.caseId.trim()) {
+    throw new ContractViolation("$.caseId", "missing inventory case identity");
+  }
+  const seen = new Set<string>();
+  inventory.items.forEach((item, index) => {
+    const key = `${item.kind}:${item.id}`;
+    if (!item.id.trim() || !item.label.trim() || seen.has(key)) {
+      throw new ContractViolation(`$.items[${index}]`, "missing or duplicate inventory item");
+    }
+    seen.add(key);
+  });
+  return inventory;
 }

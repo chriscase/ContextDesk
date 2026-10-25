@@ -13,6 +13,16 @@ use crate::types::{validate_id, validate_rfc3339, ClaimedCitation, TriageRun};
 
 /// Portable gold-reference schema shared with collab.
 pub const GOLD_REFERENCE_SCHEMA_V1: &str = "cd-collab.gold_reference.v1";
+pub const GOLD_REFERENCE_EXPORT_SCHEMA_V1: &str = "cd-collab.gold_reference_export.v1";
+
+/// Owner-only transport envelope; the stored gold record remains unchanged.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GoldReferenceExport {
+    schema_id: String,
+    privacy_class: String,
+    gold: GoldReference,
+}
 
 /// Required honesty note on every gold artifact.
 pub const GOLD_IS_HUMAN_BENCHMARK: &str =
@@ -105,6 +115,27 @@ pub struct GoldAlignment {
 }
 
 impl GoldReference {
+    /// Accept either historical bare gold or the explicit owner-only handoff.
+    /// A bare file has unknown handling provenance, never implied share-safe status.
+    pub fn parse_import_json(text: &str) -> BenchResult<(Self, bool)> {
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(BenchError::from_serde)?;
+        if value.get("schemaId").and_then(serde_json::Value::as_str)
+            == Some(GOLD_REFERENCE_EXPORT_SCHEMA_V1)
+        {
+            let envelope: GoldReferenceExport =
+                serde_json::from_value(value).map_err(BenchError::from_serde)?;
+            if envelope.schema_id != GOLD_REFERENCE_EXPORT_SCHEMA_V1
+                || envelope.privacy_class != "owner_only"
+            {
+                return Err(BenchError::Schema("gold export must be owner_only".into()));
+            }
+            envelope.gold.validate()?;
+            return Ok((envelope.gold, true));
+        }
+        Self::parse_json(text).map(|gold| (gold, false))
+    }
+
     pub fn parse_json(text: &str) -> BenchResult<Self> {
         let parsed: Self = serde_json::from_str(text).map_err(BenchError::from_serde)?;
         parsed.validate()?;
@@ -322,6 +353,26 @@ pub fn align_run(run: &TriageRun, gold: Option<&GoldReference>) -> GoldAlignment
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_only_envelope_matches_shared_wire_fixtures() {
+        let (gold, owner_only) = GoldReference::parse_import_json(include_str!(
+            "../../../collab/contracts/fixtures/gold-reference-export.valid.json"
+        ))
+        .unwrap();
+        assert!(owner_only);
+        assert_eq!(gold, fixture());
+        assert!(GoldReference::parse_import_json(include_str!(
+            "../../../collab/contracts/fixtures/gold-reference-export.invalid-nested.json"
+        ))
+        .is_err());
+        let (legacy, owner_only) = GoldReference::parse_import_json(include_str!(
+            "../../../collab/contracts/fixtures/gold-reference.valid.json"
+        ))
+        .unwrap();
+        assert!(!owner_only);
+        assert_eq!(legacy, gold);
+    }
 
     fn fixture() -> GoldReference {
         GoldReference::parse_json(include_str!(

@@ -295,6 +295,19 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
     }
     case "external_run_imported":
       return { activityKind: "import_recorded", resourceKind: "imported_ai_run", resourceId: target, provenance: "ai_generated", summary: "imported analysis was recorded", humanFinding: false, revision: null, workstreamId: null };
+    case "external_run_judgment_recorded":
+      return {
+        activityKind: "evidence_reviewed",
+        resourceKind: "imported_ai_run",
+        resourceId: target,
+        provenance: "human",
+        summary: "recorded a human judgment on imported analysis",
+        // A judgment records the person's assessment; it never upgrades the
+        // imported output into a correctness finding.
+        humanFinding: false,
+        revision: null,
+        workstreamId: null,
+      };
     case "experiment_trace_imported": {
       const parsed = parsePortableExperimentTraceTarget(target);
       const traceId = parsed?.traceId ?? str(payload, "traceId");

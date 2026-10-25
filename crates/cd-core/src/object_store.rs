@@ -462,6 +462,10 @@ impl ObjectOperation {
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
     /// Upload one object, replacing the same key when the backend supports it.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn put(
         &self,
         key: &ObjectKey,
@@ -471,6 +475,10 @@ pub trait ObjectStore: Send + Sync {
     ) -> Result<ObjectMetadata, ObjectStoreError>;
 
     /// Stream one object into the caller-provided sink.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn get(
         &self,
         key: &ObjectKey,
@@ -479,6 +487,10 @@ pub trait ObjectStore: Send + Sync {
     ) -> Result<ObjectMetadata, ObjectStoreError>;
 
     /// Read object metadata without downloading its body.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn head(
         &self,
         key: &ObjectKey,
@@ -486,6 +498,10 @@ pub trait ObjectStore: Send + Sync {
     ) -> Result<ObjectMetadata, ObjectStoreError>;
 
     /// Return one bounded page under a validated prefix.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds #[must_use] to an already must-use Future"
+    )]
     async fn list(
         &self,
         request: &ListObjectsRequest,

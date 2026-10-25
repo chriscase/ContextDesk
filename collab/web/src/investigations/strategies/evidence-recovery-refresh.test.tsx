@@ -1,0 +1,47 @@
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { InvestigationRuntimeProvider, useInvestigationRuntime } from "../runtime/public.js";
+import { InvestigationRuntimeGatewayHarness, createDeferred, createInvestigationGatewayDouble, gatewayOk, gatewayUnavailable, makeArchiveAllowedLifecycle, makePopulatedCase, makeEvidenceUploadSuccess, RUNTIME_FIXTURE_IDS } from "../runtime/testkit/index.js";
+import { InvestigationFirstStrategy } from "./investigation-first/InvestigationFirstStrategy.js";
+import { BeaconStrategy } from "./beacon/BeaconStrategy.js";
+afterEach(cleanup);
+let latest: ReturnType<typeof useInvestigationRuntime>;
+function CaptureRuntime() { latest = useInvestigationRuntime(); return null; }
+const shell = { view: "investigations" as const, focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase, stage: "situation" as const, onOpenCase: vi.fn(), onNavigateInvestigation: vi.fn(), onExitFocus: vi.fn() };
+describe.each([["Investigation First", InvestigationFirstStrategy], ["Beacon", BeaconStrategy]] as const)("%s retained evidence recovery", (_, Strategy) => {
+  it("retains the same frozen form through delayed/failed case and lifecycle refresh, then announces confirmed retry success", async () => {
+    const gateway = createInvestigationGatewayDouble();
+    const upload = vi.spyOn(gateway, "uploadEvidence").mockResolvedValue({ ok: false, error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" } });
+    render(<InvestigationRuntimeGatewayHarness gateway={gateway}><InvestigationRuntimeProvider identityKey="alice" identity={{ id: "alice", username: "alice", displayName: "Alice" }} authorityKey="lead" capabilities={["investigation:read", "investigation:write", "evidence:private:read"]} readOnly={false} active focusCaseId={shell.focusCaseId} isInvestigationLocation onOpenCreated={shell.onOpenCase}><CaptureRuntime /><Strategy {...shell} /></InvestigationRuntimeProvider></InvestigationRuntimeGatewayHarness>);
+    await waitFor(() => expect(latest.resources.lifecycle.status).toBe("ready"));
+    const form = document.querySelector<HTMLFormElement>(".evidence-reconciliation")!;
+    const file = new File(["synthetic unchanged evidence"], "unchanged.log", { type: "text/plain" });
+    fireEvent.change(form.elements.namedItem("file") as HTMLInputElement, { target: { files: [file] } });
+    fireEvent.change(form.elements.namedItem("summary") as HTMLInputElement, { target: { value: "unchanged summary" } });
+    await act(async () => fireEvent.submit(form));
+    await screen.findByRole("button", { name: "Retry original upload" });
+    const caseRead = createDeferred<Awaited<ReturnType<typeof gateway.getInvestigation>>>();
+    const lifecycleRead = createDeferred<Awaited<ReturnType<typeof gateway.getLifecycle>>>();
+    vi.spyOn(gateway, "getInvestigation").mockReturnValueOnce(caseRead.promise);
+    vi.spyOn(gateway, "getLifecycle").mockReturnValueOnce(lifecycleRead.promise);
+    act(() => { latest.refresh.investigation(); latest.refresh.lifecycle(); });
+    await waitFor(() => expect(latest.resources.lifecycle.status).toBe("loading"));
+    expect(document.querySelector(".evidence-reconciliation")).toBe(form);
+    expect((form.elements.namedItem("file") as HTMLInputElement).disabled).toBe(true);
+    await act(async () => { caseRead.resolve(gatewayUnavailable()); lifecycleRead.resolve(gatewayUnavailable()); });
+    expect(document.querySelector(".evidence-reconciliation")).toBe(form);
+    expect((form.elements.namedItem("summary") as HTMLInputElement).value).toBe("unchanged summary");
+    expect(upload).toHaveBeenCalledTimes(1);
+    vi.spyOn(gateway, "getInvestigation").mockResolvedValue(gatewayOk(makePopulatedCase()));
+    vi.spyOn(gateway, "getLifecycle").mockResolvedValue(gatewayOk(makeArchiveAllowedLifecycle()));
+    act(() => { latest.refresh.investigation(); latest.refresh.lifecycle(); });
+    await waitFor(() => expect(latest.resources.lifecycle.status).toBe("ready"));
+    expect(document.querySelector(".evidence-reconciliation")).toBe(form);
+    upload.mockResolvedValueOnce(gatewayOk(makeEvidenceUploadSuccess()));
+    await act(async () => fireEvent.click(within(form).getByRole("button", { name: "Retry original upload" })));
+    await within(form).findByText("Evidence added to the inventory.");
+    expect(upload).toHaveBeenCalledTimes(2);
+    expect(upload.mock.calls[1]?.[1]).toEqual(upload.mock.calls[0]?.[1]);
+    expect((form.elements.namedItem("file") as HTMLInputElement).disabled).toBe(false);
+  });
+});

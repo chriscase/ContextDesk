@@ -32,6 +32,10 @@
       "types": "./dist/evidence-annotations.d.ts",
       "import": "./dist/evidence-annotations.js"
     },
+    "./external-run-judgment": {
+      "types": "./dist/external-run-judgment.d.ts",
+      "import": "./dist/external-run-judgment.js"
+    },
     "./model-purpose-policy-shared": {
       "types": "./dist/model-purpose-policy-shared.d.ts",
       "import": "./dist/model-purpose-policy-shared.js"
@@ -59,6 +63,14 @@
     "./source-catalog": {
       "types": "./dist/source-catalog-browser.d.ts",
       "import": "./dist/source-catalog-browser.js"
+    },
+    "./export": {
+      "types": "./dist/export-browser.d.ts",
+      "import": "./dist/export-browser.js"
+    },
+    "./gold": {
+      "types": "./dist/gold-browser.d.ts",
+      "import": "./dist/gold-browser.js"
     },
     "./schemas/*.json": "./schemas/*.json"
   },

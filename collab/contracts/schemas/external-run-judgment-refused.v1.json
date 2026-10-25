@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/external-run-judgment-refused.v1.json",
+  "title": "cd-collab External Run Judgment Refused v1",
+  "description": "Stable domain refusal. current is always null. links_required is a server-policy reason, not a request-parser failure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "error", "caseId", "runId", "reason", "detail", "current"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.external_run_judgment_refused.v1" },
+    "error": { "type": "string", "const": "external_run_judgment_refused" },
+    "caseId": { "$ref": "#/$defs/uuid" },
+    "runId": { "$ref": "#/$defs/uuid" },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "case_archived",
+        "idempotency_intent_mismatch",
+        "privacy_mismatch",
+        "links_required"
+      ]
+    },
+    "detail": { "$ref": "#/$defs/detail" },
+    "current": { "type": "null", "const": null }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "detail": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600,
+      "description": "JSON Schema cannot express NFKC or trim; schema-only validation is structural. The authoritative parser normalizes with NFKC and trim.",
+      "allOf": [
+        { "pattern": "\\S" },
+        {
+          "pattern": "^[^\\u0000-\\u001F\\u007F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u2069\\uFEFF]+$"
+        }
+      ]
+    }
+  }
+}

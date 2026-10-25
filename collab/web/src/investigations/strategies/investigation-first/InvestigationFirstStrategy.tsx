@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
+  evidenceLabelModel,
   selectEvidenceInventory,
   selectResourceView,
   useInvestigationRuntime,
@@ -12,9 +13,16 @@ import type { InvestigationStrategyShellProps } from "../contract.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import { RuntimeCoordinationControl } from "../runtime-coordination.js";
 import { EvidenceAnnotationWorkspace } from "../shared/index.js";
+import { EvidenceUploadReconciliationForm } from "../shared/index.js";
 import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
-import { useInvestigationCollectionQuery } from "../collection-query.js";
+import {
+  CollectionDiscoveryFilters,
+  collectionEmptyMessage,
+  shareableQueryNarrows,
+  useInvestigationCollectionQuery,
+} from "../collection-query.js";
 import { CollectionPagination } from "../shared/index.js";
+import { RecordedContextFields, recordedContextCatalogFromView } from "../shared/index.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
@@ -39,12 +47,6 @@ const CONTEXT_FIELDS: readonly [keyof InvestigationContext, string][] = [
   ["productName", "Product or software"], ["version", "Version"], ["build", "Build"],
   ["component", "Component"], ["environment", "Environment"], ["organization", "Customer, team, or organization"],
 ];
-const UPLOAD_KINDS = ["attachment", "log", "email"] as const;
-const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
-const SHARE_SAFE_PRIVACY_CLASSES = ["share_safe"] as const;
-type UploadKind = (typeof UPLOAD_KINDS)[number];
-type UploadPrivacyClass = (typeof PRIVACY_CLASSES)[number];
-
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function display(value: unknown): string { return text(value) || "Not recorded"; }
 function compactByteLabel(value: number | null | undefined): string | null {
@@ -137,40 +139,6 @@ function failureCopy(error: RuntimeFailure, subject: "list" | "detail" | "eviden
   return `${labels[subject]} could not be processed safely. Try again.`;
 }
 
-/** Whether the recorded-value catalog behind the combo fields can be trusted. */
-type CatalogState = "available" | "empty" | "loading" | "unavailable";
-
-function comboHint(catalog: CatalogState, value: string, options: readonly string[]): string {
-  // A comparison against a catalog that was never read is not a fact. Say what
-  // is actually known instead of calling an unchecked value new. Context
-  // payloads and catalog options share the same outer-whitespace normalization,
-  // so the comparison copy also names that behavior explicitly.
-  if (catalog === "loading") return "Recorded values are still loading, so this cannot be compared yet. Outer whitespace will be removed when it is saved.";
-  if (catalog === "unavailable") return "Recorded values are unavailable, so this cannot be compared. Outer whitespace will be removed when it is saved.";
-  const submittedLiteral = text(value);
-  if (catalog === "empty" || options.length === 0) {
-    return submittedLiteral
-      ? "No recorded values yet. This will be saved as a new value after removing outer whitespace."
-      : "No recorded values yet; enter a new value. Outer whitespace will be removed when saved.";
-  }
-  if (!submittedLiteral) return "Choose a recorded value or enter a new one. Outer whitespace will be removed when saved.";
-  return options.some((option) => option === submittedLiteral)
-    ? "Matches a recorded value after removing outer whitespace; that value will be reused."
-    : "No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.";
-}
-
-/**
- * A native `input[list]`, deliberately without an authored combobox role. The
- * datalist popup is not scriptable, so expanded state, option ownership, and
- * selection belong to the browser; declaring them here would promise assistive
- * technology semantics this markup cannot keep.
- */
-function ComboField(props: { field: keyof InvestigationContext; label: string; value: string; options: readonly string[]; catalog: CatalogState; onChange: (value: string) => void }) {
-  const listId = `investigation-first-${props.field}-options`;
-  const hintId = `${listId}-hint`;
-  return <label className="investigation-first__field"><span>{props.label}</span><input className="login__input" type="text" aria-label={props.label} aria-describedby={hintId} list={listId} value={props.value} onChange={(event) => props.onChange(event.target.value)} /><datalist id={listId}>{props.options.map((option) => <option key={option} value={option} />)}</datalist><small id={hintId} aria-live="polite">{comboHint(props.catalog, props.value, props.options)}</small></label>;
-}
-
 function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
   const runtime = useInvestigationRuntime();
   const lifecycle = selectResourceView(runtime.resources.lifecycle);
@@ -220,10 +188,11 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   );
   const collectionView = collection.view;
   const investigation = selectResourceView(runtime.resources.investigation);
+  const uploadLifecycle = selectResourceView(runtime.resources.lifecycle);
   const evidenceInventory = selectEvidenceInventory(runtime.resources.evidence, runtime.resources.contributions);
   const artifactAnnotationView = selectResourceView(runtime.resources.artifactAnnotations);
   const artifactAnnotations = artifactAnnotationView.availability === "available"
-    ? artifactAnnotationView.value
+    ? artifactAnnotationView.value.filter(row => row.labelEvent === undefined)
     : [];
   const artifactAnnotationsByEvidence = useMemo(() => {
     const byEvidence = new Map<string, ArtifactAnnotationV1[]>();
@@ -247,16 +216,13 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const [severity, setSeverity] = useState<CaseV1["severity"]>("medium");
   const [situation, setSituation] = useState<SituationDraft>(EMPTY_SITUATION);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [privacyClass, setPrivacyClass] = useState<UploadPrivacyClass>(
-    runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe",
-  );
   const [annotationMutationArtifactId, setAnnotationMutationArtifactId] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const browseHeadingRef = useRef<HTMLHeadingElement>(null);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
   const focusedArrival = useRef<string | null>(null);
-  const draftOwnerKey = `${runtime.identity.id}\u0000${runtime.identity.username}`;
+  const draftOwnerKey = runtime.presentationScopeKey;
   const priorDraftOwnerKey = useRef(draftOwnerKey);
   const legacyCases = investigations.availability === "available" ? investigations.value : [];
   const cases = collection.enabled
@@ -290,19 +256,10 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           ? `available:${props.focusCaseId}`
           : null;
   const listView = collection.enabled ? collectionView : investigations;
-  const catalog: CatalogState = investigations.availability === "available"
-    ? legacyCases.length > 0 ? "available" : "empty"
-    : investigations.availability === "unavailable"
-      ? "unavailable"
-      : "loading";
+  const catalog = recordedContextCatalogFromView(investigations, runtime.capabilities.canRead);
   const evidenceSelectionKey = evidenceInventory.inventory.availability === "available"
     ? evidenceInventory.inventory.value.map(({ evidence }) => evidence.id).join("\u0000")
     : "";
-  const contextOptions = useMemo(() => {
-    const result: Record<keyof InvestigationContext, string[]> = { productName: [], version: [], build: [], component: [], environment: [], organization: [] };
-    for (const row of legacyCases) for (const [field] of CONTEXT_FIELDS) { const value = text(row.investigationContext?.[field]); if (value && !result[field].includes(value)) result[field].push(value); }
-    return result;
-  }, [legacyCases]);
   const filteredCases = useMemo(() => {
     if (collection.enabled) return cases;
     const normalized = query.trim().toLocaleLowerCase();
@@ -346,9 +303,6 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     setSituation(EMPTY_SITUATION);
     setAdvancedOpen(false);
   }, [draftOwnerKey]);
-  useLayoutEffect(() => {
-    setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
-  }, [runtime.capabilities.canReadPrivate]);
   useEffect(() => setSelectedEvidence([]), [props.focusCaseId]);
   useEffect(() => setPreviewArtifactId(null), [props.focusCaseId]);
   useEffect(() => setAnnotationArtifactId(null), [props.focusCaseId]);
@@ -388,29 +342,6 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     if (command === null || runtime.mutations.create.status === "running") return;
     const result = await command({ title, severity, problemStatement: situation.problemStatement, affectedParties: situation.affectedParties, impact: situation.impact, scope: situation.scope, openQuestions: listQuestions(situation.openQuestions), investigationContext: contextPayload(situation.investigationContext), ...(situation.occurredAt.trim() ? { occurredAt: situation.occurredAt.trim() } : {}) });
     if (result.status === "succeeded") { setTitle(""); setSeverity("medium"); setSituation(EMPTY_SITUATION); setAdvancedOpen(false); }
-  }
-  async function uploadEvidence(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const command = runtime.commands.uploadEvidence;
-    if (command === null || runtime.mutations.uploadEvidence.status === "running") return;
-    const form = event.currentTarget;
-    const file = (form.elements.namedItem("file") as HTMLInputElement | null)?.files?.[0] ?? null;
-    const summary = (form.elements.namedItem("summary") as HTMLInputElement | null)?.value ?? "";
-    const requestedKind = (form.elements.namedItem("kind") as HTMLSelectElement | null)?.value ?? "attachment";
-    const kind: UploadKind = requestedKind === "log" || requestedKind === "email" || requestedKind === "attachment"
-      ? requestedKind
-      : "attachment";
-    const requestedPrivacy = (form.elements.namedItem("privacyClass") as HTMLSelectElement | null)?.value
-      ?? privacyClass;
-    const submittedPrivacy: UploadPrivacyClass = runtime.capabilities.canReadPrivate
-      && requestedPrivacy === "owner_only"
-      ? "owner_only"
-      : "share_safe";
-    const result = await command({ file, summary, kind, privacyClass: submittedPrivacy });
-    if (result.status === "succeeded") {
-      form.reset();
-      setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
-    }
   }
 
   async function createArtifactAnnotation(draft: ArtifactAnnotationDraft): Promise<unknown> {
@@ -457,9 +388,16 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         <label className="investigation-first__field"><span>Who or what is affected?</span><textarea value={situation.affectedParties} onChange={(event) => setSituation((current) => ({ ...current, affectedParties: event.target.value }))} placeholder="People, services, or customers" rows={2} /></label>
         <label className="investigation-first__field"><span>What is the impact?</span><textarea value={situation.impact} onChange={(event) => setSituation((current) => ({ ...current, impact: event.target.value }))} placeholder="The recorded operational impact" rows={2} /></label>
       </div><details key={draftOwnerKey} className="investigation-first__advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}><summary>Advanced context <span>Product, build, timing, scope, and open questions</span></summary>
-      {catalog === "unavailable" ? <div className="investigation-first__muted investigation-first__create-status" role="status"><p>Recorded values could not be loaded, so nothing entered below can be compared with them. Creating an investigation still works.</p><button type="button" onClick={runtime.refresh.investigations}>Retry recorded values</button></div> : null}
+      {catalog.status === "unavailable" ? <div className="investigation-first__muted investigation-first__create-status" role="status"><p>Loaded investigation suggestions could not be read. Manual creation still works.</p><button type="button" onClick={runtime.refresh.investigations}>Retry recorded values</button></div> : null}
       <div className="investigation-first__form-grid">
-        {CONTEXT_FIELDS.map(([field, label]) => <ComboField key={field} field={field} label={label} value={situation.investigationContext[field]} options={contextOptions[field]} catalog={catalog} onChange={(value) => setSituation((current) => ({ ...current, investigationContext: { ...current.investigationContext, [field]: value } }))} />)}
+        <RecordedContextFields scopeKey={`${draftOwnerKey}:create`} draft={situation.investigationContext}
+          catalog={catalog} labels={Object.fromEntries(CONTEXT_FIELDS) as Partial<Record<keyof InvestigationContext, string>>}
+          fieldClassName="investigation-first__field" inputClassName="login__input"
+          tupleClassName="recorded-context__tuple investigation-first__field--wide" normalizesOuterWhitespace
+          onFieldChange={(field, value) => setSituation((current) => ({ ...current, investigationContext: { ...current.investigationContext, [field]: value } }))}
+          onTupleApply={(tuple) => setSituation((current) => ({ ...current, investigationContext: {
+            ...current.investigationContext, productName: tuple.productName, version: tuple.version, build: tuple.build,
+          } }))} />
         <label className="investigation-first__field"><span>When did it happen? <small>optional</small></span><input className="login__input" aria-describedby="investigation-first-occurred-at-hint" value={situation.occurredAt} onChange={(event) => setSituation((current) => ({ ...current, occurredAt: event.target.value }))} placeholder="2026-08-29 or 2026-08-29T14:30:00-05:00" /><small id="investigation-first-occurred-at-hint">Use YYYY-MM-DD for a known date, or an ISO 8601 date-time with an offset when the local time is known. The server validates this value when you create the investigation.</small></label>
         <label className="investigation-first__field"><span>Scope</span><input className="login__input" value={situation.scope} onChange={(event) => setSituation((current) => ({ ...current, scope: event.target.value }))} placeholder="What is in or out of scope?" /></label>
         <label className="investigation-first__field investigation-first__field--wide"><span>Open questions <small>one per line</small></span><textarea value={situation.openQuestions} onChange={(event) => setSituation((current) => ({ ...current, openQuestions: event.target.value }))} placeholder="What still needs to be learned?" rows={3} /></label>
@@ -485,13 +423,13 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       : [];
     return <section className="investigation-first__browse" aria-labelledby="investigation-first-browse-title" aria-busy={busy}>
       <div className="investigation-first__section-heading"><div><p className="investigation-first__eyebrow">Browse work</p><h2 id="investigation-first-browse-title" ref={browseHeadingRef} tabIndex={-1}>Investigations</h2><p>Open a record to see what is known, what is missing, and what can happen next.</p></div><span className="investigation-first__count" aria-live="polite">{countLabel}</span></div>
-      <div className="investigation-first__filters"><label><span>Search</span><input className="login__input" type="search" value={query} onChange={(event) => updateCollectionQuery({ q: event.target.value })} placeholder="Title, product, build, or problem" aria-label="Search investigations" /></label><label><span>Status</span><select className="login__input" value={statusFilter} onChange={(event) => updateCollectionQuery({ status: event.target.value })} aria-label="Filter investigations by status"><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label><label className="investigation-first__checkbox"><input type="checkbox" checked={includeArchived} onChange={(event) => updateCollectionQuery({ includeArchived: event.target.checked })} /> <span>Include archived</span></label></div>
+      <div className="investigation-first__filters"><label><span>Search</span><input className="login__input" type="search" value={query} onChange={(event) => updateCollectionQuery({ q: event.target.value })} placeholder="Title, product, build, or problem" aria-label="Search investigations" /></label><label><span>Status</span><select className="login__input" value={statusFilter} onChange={(event) => updateCollectionQuery({ status: event.target.value })} aria-label="Filter investigations by status"><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label>{collection.enabled && props.collectionQuery ? <CollectionDiscoveryFilters query={props.collectionQuery} onQueryChange={props.onCollectionQueryChange} facets={collectionView.availability === "available" ? collectionView.value.facets : null} showEntity cursorRestartNotice={collection.cursorRestartNotice} /> : null}<label className="investigation-first__checkbox"><input type="checkbox" checked={includeArchived} onChange={(event) => updateCollectionQuery({ includeArchived: event.target.checked })} /> <span>Include archived</span></label></div>
       {statusFacets.length > 0 ? <div className="investigation-first__facets" aria-label="Investigation status counts">{statusFacets.map((facet) => <button key={facet.key} type="button" aria-pressed={statusFilter === facet.key} onClick={() => updateCollectionQuery({ status: statusFilter === facet.key ? "all" : facet.key })}>{facet.key} <strong>{facet.count}</strong></button>)}</div> : null}
       {denied ? <p className="investigation-first__empty" role="status">Your current access does not include reading investigations, so this list is unavailable. No investigation data was requested.</p> : null}
       {!denied && (listView.availability === "idle" || listView.availability === "loading") ? <p className="investigation-first__empty" role="status">Loading investigations…</p> : null}
       {listView.availability === "unavailable" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(listView.error, "list")}</p><button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry loading investigations</button></div> : null}
       {listView.availability === "available" && listView.refresh === "failed" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(listView.refreshError, "list")}</p><button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry loading investigations</button></div> : null}
-      {listView.availability === "available" && filteredCases.length === 0 ? <p className="investigation-first__empty">{runtime.capabilities.canCreate ? "No investigations match this view. Try a different search or create a new one." : "No investigations match this view. Try a different search."}</p> : null}
+      {listView.availability === "available" && filteredCases.length === 0 ? <p className="investigation-first__empty">{collectionEmptyMessage(props.collectionQuery ? shareableQueryNarrows(props.collectionQuery) : query.trim().length > 0 || statusFilter !== "all", { canCreate: runtime.capabilities.canCreate })}</p> : null}
       {listView.availability === "available" ? <ul className="investigation-first__list">{filteredCases.map((row) => { const missing = [row.problemStatement, row.affectedParties, row.impact].filter((value) => !text(value)).length; return <li key={row.id} className="investigation-first__list-item"><button type="button" className="investigation-first__list-button" onClick={() => props.onOpenCase(row.id)}><span className="investigation-first__list-title">{row.title || "Untitled investigation"}</span><span className="investigation-first__list-meta"><span className={`status-pill status-pill--${row.status}`}>{row.status}</span><span>{row.severity}</span>{row.investigationContext?.productName ? <span>{row.investigationContext.productName}{row.investigationContext.build ? ` · ${row.investigationContext.build}` : ""}</span> : null}</span><span className="investigation-first__list-hint">{missing ? `${missing} key ${missing === 1 ? "field" : "fields"} not recorded` : "Core context recorded"}</span></button></li>; })}</ul> : null}
       {collection.enabled ? <CollectionPagination key={JSON.stringify(collection.input)} view={collectionView} onNextPage={collection.nextPage} /> : null}
     </section>;
@@ -501,7 +439,6 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     const inventory = evidenceInventory.inventory;
     const summaryAnnotations = evidenceInventory.annotations;
     const upload = runtime.mutations.uploadEvidence;
-    const uploadCommand = runtime.commands.uploadEvidence;
     const previewState = runtime.evidencePreview.state;
     const busy = inventory.availability === "loading"
       || (inventory.availability === "available" && inventory.refresh === "loading")
@@ -609,8 +546,9 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           })}
         </ul>
       ) : null}
-      <EvidenceAnnotationWorkspace
-        scopeKey={`${props.focusCaseId ?? "none"}\u0000${runtime.identity.id}\u0000${runtime.identity.username}`}
+      <EvidenceAnnotationWorkspace labelModel={evidenceLabelModel}
+        scopeKey={`${runtime.presentationScopeKey}\u0000${props.focusCaseId ?? "none"}\u0000${runtime.identity.id}\u0000${runtime.identity.username}`}
+        readCompletion={runtime.resources.annotationReadCompletion}
         evidence={inventory.availability === "available" ? inventory.value.map(({ evidence }) => evidence) : []}
         selectedArtifactIds={selectedEvidence}
         annotations={artifactAnnotationView}
@@ -624,8 +562,12 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         onClearSelection={() => setSelectedEvidence([])}
         trashDescriptionId="investigation-first-trash-description"
       />
-      {upload.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
-      {uploadCommand !== null ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment">{UPLOAD_KINDS.map((option) => <option key={option} value={option}>{option === "attachment" ? "Attachment" : option === "log" ? "Log" : "Email"}</option>)}</select></label><label>Privacy<select name="privacyClass" value={privacyClass} onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe")}>{(runtime.capabilities.canReadPrivate ? PRIVACY_CLASSES : SHARE_SAFE_PRIVACY_CLASSES).map((option) => <option key={option} value={option}>{option === "owner_only" ? "Owner only" : "Share safe"}</option>)}</select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={upload.status === "running"}>{upload.status === "running" ? "Adding…" : "Add to evidence inventory"}</button></form> : null}
+      {upload.status === "failed" && !("reason" in upload.error && upload.error.reason === "commit_outcome_unknown") ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
+      {runtime.capabilities.canUpload && investigation.availability === "available" && investigation.value.status !== "archived" ? <EvidenceUploadReconciliationForm variant="investigation-first"
+        scopeKey={[runtime.presentationScopeKey, investigation.availability === "available" ? investigation.value.id : "unavailable", runtime.capabilities.canRead, runtime.capabilities.canUpload, runtime.capabilities.canReadPrivate, uploadLifecycle.availability === "available" ? JSON.stringify(uploadLifecycle.value) : uploadLifecycle.availability].join("\0")}
+        canRead={runtime.capabilities.canRead} canUpload={runtime.capabilities.canUpload} canReadPrivate={runtime.capabilities.canReadPrivate}
+        readCompletion={runtime.resources.evidenceReadCompletion ?? { requested: 0, succeeded: -1, failed: -1 }}
+        refreshEvidence={runtime.refresh.evidence} upload={runtime.commands.uploadEvidence} /> : null}
     </section>;
   }
 

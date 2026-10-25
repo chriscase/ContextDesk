@@ -12,6 +12,7 @@ import {
   goldPromotionFingerprint,
   parseGoldAlignment,
   parseGoldReference,
+  parseGoldReferenceExport,
 } from "./gold.js";
 
 const Ajv2020 =
@@ -28,6 +29,21 @@ function load(name: string): unknown {
 }
 
 describe("gold reference contract", () => {
+  it("parses the shared owner-only envelope and refuses privacy and nested tampering", () => {
+    const valid = load("gold-reference-export.valid.json") as Record<string, unknown>;
+    const parsed = parseGoldReferenceExport(valid);
+    expect(parsed.privacyClass).toBe("owner_only");
+    expect(parsed.gold).toEqual(parseGoldReference(load("gold-reference.valid.json")));
+    expect(() => parseGoldReferenceExport(load("gold-reference-export.invalid-nested.json")))
+      .toThrow(/evidence anchor/);
+    expect(() => parseGoldReferenceExport({ ...valid, privacyClass: "share_safe" }))
+      .toThrow();
+    expect(() => parseGoldReferenceExport({ ...valid, extra: "private" }))
+      .toThrow(/unknown key/);
+    expect(() => parseGoldReferenceExport({ ...valid, gold: {
+      ...(valid.gold as Record<string, unknown>), extra: "private",
+    } })).toThrow(/unknown key/);
+  });
   it("accepts the three-model checkout gold fixture and rejects unknown fields", () => {
     const gold = parseGoldReference(load("gold-reference.valid.json"));
     expect(gold.schemaId).toBe(GOLD_REFERENCE_SCHEMA_ID);

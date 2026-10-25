@@ -3,6 +3,7 @@ import {
   classifyHttpFailure,
   classifyRequestException,
   protocolFailure,
+  type RuntimeFailure,
 } from "./errors.js";
 
 describe("runtime failure classification", () => {
@@ -12,7 +13,7 @@ describe("runtime failure classification", () => {
       { kind: "input", field: "file", reason: "too_large" },
       { kind: "input", field: "summary", reason: "unreadable" },
       { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
-    ] as const;
+    ] as const satisfies readonly RuntimeFailure[];
 
     expect(failures).toEqual([
       { kind: "input", field: "title", reason: "required" },
@@ -73,6 +74,33 @@ describe("runtime failure classification", () => {
       reason: "not_archived",
       detail: "This investigation is not archived.",
     })).toEqual({ kind: "unavailable", status: 503 });
+  });
+
+  it("keeps external-run judgment failures bounded and action-specific", () => {
+    const failures = [
+      {
+        kind: "judgment_conflict",
+        status: 409,
+        caseId: "case-id",
+        runId: "run-id",
+        expectedSequence: 1,
+        currentSequence: 2,
+      },
+      {
+        kind: "judgment_refused",
+        status: 409,
+        caseId: "case-id",
+        runId: "run-id",
+        reason: "links_required",
+        detail: "Recorded links are required.",
+      },
+      { kind: "judgment_limit_reached", status: 413 },
+    ] as const satisfies readonly RuntimeFailure[];
+    expect(failures.map((failure) => Object.keys(failure).sort())).toEqual([
+      ["caseId", "currentSequence", "expectedSequence", "kind", "runId", "status"],
+      ["caseId", "detail", "kind", "reason", "runId", "status"],
+      ["kind", "status"],
+    ]);
   });
 
   it("classifies a bounded commit-outcome-unknown 503 without retaining a body", () => {

@@ -18,7 +18,7 @@
 }
 
 .keystone-strategy__filters {
-  grid-template-columns: minmax(14rem, 2fr) minmax(11rem, 1fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
   margin-bottom: 1rem;
 }
 

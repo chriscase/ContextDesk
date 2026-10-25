@@ -594,6 +594,79 @@ describe("collection query service and store", () => {
     });
   });
 
+  it("keeps recorded-at on createdAt, contributor identity, and authorized facet counts", async () => {
+    await withService(async ({ service, store, graph }) => {
+      await store.insertCase(row({
+        id: CASE_A,
+        title: "Recorded in August",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        occurredAt: "2020-01-01T00:00:00.000Z",
+        occurredAtPrecision: "second",
+        occurredAtZone: "explicit",
+      }));
+      await store.insertCase(row({
+        id: CASE_B,
+        title: "Recorded later",
+        createdAt: "2026-08-20T00:00:00.000Z",
+        status: "monitoring",
+        participants: [
+          { identityId: ALICE.id, username: ALICE.username },
+          { identityId: EVE.id, username: EVE.username },
+        ],
+      }));
+      await store.insertCase(row({
+        id: CASE_C,
+        title: "Observed in August but recorded earlier",
+        createdAt: "2026-07-01T00:00:00.000Z",
+        occurredAt: "2026-08-15T00:00:00.000Z",
+        occurredAtPrecision: "second",
+        occurredAtZone: "explicit",
+      }));
+      graph.recordImpact(CASE_A, IMPACT);
+
+      expect(() => query({
+        recordedFrom: "2026-08-31T00:00:00.000Z",
+        recordedTo: "2026-08-01T00:00:00.000Z",
+      })).toThrow(ContractViolation);
+
+      const counted = await service.listCollectionPage(ALICE, false, query());
+      expect(counted.items.map((item) => item.id)).toEqual([CASE_B, CASE_A, CASE_C]);
+      expect(counted.facets.contributor.top).toEqual(expect.arrayContaining([
+        { key: ALICE.id, count: 3 },
+        { key: EVE.id, count: 1 },
+      ]));
+      expect(counted.facets.status.top).toEqual(
+        expect.arrayContaining([
+          { key: "open", count: 2 },
+          { key: "monitoring", count: 1 },
+        ]),
+      );
+      expect(counted.facets.contributor.otherCount).toBe(0);
+      expect(counted.facets.impactIdentity.top[0]?.count).toBe(1);
+      expect(counted.facets.impactIdentity.otherCount).toBe(0);
+
+      const august = await service.listCollectionPage(ALICE, false, query({
+        recordedFrom: "2026-08-01T00:00:00.000Z",
+        recordedTo: "2026-08-31T23:59:59.999Z",
+        contributorId: ALICE.id,
+      }));
+      expect(august.items.map((item) => item.id)).toEqual([CASE_B, CASE_A]);
+      const earlyAugust = await service.listCollectionPage(ALICE, false, query({
+        recordedFrom: "2026-08-01T00:00:00.000Z",
+        recordedTo: "2026-08-15T00:00:00.000Z",
+      }));
+      expect(earlyAugust.items.map((item) => item.id)).toEqual([CASE_A]);
+      expect(earlyAugust.facets.contributor.top.find((bucket) => bucket.key === EVE.id)?.count).toBe(1);
+      expect(august.facets.contributor.top.find((bucket) => bucket.key === EVE.id)?.count).toBe(1);
+      expect(august.hiddenArchivedCount).toBe(0);
+
+      const byEve = await service.listCollectionPage(ALICE, false, query({
+        contributorId: EVE.id,
+      }));
+      expect(byEve.items.map((item) => item.id)).toEqual([CASE_B]);
+    });
+  });
+
   it("distinguishes an empty authorized set from a filtered-empty page", async () => {
     await withService(async ({ service, store }) => {
       const empty = await service.listCollectionPage(ALICE, false, query({ q: "checkout" }));

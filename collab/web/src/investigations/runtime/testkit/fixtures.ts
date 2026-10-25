@@ -40,6 +40,15 @@ import {
   parseInvestigationOperationsQueuePage,
   type InvestigationOperationsQueuePageV1,
 } from "@cd-collab/contracts/investigation-operations-queue";
+import {
+  EXTERNAL_RUN_JUDGMENT_LIST_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_SCHEMA_ID,
+  EXTERNAL_RUN_JUDGMENT_SUCCESS_SCHEMA_ID,
+  parseExternalRunJudgmentList,
+  parseExternalRunJudgmentSuccess,
+  type ExternalRunJudgmentListV1,
+  type ExternalRunJudgmentSuccessV1,
+} from "@cd-collab/contracts/external-run-judgment";
 
 /** Stable identities used by Runtime V1 conformance tests. */
 export const RUNTIME_FIXTURE_IDS = Object.freeze({
@@ -50,8 +59,58 @@ export const RUNTIME_FIXTURE_IDS = Object.freeze({
   note: "contribution-investigator-note",
 });
 
+export const RUNTIME_JUDGMENT_FIXTURE_IDS = Object.freeze({
+  caseId: "11111111-1111-4111-8111-111111111111",
+  runId: "22222222-2222-4222-8222-222222222222",
+  sourceId: "33333333-3333-4333-8333-333333333333",
+  artifactId: "44444444-4444-4444-8444-444444444444",
+});
+
 const CREATED_AT = "2026-02-03T14:05:06.000Z";
 const OBSERVED_AT = "2026-02-03T19:42:00.000Z";
+
+export function makeExternalRunJudgmentList(
+  overrides: Record<string, unknown> = {},
+): ExternalRunJudgmentListV1 {
+  const ids = RUNTIME_JUDGMENT_FIXTURE_IDS;
+  return parseExternalRunJudgmentList({
+    schemaId: EXTERNAL_RUN_JUDGMENT_LIST_SCHEMA_ID,
+    caseId: ids.caseId,
+    runId: ids.runId,
+    judgments: [],
+    ...overrides,
+  });
+}
+
+export function makeExternalRunJudgmentSuccess(
+  overrides: Record<string, unknown> = {},
+): ExternalRunJudgmentSuccessV1 {
+  const ids = RUNTIME_JUDGMENT_FIXTURE_IDS;
+  return parseExternalRunJudgmentSuccess({
+    schemaId: EXTERNAL_RUN_JUDGMENT_SUCCESS_SCHEMA_ID,
+    caseId: ids.caseId,
+    runId: ids.runId,
+    applied: {
+      schemaId: EXTERNAL_RUN_JUDGMENT_SCHEMA_ID,
+      caseId: ids.caseId,
+      runId: ids.runId,
+      seq: 1,
+      judgment: "insufficient_evidence",
+      actor: { id: "identity-lead", username: "lead" },
+      links: [],
+      rationale: "More recorded evidence is required.",
+      recordedAt: "2026-09-09T12:00:00.000Z",
+    },
+    replayed: false,
+    run: {
+      id: ids.runId,
+      caseId: ids.caseId,
+      sourceId: ids.sourceId,
+      createdAt: "2026-09-09T11:00:00.000Z",
+    },
+    ...overrides,
+  });
+}
 
 /**
  * A pre-context-contract import. Optional wire fields are deliberately absent

@@ -99,7 +99,7 @@ describe("contracts unknown-field rejection", () => {
     );
     const pkg = parsePromptPackage(valid);
     expect(pkg.schemaId).toBe(PACKAGE_SCHEMA_ID);
-    expect(pkg.manifest.excludedByDefault).toEqual(["corroboration", "resolution"]);
+    expect(pkg.manifest.excludedByDefault).toEqual(["external_run", "corroboration", "resolution"]);
     const invalid = JSON.parse(
       readFileSync(join(fixturesDir, "prompt-package.unknown-field.json"), "utf8"),
     );

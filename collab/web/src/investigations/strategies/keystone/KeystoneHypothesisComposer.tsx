@@ -76,6 +76,11 @@ function failureOutcomeIsUnknown(error: RuntimeFailure): boolean {
     case "lifecycle_refused":
     case "coordination_changed":
     case "coordination_refused":
+    case "stale_cursor":
+    case "malformed_cursor":
+    case "judgment_conflict":
+    case "judgment_refused":
+    case "judgment_limit_reached":
       return false;
   }
 }
@@ -93,8 +98,13 @@ function contributionFailureCopy(error: RuntimeFailure): string {
     case "lifecycle_changed":
     case "coordination_changed":
     case "coordination_refused":
+    case "judgment_conflict":
+    case "judgment_refused":
+    case "judgment_limit_reached":
       return "The investigation changed before the hypothesis was recorded. Review the current record before trying again.";
     case "lifecycle_refused":
+    case "stale_cursor":
+    case "malformed_cursor":
       return "The investigation does not currently allow this contribution.";
     case "unavailable":
     case "server_failure":

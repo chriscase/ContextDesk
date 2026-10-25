@@ -1,0 +1,23 @@
+{
+  "schemaId": "cd-collab.gold_reference_export.v1",
+  "privacyClass": "owner_only",
+  "gold": {
+    "schemaId": "cd-collab.gold_reference.v1",
+    "goldId": "gold-invalid",
+    "version": 1,
+    "predecessorGoldId": null,
+    "caseId": "case-synth",
+    "experimentId": "exp-synth",
+    "packageId": "pkg-synth",
+    "taskFingerprint": "task-synth",
+    "snapshotFingerprint": "snap-synth",
+    "acceptedDecisionId": "dec-synth",
+    "acceptedDecisionRevision": 1,
+    "auditRefs": [],
+    "evidenceAnchors": [],
+    "notes": ["A gold reference is a human benchmark decision, not an infallible truth claim."],
+    "promotedById": "participant",
+    "promotedByUsername": "case-lead",
+    "createdAt": "2026-08-19T00:00:00Z"
+  }
+}

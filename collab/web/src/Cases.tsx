@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { CaseDiscussion } from "./CaseDiscussion.js";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
@@ -39,7 +39,9 @@ import { LifecyclePanel, type LifecyclePanelProps } from "./LifecyclePanel.js";
 import { ResolutionForm } from "./ResolutionForm.js";
 import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
 import { loadEntities, type EntityRow } from "./Entities.js";
-import type { InvestigationCollectionPageV1, ResourceView } from "./investigations/runtime/public.js";
+import type { CaseV1, InvestigationCollectionPageV1, ResourceView } from "./investigations/runtime/public.js";
+import { RecordedContextFields } from "./investigations/strategies/shared/RecordedContextFields.js";
+import { recordedContextCatalogFromView } from "./investigations/strategies/shared/recorded-context-options.js";
 import { WarRoomCollectionList } from "./investigations/war-room/WarRoomCollectionList.js";
 import { fetchLegacyCaseList } from "./legacy-cases-fetch.js";
 
@@ -147,37 +149,6 @@ function contextPayload(draft: InvestigationContextDraft): InvestigationContextV
   return Object.values(draft).some((value) => value.trim().length > 0)
     ? { ...draft }
     : null;
-}
-
-function normalizedSearchValue(value: string): string {
-  return value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim();
-}
-
-function ContextComboBox(props: {
-  field: InvestigationContextField;
-  value: string;
-  options: readonly string[];
-  onChange: (value: string) => void;
-}) {
-  const listId = `investigation-context-options-${props.field}`;
-  const label = CONTEXT_FIELD_LABELS[props.field];
-  return (
-    <label>
-      <span>{label}</span>
-      <input
-        className="login__input"
-        role="combobox"
-        aria-autocomplete="list"
-        aria-label={`Investigation context: ${label}`}
-        list={listId}
-        value={props.value}
-        onChange={(event) => props.onChange(event.target.value)}
-      />
-      <datalist id={listId}>
-        {props.options.map((option) => <option key={option} value={option} />)}
-      </datalist>
-    </label>
-  );
 }
 
 function draftFor(row: CaseRow): SituationDraft {
@@ -755,6 +726,8 @@ export function Cases(props: {
   capabilities?: readonly string[];
   readOnly?: boolean;
   participant?: { username: string; roles: string[] };
+  identityKey?: string;
+  authorityKey?: string;
   view?: "overview" | "investigations";
   focusCaseId?: string | null;
   stage?: StageId;
@@ -769,10 +742,14 @@ export function Cases(props: {
   lifecycleBinding?: Omit<LifecyclePanelProps, "onChanged">;
   /** Optional shell/runtime-owned collection page for the production War Room. */
   collectionPage?: ResourceView<InvestigationCollectionPageV1>;
+  /** Existing public Runtime list, already requested by the shell. */
+  recordedContextView?: ResourceView<readonly CaseV1[]>;
   collectionQuery?: CollectionQueryLocation;
   onCollectionQueryChange?: (query: CollectionQueryLocation) => void;
   onCollectionRefresh?: () => void;
   onCollectionNextPage?: () => void;
+  collectionCursorRestartNotice?: string | null;
+  humanAssessmentsPanel?: ReactNode;
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
@@ -795,6 +772,12 @@ export function Cases(props: {
   const canReadPrivate = capabilitySet
     ? capabilitySet.has("evidence:private:read")
     : roles.includes("case-lead") || roles.includes("admin");
+  const canBenchmarkPromote = !readOnly && (capabilitySet
+    ? capabilitySet.has("decision:accept")
+    : canLead);
+  const canBenchmarkExport = canBenchmarkPromote && canRead && canReadPrivate && (capabilitySet
+    ? capabilitySet.has("export:create")
+    : canLead);
   const collectionMode = props.collectionPage !== undefined;
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [casesLoaded, setCasesLoaded] = useState(false);
@@ -1324,13 +1307,13 @@ export function Cases(props: {
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
-  const contextOptions = (field: InvestigationContextField): string[] => [
-    ...new Set(
-      cases
-        .map((row) => row.investigationContext?.[field] ?? "")
-        .filter((value) => value.trim().length > 0),
-    ),
-  ].sort((left, right) => normalizedSearchValue(left).localeCompare(normalizedSearchValue(right)));
+  const recordedContextCatalog = recordedContextCatalogFromView(
+    props.recordedContextView ?? (casesLoaded
+      ? { availability: "available", value: cases, refresh: "settled" }
+      : { availability: "loading" }),
+    canRead,
+  );
+  const contextScope = JSON.stringify([props.identityKey, props.authorityKey, canRead, canWrite]);
   const casesByEntity = new Map<string, Set<string>>();
   for (const entry of involvementIndex) {
     const bucket = casesByEntity.get(entry.entityId) ?? new Set<string>();
@@ -1419,18 +1402,16 @@ export function Cases(props: {
           found precisely. Flexible tags can remain a later extension.
         </p>
         <div className="case-form__context-grid">
-          {INVESTIGATION_CONTEXT_FIELDS.map((field) => (
-            <ContextComboBox
-              key={field}
-              field={field}
-              value={newSituation.investigationContext[field]}
-              options={contextOptions(field)}
-              onChange={(value) => setNewSituation((draft) => ({
-                ...draft,
-                investigationContext: { ...draft.investigationContext, [field]: value },
-              }))}
-            />
-          ))}
+          <RecordedContextFields scopeKey={`${contextScope}:create`}
+            draft={newSituation.investigationContext} catalog={recordedContextCatalog}
+            labels={CONTEXT_FIELD_LABELS} ariaPrefix="Investigation context: " inputClassName="login__input"
+            onFieldChange={(field, value) => setNewSituation((draft) => ({
+              ...draft, investigationContext: { ...draft.investigationContext, [field]: value },
+            }))}
+            onTupleApply={(tuple) => setNewSituation((draft) => ({ ...draft,
+              investigationContext: { ...draft.investigationContext,
+                productName: tuple.productName, version: tuple.version, build: tuple.build },
+            }))} />
         </div>
       </fieldset>
       <div className="case-form__situation">
@@ -1690,6 +1671,7 @@ export function Cases(props: {
             ? { onQueryChange: props.onCollectionQueryChange }
             : {})}
           onRefresh={props.onCollectionRefresh ?? (() => undefined)}
+          cursorRestartNotice={props.collectionCursorRestartNotice ?? null}
           {...(props.onCollectionNextPage
             ? { onNextPage: props.onCollectionNextPage }
             : {})}
@@ -2271,18 +2253,16 @@ export function Cases(props: {
                     investigations. Flexible tags can remain a later extension.
                   </p>
                   <div className="situation__context-grid">
-                    {INVESTIGATION_CONTEXT_FIELDS.map((field) => (
-                      <ContextComboBox
-                        key={field}
-                        field={field}
-                        value={situationDraft.investigationContext[field]}
-                        options={contextOptions(field)}
-                        onChange={(value) => setSituationDraft((draft) => ({
-                          ...draft,
-                          investigationContext: { ...draft.investigationContext, [field]: value },
-                        }))}
-                      />
-                    ))}
+                    <RecordedContextFields scopeKey={`${contextScope}:edit:${current.id}`}
+                      draft={situationDraft.investigationContext} catalog={recordedContextCatalog}
+                      labels={CONTEXT_FIELD_LABELS} ariaPrefix="Investigation context: " inputClassName="login__input"
+                      onFieldChange={(field, value) => setSituationDraft((draft) => ({
+                        ...draft, investigationContext: { ...draft.investigationContext, [field]: value },
+                      }))}
+                      onTupleApply={(tuple) => setSituationDraft((draft) => ({ ...draft,
+                        investigationContext: { ...draft.investigationContext,
+                          productName: tuple.productName, version: tuple.version, build: tuple.build },
+                      }))} />
                   </div>
                 </fieldset>
                 <div className="situation__form-actions">
@@ -2663,6 +2643,9 @@ export function Cases(props: {
             onAddNote={(event) => void addNote(event)}
             onImportRun={(event) => void importRun(event)}
             onCorroborate={(id, state, linkId) => void corroborate(id, state, linkId)}
+            {...(props.humanAssessmentsPanel === undefined
+              ? {}
+              : { humanAssessmentsPanel: props.humanAssessmentsPanel })}
           />
         </section>
         <section
@@ -2790,10 +2773,13 @@ export function Cases(props: {
           >
             <TriageAnchor id="triage-comparison-lab" label="Comparison lab">
               <ExperimentLab
+                key={`${current.id}:${props.identityKey ?? props.participant?.username ?? ""}:${props.authorityKey ?? ""}:${canRead}:${canReadPrivate}:${canBenchmarkPromote}:${canBenchmarkExport}`}
                 caseId={current.id}
                 surface="comparison"
                 canWrite={canWrite}
                 canLead={canLead}
+                canBenchmarkPromote={canBenchmarkPromote}
+                canBenchmarkExport={canBenchmarkExport}
                 readOnly={readOnly}
                 caseTitle={current.title}
                 caseStatus={current.status}
@@ -2838,10 +2824,13 @@ export function Cases(props: {
                 decided, update the status and export a share-safe record.
               </p>
               <ExperimentLab
+                key={`${current.id}:${props.identityKey ?? props.participant?.username ?? ""}:${props.authorityKey ?? ""}:${canRead}:${canReadPrivate}:${canBenchmarkPromote}:${canBenchmarkExport}`}
                 caseId={current.id}
                 surface="decision"
                 canWrite={canWrite}
                 canLead={canLead}
+                canBenchmarkPromote={canBenchmarkPromote}
+                canBenchmarkExport={canBenchmarkExport}
                 readOnly={readOnly}
                 caseTitle={current.title}
                 caseStatus={current.status}
@@ -2914,14 +2903,37 @@ export function Cases(props: {
                   onChanged={() => Promise.all([refresh(), refreshActivity()]).then(() => undefined)}
                 />
               ) : null}
-              {!readOnly ? (
+              {!readOnly && current.status !== "archived" &&
+               ((capabilitySet?.has("export:create") ?? canLead) ||
+                (capabilitySet?.has("portable:restore") ?? canLead)) &&
+               (props.lifecycleBinding === undefined ||
+                (props.lifecycleBinding.lifecycle.status === "ready" &&
+                 props.lifecycleBinding.lifecycle.value.investigationId === current.id &&
+                 props.lifecycleBinding.lifecycle.value.status !== "archived")) ? (
                 <details className="case-view__support">
                   <summary>Case export tools</summary>
-                  <ExportPanel caseId={current.id} canWrite={canWrite} canLead={canLead} />
+                  <ExportPanel
+                    key={JSON.stringify([current.id, props.identityKey, props.authorityKey,
+                      current.status, canRead, canReadPrivate,
+                      capabilitySet?.has("export:create") ?? canLead,
+                      capabilitySet?.has("portable:restore") ?? canLead])}
+                    caseId={current.id}
+                    identityKey={props.identityKey ?? props.participant?.username ?? "legacy"}
+                    authorityKey={props.authorityKey ?? "legacy"}
+                    canRead={canRead}
+                    canExport={capabilitySet?.has("export:create") ?? canLead}
+                    canReadPrivate={canReadPrivate}
+                    canWrite={canWrite}
+                    canLead={capabilitySet?.has("portable:restore") ?? canLead}
+                  />
                 </details>
               ) : (
                 <p className="triage-step__note" role="status">
-                  Static read-only view: status changes and exports are unavailable.
+                  {readOnly
+                    ? "Static read-only view: status changes and exports are unavailable."
+                    : current.status === "archived"
+                      ? "Archived investigation: exports are unavailable until it is restored."
+                      : "Export tools are unavailable for this account or lifecycle state."}
                 </p>
               )}
             </div>

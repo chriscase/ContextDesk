@@ -46,10 +46,13 @@ import {
   makeContributionList,
   makeEvidenceList,
   makeEvidenceUploadSuccess,
+  makeExternalRunJudgmentList,
+  makeExternalRunJudgmentSuccess,
   makeOperationsQueuePage,
   makePopulatedCase,
   makeSparseImportedCase,
   RUNTIME_FIXTURE_IDS,
+  RUNTIME_JUDGMENT_FIXTURE_IDS,
 } from "./testkit/fixtures.js";
 import { createDeferred, type Deferred } from "./testkit/promises.js";
 
@@ -372,6 +375,65 @@ describe("InvestigationRuntimeProvider", () => {
       error: { kind: "unavailable", status: 503 },
     }));
     expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
+  it("queries and records human run judgment only through the explicit public seam", async () => {
+    const listExternalRunJudgments = vi.fn(async () =>
+      succeeded(makeExternalRunJudgmentList()));
+    const success = makeExternalRunJudgmentSuccess();
+    const createExternalRunJudgment = vi.fn(async () => succeeded(success));
+    const gateway = makeGateway({ listExternalRunJudgments, createExternalRunJudgment });
+    render(
+      <ProviderUnderTest
+        identityKey="lead-session"
+        identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+        authorityKey="lead-authority-v1"
+        capabilities={["investigation:read", "investigation:write"]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    expect(currentRuntime().resources.externalRunJudgments).toEqual({ status: "idle" });
+    expect(listExternalRunJudgments).not.toHaveBeenCalled();
+
+    act(() => currentRuntime().commands.queryExternalRunJudgments!(
+      RUNTIME_JUDGMENT_FIXTURE_IDS.runId,
+    ));
+    await waitFor(() => expect(currentRuntime().resources.externalRunJudgments.status).toBe("ready"));
+    expect(currentRuntime().resources.externalRunJudgmentsRunId)
+      .toBe(RUNTIME_JUDGMENT_FIXTURE_IDS.runId);
+    expect(currentRuntime().capabilities.canRecordRunJudgment).toBe(true);
+    expect(currentRuntime().commands.queryExternalRunJudgments).toEqual(expect.any(Function));
+    expect(currentRuntime().commands.createExternalRunJudgment).toEqual(expect.any(Function));
+
+    act(() => currentRuntime().refresh.activeInvestigation());
+    await waitFor(() => expect(listExternalRunJudgments).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      await expect(currentRuntime().commands.createExternalRunJudgment!({
+        runId: RUNTIME_JUDGMENT_FIXTURE_IDS.runId,
+        judgment: "insufficient_evidence",
+        links: [],
+        rationale: "Human review is not yet conclusive.",
+        idempotencyKey: "provider-judgment-0001",
+      })).resolves.toEqual({ status: "succeeded", value: success });
+    });
+    expect(createExternalRunJudgment).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_JUDGMENT_FIXTURE_IDS.runId,
+      expect.objectContaining({ expectedSequence: 0 }),
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(currentRuntime().mutations.externalRunJudgment)
+      .toEqual({ status: "succeeded", value: success });
+    expect(Object.isFrozen(currentRuntime().resources.externalRunJudgments)).toBe(true);
   });
 
   it("reads coordination but exposes no action without a nonempty authenticated identity", async () => {
@@ -723,6 +785,8 @@ describe("InvestigationRuntimeProvider", () => {
       applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
+      queryExternalRunJudgments: null,
+      createExternalRunJudgment: null,
       queryInvestigations: null,
       queryOperationsQueue: null,
     });
@@ -769,6 +833,7 @@ describe("InvestigationRuntimeProvider", () => {
       canManageLifecycle: false,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
@@ -781,6 +846,8 @@ describe("InvestigationRuntimeProvider", () => {
       applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
+      queryExternalRunJudgments: expect.any(Function),
+      createExternalRunJudgment: null,
       queryInvestigations: expect.any(Function),
       queryOperationsQueue: expect.any(Function),
     });
@@ -827,6 +894,7 @@ describe("InvestigationRuntimeProvider", () => {
       "canManageLifecycle",
       "canRead",
       "canReadPrivate",
+      "canRecordRunJudgment",
       "canUpload",
     ]);
     expect(JSON.stringify(currentRuntime())).not.toContain("evidence:private:read");
@@ -876,6 +944,7 @@ describe("InvestigationRuntimeProvider", () => {
       canManageLifecycle: false,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
     expect(currentRuntime().commands.uploadEvidence).toBeNull();
   });
@@ -921,6 +990,7 @@ describe("InvestigationRuntimeProvider", () => {
     });
     expect(currentRuntime().commands.uploadEvidence).toBeNull();
     expect(currentRuntime().commands.applyLifecycle).toBeNull();
+    expect(currentRuntime().commands.queryExternalRunJudgments).toBeNull();
   });
 
   it("denies the active scope when an authoritative collection no longer includes it", async () => {
@@ -960,6 +1030,7 @@ describe("InvestigationRuntimeProvider", () => {
     });
     expect(currentRuntime().commands.uploadEvidence).toBeNull();
     expect(currentRuntime().commands.applyLifecycle).toBeNull();
+    expect(currentRuntime().commands.queryExternalRunJudgments).toBeNull();
   });
 
   it("refreshes a settled list before inferring that a newly focused investigation is absent", async () => {
@@ -1780,6 +1851,7 @@ describe("InvestigationRuntimeProvider", () => {
       canManageLifecycle: true,
       canCoordinateSelf: false,
       canCoordinateParticipants: false,
+      canRecordRunJudgment: false,
     });
     expect(currentRuntime().commands.createContribution).toBeNull();
     expect(currentRuntime().commands.updateSituation).toBeNull();
@@ -2073,6 +2145,8 @@ describe("InvestigationRuntimeProvider", () => {
       applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
+      queryExternalRunJudgments: null,
+      createExternalRunJudgment: null,
       queryInvestigations: expect.any(Function),
       queryOperationsQueue: expect.any(Function),
     });
@@ -2227,6 +2301,7 @@ describe("InvestigationRuntimeProvider", () => {
         canManageLifecycle: false,
         canCoordinateSelf: false,
         canCoordinateParticipants: false,
+        canRecordRunJudgment: false,
       });
       expect(runtime.commands).toEqual({
         createInvestigation: null,
@@ -2239,6 +2314,8 @@ describe("InvestigationRuntimeProvider", () => {
         applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
+        queryExternalRunJudgments: null,
+        createExternalRunJudgment: null,
         queryInvestigations: expect.any(Function),
         queryOperationsQueue: expect.any(Function),
       });
@@ -2406,6 +2483,7 @@ describe("InvestigationRuntimeProvider", () => {
         canManageLifecycle: false,
         canCoordinateSelf: false,
         canCoordinateParticipants: false,
+        canRecordRunJudgment: false,
       });
       expect(runtime.commands).toEqual({
         createInvestigation: null,
@@ -2418,6 +2496,8 @@ describe("InvestigationRuntimeProvider", () => {
         applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
+        queryExternalRunJudgments: null,
+        createExternalRunJudgment: null,
         queryInvestigations: expect.any(Function),
         queryOperationsQueue: expect.any(Function),
       });
@@ -2597,6 +2677,132 @@ describe("InvestigationRuntimeProvider", () => {
         cursor: OPAQUE_CURSOR,
       });
       expect(requests[1]).toEqual(continued.ok ? continued.value : null);
+    });
+
+    it("ignores a collection command captured before the identity changes", async () => {
+      const alicePage = collectionPage({
+        items: [{ ...makePopulatedCase(), id: "case-alice-scope", title: "Alice scope row" }],
+        nextCursor: OPAQUE_CURSOR,
+      });
+      const deferred = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+      const queryInvestigations = vi.fn(
+        (_query: InvestigationCollectionQueryInput, _options: { signal: AbortSignal }) => deferred.promise,
+      );
+      const gateway = makeGateway({ queryInvestigations });
+
+      const paints: string[] = [];
+      function PaintProbe() {
+        const runtime = useInvestigationRuntime();
+        observedRuntime = runtime;
+        const page = runtime.resources.investigationCollection;
+        paints.push(page.status === "ready"
+          ? `ready:${page.value.items.map((item) => item.id).join(",")}`
+          : page.status);
+        return <div>probe</div>;
+      }
+
+      function Harness() {
+        const [identityKey, setIdentityKey] = useState("alice");
+        const [authorityKey, setAuthorityKey] = useState("shared-authority");
+        return (
+          <>
+            <button type="button" onClick={() => setIdentityKey("mallory")}>rotate identity</button>
+            <button type="button" onClick={() => setAuthorityKey("other-authority")}>rotate authority</button>
+            <ProviderUnderTest
+              identityKey={identityKey}
+              identity={{ id: identityKey, username: identityKey, displayName: identityKey }}
+              authorityKey={authorityKey}
+              capabilities={["investigation:read"]}
+              readOnly={false}
+              active
+              focusCaseId={null}
+              isInvestigationLocation
+              onOpenCreated={vi.fn()}
+              gateway={gateway}
+            >
+              <PaintProbe />
+            </ProviderUnderTest>
+          </>
+        );
+      }
+
+      render(<Harness />);
+      const captured = currentRuntime().commands.queryInvestigations;
+      expect(captured).toEqual(expect.any(Function));
+      act(() => captured?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+      const callsAtIdentityChange = queryInvestigations.mock.calls.length;
+      const paintMark = paints.length;
+
+      act(() => screen.getByRole("button", { name: "rotate identity" }).click());
+      expect(paints.slice(paintMark)[0]).toBe("idle");
+      expect(paints.slice(paintMark).join(" ")).not.toContain("case-alice-scope");
+      expect(queryInvestigations).toHaveBeenCalledTimes(callsAtIdentityChange);
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      expect(currentRuntime().resources.investigationCollectionQuery).toBeNull();
+      expect(currentRuntime().resources.investigationCollectionNotice).toBeNull();
+
+      await act(async () => {
+        deferred.resolve(succeeded(alicePage));
+      });
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      expect(paints.join(" ")).not.toContain("case-alice-scope");
+
+      const callsBeforeStaleCommand = queryInvestigations.mock.calls.length;
+      act(() => captured?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await act(async () => undefined);
+      expect(queryInvestigations).toHaveBeenCalledTimes(callsBeforeStaleCommand);
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+
+      const authorityCommand = currentRuntime().commands.queryInvestigations;
+      act(() => screen.getByRole("button", { name: "rotate authority" }).click());
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      act(() => authorityCommand?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await act(async () => undefined);
+      expect(queryInvestigations).toHaveBeenCalledTimes(callsBeforeStaleCommand);
+    });
+
+    it("does not apply a captured continuation after the query changes", async () => {
+      const checkoutPage = collectionPage({
+        items: [{ ...makePopulatedCase(), id: "case-checkout", title: "Checkout row" }],
+        nextCursor: OPAQUE_CURSOR,
+      });
+      const otherPage = collectionPage({
+        items: [{ ...makePopulatedCase(), id: "case-other", title: "Other row" }],
+        nextCursor: null,
+      });
+      const queryInvestigations = vi.fn(async (query: InvestigationCollectionQueryInput) => (
+        succeeded(query.q === "other" ? otherPage : checkoutPage)
+      ));
+      const gateway = makeGateway({ queryInvestigations });
+      render(
+        <ProviderUnderTest
+          identityKey="alice"
+          authorityKey="alice-authority"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={gateway}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      act(() => currentRuntime().commands.queryInvestigations?.({ q: "checkout" }));
+      await waitFor(() => expect(currentRuntime().resources.investigationCollectionQuery?.q).toBe("checkout"));
+      const capturedContinuation = currentRuntime().commands.queryInvestigations;
+      act(() => currentRuntime().commands.queryInvestigations?.({ q: "other" }));
+      await waitFor(() => expect(currentRuntime().resources.investigationCollectionQuery?.q).toBe("other"));
+      const callsAfterQueryChange = queryInvestigations.mock.calls.length;
+      act(() => capturedContinuation?.({ q: "checkout", cursor: OPAQUE_CURSOR }));
+      await act(async () => undefined);
+      expect(queryInvestigations).toHaveBeenCalledTimes(callsAfterQueryChange);
+      expect(currentRuntime().resources.investigationCollectionQuery?.q).toBe("other");
+      expect(currentRuntime().resources.investigationCollectionQuery?.cursor ?? null).toBeNull();
+      const page = currentRuntime().resources.investigationCollection;
+      expect(page.status === "ready" && page.value.items.some((item) => item.id === "case-checkout")).toBe(false);
     });
   });
 

@@ -389,6 +389,39 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
         await expect(app.query(
           `DELETE FROM external_run_import_success_intents`,
         )).rejects.toThrow(/insert-only|permission denied/);
+        await app.query(
+          `INSERT INTO external_run_judgments (
+             case_id, run_id, seq, judgment, actor_id, actor_username,
+             links, rationale, recorded_at
+           ) VALUES ($1, $2, 1, 'insufficient_evidence', $3, 'alice',
+                     '[]'::jsonb, NULL, CURRENT_TIMESTAMP)`,
+          [
+            "11111111-1111-1111-1111-111111111111",
+            "88888888-8888-4888-8888-888888888888",
+            "uid=alice,ou=people,dc=example,dc=test",
+          ],
+        );
+        await app.query(
+          `INSERT INTO external_run_judgment_success_intents (
+             case_id, run_id, actor_id, idempotency_key, request_digest,
+             judgment_seq, success_json, created_at
+           ) VALUES ($1, $2, $3, 'judgment-grant-01', $4, 1, '{}', CURRENT_TIMESTAMP)`,
+          [
+            "11111111-1111-1111-1111-111111111111",
+            "88888888-8888-4888-8888-888888888888",
+            "uid=alice,ou=people,dc=example,dc=test",
+            "f".repeat(64),
+          ],
+        );
+        expect((await app.query(
+          `SELECT judgment FROM external_run_judgments`,
+        )).rows).toEqual([{ judgment: "insufficient_evidence" }]);
+        await expect(app.query(
+          `UPDATE external_run_judgments SET rationale = 'tampered'`,
+        )).rejects.toThrow(/insert-only|permission denied/);
+        await expect(app.query(
+          `DELETE FROM external_run_judgment_success_intents`,
+        )).rejects.toThrow(/insert-only|permission denied/);
         await expect(app.query(`CREATE TABLE collab_app_should_not (id int)`)).rejects.toThrow(
           /permission denied/,
         );

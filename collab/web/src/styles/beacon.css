@@ -106,7 +106,7 @@
 
 .beacon__browse-filters {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(8rem, 0.4fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
   gap: 0.7rem;
   align-items: end;
 }

@@ -89,6 +89,12 @@ export {
   type UseCreateArtifactAnnotationsBulkOptions,
 } from "./use-artifact-annotations.js";
 export {
+  useExternalRunJudgments,
+  type ExternalRunJudgmentCommand,
+  type ExternalRunJudgmentsController,
+  type UseExternalRunJudgmentsOptions,
+} from "./use-external-run-judgments.js";
+export {
   useUploadEvidence,
   type UploadEvidenceCommand,
   type UploadEvidenceController,

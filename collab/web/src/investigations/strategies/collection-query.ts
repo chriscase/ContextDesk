@@ -3,6 +3,7 @@ import {
   selectResourceView,
   useInvestigationRuntime,
   type InvestigationCollectionQueryInput,
+  type InvestigationCollectionQueryV1,
   type ResourceView,
   type InvestigationCollectionPageV1,
 } from "../runtime/public.js";
@@ -11,10 +12,24 @@ import {
   type CollectionQueryLocation,
 } from "../../app-location.js";
 
+export { CollectionDiscoveryFilters } from "./CollectionDiscoveryFilters.js";
+export type { CollectionDiscoveryFiltersProps } from "./CollectionDiscoveryFilters.js";
+export {
+  activeCollectionFilters,
+  collectionEmptyMessage,
+  collectionQueryWithoutFilter,
+  shareableCollectionQuery,
+  impactIdentityLabel,
+  RECORDED_RANGE_UTC_NOTE,
+  shareableQueryNarrows,
+} from "./collection-discovery.js";
+
 export interface InvestigationCollectionQueryPresentation {
   readonly enabled: boolean;
   readonly input: InvestigationCollectionQueryInput;
   readonly view: ResourceView<InvestigationCollectionPageV1>;
+  /** Restart notice for this location only. Null while a different query is still published. */
+  readonly cursorRestartNotice: string | null;
   readonly refresh: () => void;
   /** Continue with the server-issued cursor without changing shell location. */
   readonly nextPage: () => void;
@@ -28,6 +43,7 @@ function inputForLocation(query: CollectionQueryLocation): InvestigationCollecti
     status: [...query.status],
     includeArchived: query.includeArchived,
     entityId: query.entityId,
+    impactIdentity: query.impactIdentity,
     contributorId: query.contributorId,
     recordedFrom: query.recordedFrom,
     recordedTo: query.recordedTo,
@@ -60,6 +76,14 @@ function canonicalCollectionBaseKey(input: InvestigationCollectionQueryInput): s
   });
 }
 
+/** True only when the runtime request is already this location's query. */
+function locationOwnsCollection(
+  activeQuery: InvestigationCollectionQueryV1 | null,
+  inputKey: string,
+): boolean {
+  return activeQuery !== null && canonicalCollectionBaseKey(activeQuery) === inputKey;
+}
+
 /**
  * Binds shell-owned list query state to the additive public Runtime V1 seam.
  * Strategies decide how to render the returned page and may fall back to the
@@ -74,6 +98,7 @@ export function useInvestigationCollectionQuery(
   const input = useMemo(() => inputForLocation(query), [
     query.contributorId,
     query.entityId,
+    query.impactIdentity,
     query.includeArchived,
     query.q,
     query.recordedFrom,
@@ -81,16 +106,22 @@ export function useInvestigationCollectionQuery(
     query.status,
   ]);
   const inputKey = useMemo(() => canonicalCollectionBaseKey(input), [input]);
+  const inputKeyRef = useRef(inputKey);
+  inputKeyRef.current = inputKey;
   const command = runtime.commands.queryInvestigations;
   const enabled = locationQuery !== undefined && command !== undefined && command !== null;
-  const view = enabled
-    ? selectResourceView(runtime.resources.investigationCollection)
-    : { availability: "idle" } as const;
+  const activeCollectionQuery = runtime.resources.investigationCollectionQuery;
+  const queryMatches = locationOwnsCollection(activeCollectionQuery, inputKey);
+  const view = !enabled
+    ? { availability: "idle" } as const
+    : queryMatches
+      ? selectResourceView(runtime.resources.investigationCollection)
+      : { availability: "loading" } as const;
   const continuationPendingRef = useRef(false);
   const pendingInputKeyRef = useRef(inputKey);
   const requestedInputKeyRef = useRef<string | null>(null);
   const inactiveRef = useRef(!enabled);
-  const activeCursor = runtime.resources.investigationCollectionQuery?.cursor ?? null;
+  const activeCursor = activeCollectionQuery?.cursor ?? null;
   const collectionStatus = runtime.resources.investigationCollection.status;
   const activeQueryRef = useRef(runtime.resources.investigationCollectionQuery);
   activeQueryRef.current = runtime.resources.investigationCollectionQuery;
@@ -115,7 +146,9 @@ export function useInvestigationCollectionQuery(
       return () => undefined;
     }
     return () => {
+      if (inputKeyRef.current !== inputKey) return;
       const activeQuery = activeQueryRef.current;
+      if (!locationOwnsCollection(activeQuery, inputKey)) return;
       const retryAvailable =
         view.availability === "available"
         && view.refresh === "failed"
@@ -160,10 +193,13 @@ export function useInvestigationCollectionQuery(
     enabled,
     input,
     view,
+    cursorRestartNotice: queryMatches ? runtime.resources.investigationCollectionNotice : null,
     refresh: enabled && command !== undefined && command !== null
       ? () => {
+          if (inputKeyRef.current !== inputKey) return;
+          const activeQuery = activeQueryRef.current;
+          if (!locationOwnsCollection(activeQuery, inputKey)) return;
           if (view.availability === "available" && view.refresh === "loading") return;
-          const activeQuery = runtime.resources.investigationCollectionQuery;
           if (
             view.availability === "available"
             && view.refresh === "failed"

@@ -2313,6 +2313,25 @@ describe("S3EvidenceStore", () => {
     expect(await store.verify(later.hash)).toBe(true);
   });
 
+  it("protects committed adoption between failed cleanup and its reacquired-lease retry", async () => {
+    const lease = leaseTracker();
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const store = new S3EvidenceStore(garageOptions(fake, { acquireWriteLease: lease.acquireWriteLease }));
+    const referenced = new Set<string>();
+    store.addReferencedContentHashSource(async () => referenced);
+    const batch = await store.beginWriteBatch();
+    const meta = await batch.put(new TextEncoder().encode("synthetic-adoption-between-cleanup-retries"));
+    await batch.promote();
+    fake.deleteErrors.set(blobKey(meta.hash), new FakeS3Error("InternalError", 500, "synthetic delete failure"));
+    await expect(batch.rollback()).rejects.toBeInstanceOf(S3EvidenceError);
+    expect(lease.active()).toBe(0);
+    referenced.add(meta.hash); // independent authoritative committed reference
+    fake.deleteErrors.clear();
+    await batch.rollback();
+    expect(await store.verify(meta.hash)).toBe(true);
+    expect(pendingKeys(fake)).toEqual([]);
+  });
+
   it("retries finalize after a journal DeleteObject failure and does not swallow it", async () => {
     const lease = leaseTracker();
     const fake = new FakeS3Client(SYNTHETIC_BUCKET);

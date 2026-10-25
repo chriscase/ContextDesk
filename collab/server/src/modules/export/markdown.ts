@@ -146,7 +146,7 @@ export function packageMarkdown(pkg: PromptPackageV1): string {
   lines.push("");
   lines.push("## Manifest");
   for (const item of pkg.manifest.items) {
-    lines.push(`- ${item.kind}:${item.id} hash=${item.contentHash} privacy=${item.privacyClass}`);
+    lines.push(`- ${item.kind}:${item.id} hash=${item.contentHash || "none"} privacy=${item.privacyClass}`);
   }
   lines.push("");
   lines.push("## Excerpts");

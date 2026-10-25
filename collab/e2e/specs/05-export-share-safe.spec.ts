@@ -5,6 +5,7 @@ import {
   createCase,
   exportPanel,
   fixtureBytes,
+  gotoStage,
   loginAs,
   openCase,
   openExportSupport,
@@ -67,11 +68,17 @@ test.describe("share-safe export", () => {
     await screenshot(page, "05-share-safe-scan-fail");
   });
 
-  test("contributor cannot select share_safe", async ({ page }) => {
+  test("contributor has no export action or protected inventory request", async ({ page }) => {
     const title = uniqueTitle("Contributor export");
     await loginAs(page, FIXTURE_USERS.alice);
     await createCase(page, title);
-    const option = exportPanel(page).getByRole("option", { name: "share_safe" });
-    await expect(option).toHaveAttribute("disabled", "");
+    const inventoryRequests: string[] = [];
+    page.on("request", (request) => {
+      if (request.url().includes("/export/inventory")) inventoryRequests.push(request.url());
+    });
+    await gotoStage(page, "Decide");
+    await expect(page.locator("details.case-view__support")).toHaveCount(0);
+    await expect(exportPanel(page)).toHaveCount(0);
+    expect(inventoryRequests).toEqual([]);
   });
 });
