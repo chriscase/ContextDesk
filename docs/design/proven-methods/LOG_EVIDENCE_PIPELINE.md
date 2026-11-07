@@ -61,6 +61,7 @@ The reusable method is a layered evidence plane:
 | Versioned built-in grammar fingerprints                     | **Shipped**                               | [`format_profile.rs`](../../../crates/cd-core/src/log_analysis/format_profile.rs), [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs), and record-level ingest dispatch in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) | User-authored profiles and durable grammar/profile provenance remain #751 |
 | Complete timestamp precision/year/abbreviation/skew policy  | **Planned/partial**                       | #670                                                                                                                                           | No current claim of seamless arbitrary timestamp alignment  |
 | DuckDB event store                                          | **Shipped**                               | [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs)                                                                                | None for current batch architecture                         |
+| Corpus handle lifecycle: atomic discard, fenced handles, single-flight opens (#753) | **Local integration — source slice** | [`corpus_lifecycle.rs`](../../../crates/cd-core/src/log_analysis/corpus_lifecycle.rs), fenced `LogCorpus` in [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs), ToolHost/agent answer fences, desktop [`log_corpus_cache.rs`](../../../desktop/src-tauri/src/log_corpus_cache.rs); record in [`LOG_CORPUS_CACHE_LIFECYCLE_753.md`](../../testing/LOG_CORPUS_CACHE_LIFECYCLE_753.md) | Fence is process-local; packaged synthetic two-window qualification and full cargo gates not yet run |
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
 | Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | Durable metric attachment and full #670 time policy         |
 | Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
@@ -260,6 +261,10 @@ Every public query defines:
     explicit metadata allowlist, exclude event/template payloads and private
     configuration, reapply redaction at the native write boundary, and remain
     bounded and user-reviewed.
+14. **Never return evidence from a discarded corpus.** Discard success means
+    every handle in the process is stale, no cache can reinsert one, and the
+    directory is gone; a turn whose corpus was discarded ends visibly, never as
+    an empty or successful answer (#753, §6.9).
 
 Trust boundaries:
 
@@ -649,6 +654,53 @@ result can be copied or saved. The native write boundary revalidates the stored
 content before publication. The UI therefore never reconstructs evidence by
 parsing free-form progress or error strings.
 
+### 6.9 Corpus handle lifecycle (#753)
+
+Initialized `LogCorpus` handles are cached in several places at once: the
+desktop Explorer/library cache, a ToolHost turn-local slot, and owned
+broad-triage jobs. One process-local lifecycle cell per corpus directory
+([`corpus_lifecycle.rs`](../../../crates/cd-core/src/log_analysis/corpus_lifecycle.rs))
+makes discard and republication authoritative for all of them:
+
+- **Fence epoch.** Advanced exactly once when a discard begins. Each handle
+  carries the epoch it was opened under; a stale handle fails every fenced
+  operation (`with_connection` before *and* after its closure, direct DuckDB
+  scans, sidecar writes, search, correlate/anomalies/trace, broad-triage phase
+  checkpoints) with an error prefixed `log corpus was discarded`. Checks read
+  one atomic, so no lock surrounds DuckDB open or query work.
+- **Content generation.** Advanced at the start and end of a trusted
+  re-analysis publication. Cold opens wait out an in-progress publication
+  (and reopen, bounded, if one starts while they read files), so they never
+  capture a half-published template set; handles opened earlier stop being
+  *current*. Re-analysis is not a discard: turn-local snapshots stay usable,
+  cross-command caches reopen.
+- **Discard transition** (`LogCorpus::discard_with`): fence (phase
+  `Discarding`, epoch += 1) → host `on_fenced` hook invalidates caches →
+  drain admitted cold opens and publications → atomically rename
+  `log_corpora/{id}` into the unlisted `log_corpora/.discarding/` → publish
+  `Discarded` (a bounded tombstone retained after the last handle drops) →
+  best-effort reclaim. A failure before the rename changes nothing on disk and
+  rolls the phase back for an honest retry; a reclaim failure leaves only
+  unlisted residue that later discards sweep.
+- **Desktop cache** ([`log_corpus_cache.rs`](../../../desktop/src-tauri/src/log_corpus_cache.rs)):
+  per-corpus single flight replaces the former global-mutex cold open. Same-id
+  callers coalesce, different ids initialize independently, hits never wait
+  behind a cold open, the four-entry LRU bound is unchanged, stale entries are
+  evicted on access, failures/panics release waiters and allow retry, and
+  invalidation detaches in-flight opens so their results are never inserted.
+- **Linked turns.** ToolHost rejects stale slot hits and stale seeded
+  preflight handles, re-checks the slot after every evidence tool, and the
+  agent re-checks it immediately before releasing any linked answer text
+  (main loop, budget synthesis, synthesis retry, and the broad-triage
+  fast/contribution/multi-model/multi-stage paths). A discard ends the turn
+  with `linked_log_corpus_discarded`.
+
+Lock ordering: lifecycle registry → nothing; lifecycle cell → nothing (held
+only for O(1) bookkeeping and condvar waits, never across filesystem, DuckDB,
+callback, or cache work); desktop cache state → nothing (may read lifecycle
+atomics only); per-flight outcome slot → nothing. `on_fenced` runs with no
+lifecycle lock held and takes only the cache state lock.
+
 ## 7. Performance and bounds
 
 | Dimension                              |                            ContextDesk bound/policy | Behavior                                               |
@@ -703,6 +755,9 @@ latency, template count, and cancellation—not only ingest throughput.
 | Malformed package             | Preflight/hash/schema checks     | Import error                  | Obtain valid package                       | No partial corpus publication             |
 | Stale evidence identity       | Source/time hint revalidation    | Stale/missing                 | Locate replacement explicitly              | No silent rebinding                       |
 | Noise overwhelms results      | User observation/filter counts   | Partial exact-template policy; #671 open | Preview/confirm a reviewed exact template; use filters otherwise | No deletion claim; incomplete lifecycle and hardening stay visible |
+| Discard races open/read/re-analysis/linked turn | Lifecycle epoch, admission completion, post-query and pre-release fences | `log corpus was discarded` error; linked turn ends `linked_log_corpus_discarded` | Reimport the logs | No surviving handle, no cache reinsertion, no evidence after discard success |
+| Discard cannot move the corpus aside | Rename/trash error before unpublish | Discard error | Retry discard | Nothing deleted; phase rolled back; previously open handles stay stale |
+| Discarded tree cannot be reclaimed | Removal error after unpublish | Discard succeeds (warning logged) | Next discard sweeps `.discarding/` | Corpus already unlisted and unopenable |
 
 ## 9. Observability
 
@@ -779,6 +834,7 @@ details, not only a hover tooltip.
 | Suppression store    | Trusted preview facts; human confirmation; stale preview/revision/fingerprint rejection; enable/disable/re-enable/tombstone audit; raw evidence unchanged |
 | Tool integration     | Search/clustering/timeline/correlation/anomaly/trace share one pinned revision and disclose hidden count; suppressed identities do not leak into results |
 | Package              | Frozen version fixture; path traversal, duplicate, cap, hash, too-new reader, staging cleanup                                                |
+| Corpus lifecycle     | Barrier-controlled open/discard (admitted open drains, completion rejected, no surviving handle); query overlapping discard start; unpublish rollback + retry; reclaim residue sweep; republication waits/reopens; tombstone bound; desktop same-id coalescing, cross-id independence, hit not blocked, failure/panic retry, LRU bound, stale eviction, detach on invalidate; linked turn discard during tools and during synthesis |
 | Deterministic corpus | Known cross-zone shared instant, ambiguous controls, noise families, long line, secret sentinel, stale identity                              |
 | Desktop component    | Inspector tabs/copy; time-quality labels; Find versus Filter; lane membership; gaps; timeline seek; focus restoration                        |
 | Packaged/native      | Narrow/normal/wide/ultrawide; 25k/100k corpora; Original fresh/legacy; useful time; resizable columns; long rows; two-way paging             |
@@ -800,6 +856,10 @@ instant while ambiguous controls remain order-only.
   parser dispatch and timestamp parsing.
 - [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs): DuckDB event
   store, corpus metadata, embedding state.
+- [`corpus_lifecycle.rs`](../../../crates/cd-core/src/log_analysis/corpus_lifecycle.rs):
+  discard fence, republication generation, atomic discard transition, lock
+  ordering (#753); desktop single-flight cache in
+  [`log_corpus_cache.rs`](../../../desktop/src-tauri/src/log_corpus_cache.rs).
 - [`ingest_pipeline.rs`](../../../crates/cd-core/src/log_analysis/ingest_pipeline.rs):
   semantic pipeline identity and compatibility classification (not Git SHA).
 - [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs): incremental
@@ -837,6 +897,7 @@ instant while ambiguous controls remain order-only.
 | Timeline                       | **Partial**                   | Shared-axis log summary, durable one-per-corpus metric attachment, restore/replace/remove, scrubber, severity signal, resident range, lane coverage, and viewport-follow cursor | Multiple/bundle metric attachments, governed metric chat context, and full #670 time policy |
 | Noise suppression              | **Partial — #671 remains open** | Human-confirmed exact-template rules and one shared evidence lens the host derives and enforces on every read | Rule editing/creator identity; other predicates; global/tool include-suppressed controls; Investigation/saved-view/package lifecycle; 100k and 1M suppression scale proof; baseline proposals; larger rule sets |
 | Template “reduction”           | **Shipped**                   | Events/templates ratio                                        | Storage compression claim               |
+| Corpus handle lifecycle (#753) | **Local integration — source slice** | Atomic fenced discard, stale-handle rejection, linked-answer discard fence, per-corpus single-flight desktop cache with the four-entry bound | Cross-process fencing; packaged synthetic two-window qualification; full cargo/CI gate results |
 
 ## 15. Reimplementation notes
 
@@ -886,3 +947,12 @@ to “helpfully” interpret an offsetless production timestamp.
   security and retention design.
 - Large 10–100M-line behavior needs periodic scale proof beyond the deterministic
   100k acceptance fixture.
+- #753 (local integration): the discard fence and tombstones are process-local;
+  another process opening the same cache is not fenced. Sidecar writers outside
+  `store.rs`/`reanalyze.rs` (suppression, bookmarks, timezone, operational
+  metrics) are fenced only where they go through handle DuckDB access; they are
+  not drained as publications, so a write racing the unpublish rename either
+  lands first and moves with the corpus into `.discarding/`, or fails because
+  the directory is gone (none of them recreates the corpus directory).
+  Packaged synthetic two-window lifecycle validation and the full cargo/desktop
+  gates remain to be run on the frozen candidate.

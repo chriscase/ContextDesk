@@ -81,6 +81,9 @@ pub fn correlate_with_excluded_templates(
     k: usize,
     excluded_template_ids: &[u64],
 ) -> CoreResult<Vec<CorrelateHit>> {
+    // `with_events` degrades load failures to an empty slice, so a discarded
+    // handle must be rejected explicitly before and after the scan (#753).
+    corpus.ensure_live()?;
     let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
     if excluded.contains(&focus_template_id) {
         return Ok(Vec::new());
@@ -155,6 +158,7 @@ pub fn correlate_with_excluded_templates(
             .then_with(|| a.template_id.cmp(&b.template_id))
     });
     hits.truncate(k.max(1));
+    corpus.ensure_live()?;
     Ok(hits)
 }
 
@@ -188,6 +192,7 @@ pub fn anomalies_with_excluded_templates(
     k: usize,
     excluded_template_ids: &[u64],
 ) -> CoreResult<Vec<AnomalyHit>> {
+    corpus.ensure_live()?;
     let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
     let patterns: HashMap<u64, String> = corpus
         .list_templates()
@@ -241,6 +246,7 @@ pub fn anomalies_with_excluded_templates(
             .then_with(|| a.template_id.cmp(&b.template_id))
     });
     hits.truncate(k.max(1));
+    corpus.ensure_live()?;
     Ok(hits)
 }
 
@@ -255,6 +261,7 @@ pub fn trace_with_excluded_templates(
     trace_id: &str,
     excluded_template_ids: &[u64],
 ) -> CoreResult<Vec<TraceEvent>> {
+    corpus.ensure_live()?;
     let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
     let tid = trace_id.trim();
     if tid.is_empty() {
@@ -283,6 +290,7 @@ pub fn trace_with_excluded_templates(
         }
     });
     out.sort_by_key(|e| (e.ts, e.seq));
+    corpus.ensure_live()?;
     Ok(out)
 }
 
@@ -561,6 +569,33 @@ mod tests {
             assert!(
                 error.to_string().contains("exceeds signed storage range"),
                 "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn why_analysis_on_a_discarded_handle_fails_visibly_instead_of_returning_empty() {
+        let (dir, corpus) = seed_incident();
+        // Positive control: the same handle returns real evidence while live.
+        assert!(!trace(&corpus, "tr-fail-1").unwrap().is_empty());
+        assert!(!anomalies(&corpus, 0, 500, 1000, 1200, 10)
+            .unwrap()
+            .is_empty());
+
+        LogCorpus::discard(dir.path(), corpus.id()).unwrap();
+        assert!(!corpus.is_live());
+        for error in [
+            correlate(&corpus, 2, Some(1050), 30, 10)
+                .map(|_| ())
+                .unwrap_err(),
+            anomalies(&corpus, 0, 500, 1000, 1200, 10)
+                .map(|_| ())
+                .unwrap_err(),
+            trace(&corpus, "tr-fail-1").map(|_| ()).unwrap_err(),
+        ] {
+            assert!(
+                crate::log_analysis::corpus_lifecycle::is_corpus_discarded_error(&error),
+                "stale handle must not masquerade as an empty result: {error}"
             );
         }
     }

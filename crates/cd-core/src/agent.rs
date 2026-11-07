@@ -4307,11 +4307,52 @@ fn validate_linked_turn_snapshot(host: &ToolHost, opts: &AgentOptions) -> CoreRe
     Ok(())
 }
 
-fn terminal_linked_snapshot_stale(
+/// Discard fence for releasing linked answer text (#753).
+///
+/// Linked answers are evidence from the turn-local corpus handle. A discard
+/// can land at any point of a turn, including while the provider is
+/// synthesizing, so the fence is re-checked immediately before release.
+fn linked_corpus_discard_fence(host: &ToolHost, opts: &AgentOptions) -> Option<CoreError> {
+    let context = opts.log_explorer_context.as_ref()?;
+    host.ensure_linked_log_corpus_live(&context.corpus_id)
+        .err()
+        .filter(crate::log_analysis::is_corpus_discarded_error)
+}
+
+/// Visible terminal for a linked turn whose corpus was discarded (#753).
+///
+/// Never a success: the answer and its evidence identities are withheld. A
+/// later synthesis-only retry fails closed at host corpus validation because
+/// the evidence no longer exists.
+fn terminal_linked_corpus_discarded(
     mut out: EventCollector<'_>,
     trail: &[String],
     error: impl std::fmt::Display,
 ) -> CoreResult<Vec<StreamEvent>> {
+    let mut steps = trail.to_vec();
+    steps.push(format!("linked_log_corpus_discarded:{error}"));
+    out.push(StreamEvent::SearchTrail { steps });
+    out.push(StreamEvent::Error {
+        code: "linked_log_corpus_discarded".into(),
+        message: "The linked corpus was discarded during this investigation. ContextDesk \
+                  withheld the answer and its evidence because they no longer belong to an \
+                  existing corpus; import the logs again to investigate them."
+            .into(),
+    });
+    out.push(StreamEvent::TurnCompleted {
+        reason: "linked_log_corpus_discarded".into(),
+    });
+    Ok(out.into_events())
+}
+
+fn terminal_linked_snapshot_stale(
+    mut out: EventCollector<'_>,
+    trail: &[String],
+    error: CoreError,
+) -> CoreResult<Vec<StreamEvent>> {
+    if crate::log_analysis::is_corpus_discarded_error(&error) {
+        return terminal_linked_corpus_discarded(out, trail, error);
+    }
     let mut steps = trail.to_vec();
     steps.push(format!("linked_log_snapshot_stale:{error}"));
     out.push(StreamEvent::SearchTrail { steps });
@@ -4489,6 +4530,9 @@ async fn run_linked_synthesis_retry(
             reason: "linked_invalid_grounded_answer".into(),
         });
         return Ok(out.into_events());
+    }
+    if let Some(error) = linked_corpus_discard_fence(host, opts) {
+        return terminal_linked_corpus_discarded(out, &trail, error);
     }
     out.push(StreamEvent::TextDelta {
         text: content.clone(),
@@ -5120,6 +5164,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                     detail: Some(telemetry.activity_detail()),
                                     ok: Some(true),
                                 });
+                                if let Some(error) = linked_corpus_discard_fence(host, opts) {
+                                    return terminal_linked_corpus_discarded(out, &trail, error);
+                                }
                                 out.push(StreamEvent::TextDelta {
                                     text: content.clone(),
                                 });
@@ -5234,6 +5281,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             ),
                             ok: Some(true),
                         });
+                            if let Some(error) = linked_corpus_discard_fence(host, opts) {
+                                return terminal_linked_corpus_discarded(out, &trail, error);
+                            }
                             out.push(StreamEvent::TextDelta {
                                 text: contribution_outcome.content.clone(),
                             });
@@ -5354,6 +5404,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                     ),
                                     ok: Some(true),
                                 });
+                                if let Some(error) = linked_corpus_discard_fence(host, opts) {
+                                    return terminal_linked_corpus_discarded(out, &trail, error);
+                                }
                                 out.push(StreamEvent::TextDelta {
                                     text: content.clone(),
                                 });
@@ -5627,6 +5680,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 ),
                                 ok: Some(true),
                             });
+                            if let Some(error) = linked_corpus_discard_fence(host, opts) {
+                                return terminal_linked_corpus_discarded(out, &trail, error);
+                            }
                             out.push(StreamEvent::TextDelta {
                                 text: content.clone(),
                             });
@@ -6701,6 +6757,11 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                 });
                 continue;
             }
+            if linked_turn {
+                if let Some(error) = linked_corpus_discard_fence(host, opts) {
+                    return terminal_linked_corpus_discarded(out, &trail, error);
+                }
+            }
             if linked_turn && linked_required_evidence_satisfied {
                 // The host verifies citation identities and typed structure
                 // only. Whether the evidence semantically establishes a cause
@@ -7508,6 +7569,11 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             return terminal_synthesis_time(out, &trail, deadline_plan.total_ms, preserved);
         }
     };
+    if linked_turn && synthesis.is_ok() {
+        if let Some(error) = linked_corpus_discard_fence(host, opts) {
+            return terminal_linked_corpus_discarded(out, &trail, error);
+        }
+    }
     match synthesis {
         Ok(completion) => {
             // Ignore further tool_calls — budget is closed.
@@ -9212,6 +9278,174 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 .any(|(_, label)| label.contains("worker.log")),
             "citation labels must be host source paths: {log_event_cites:?}"
         );
+    }
+
+    /// Scripted backend that discards the linked corpus when provider call
+    /// number `discard_on_call` (0-based) starts, standing in for a second
+    /// window discarding the corpus mid-turn (#753).
+    struct DiscardingBackend {
+        script: ScriptedBackend,
+        cache: std::path::PathBuf,
+        corpus_id: String,
+        discard_on_call: usize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChatBackend for DiscardingBackend {
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == self.discard_on_call {
+                crate::log_analysis::LogCorpus::discard(&self.cache, &self.corpus_id)?;
+            }
+            self.script.complete(messages, tools).await
+        }
+    }
+
+    async fn linked_turn_with_discard_on_call(discard_on_call: usize) -> Vec<StreamEvent> {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let mut f = fs::File::create(logs.join("worker.log")).unwrap();
+        writeln!(
+            f,
+            r#"{{"ts":1700000100,"level":"error","service":"worker","message":"event_id=worker-loop job-7f3a pool exhausted retries=12"}}"#
+        )
+        .unwrap();
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "checkout", None, "none").unwrap();
+        let ws = Workspace::new("linked-discard", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache.clone()));
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
+
+        let tool_resp = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "call-1".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: crate::log_analysis::SEARCH_LOGS.into(),
+                    arguments: r#"{"query":"job-7f3a"}"#.into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
+        };
+        let final_resp = ChatCompletion {
+            content: "Primary cause: poison job-7f3a exhausted the pool (seq=0 source=worker.log)."
+                .into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+            telemetry: Default::default(),
+        };
+        let backend = DiscardingBackend {
+            script: ScriptedBackend::new(vec![tool_resp, final_resp.clone(), final_resp]),
+            cache: cache.clone(),
+            corpus_id: report.corpus_id.clone(),
+            discard_on_call,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let context = LogExplorerTurnContext::new(
+            "log-explorer-window",
+            report.corpus_id.as_str(),
+            format!("corpusId={}; sources=worker.log", report.corpus_id),
+        )
+        .unwrap();
+        let mut history = vec![];
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "What caused the checkout incident?",
+            &mut history,
+            &AgentOptions {
+                session_id: "linked-discard-session".into(),
+                log_explorer_context: Some(context),
+                max_rounds: 6,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !cache.join("log_corpora").join(&report.corpus_id).exists(),
+            "the scripted discard must have completed"
+        );
+        events
+    }
+
+    fn assert_discarded_terminal_withholds_answer(events: &[StreamEvent]) {
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::Error { code, .. } if code == "linked_log_corpus_discarded"
+            )),
+            "expected a visible discard terminal: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::TurnCompleted { reason } if reason == "linked_log_corpus_discarded"
+            )),
+            "turn must end on the discard terminal: {events:?}"
+        );
+        let answer = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(
+            !answer.contains("job-7f3a"),
+            "no evidence-bearing answer may be released after discard: {answer}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::InvestigationAnswer { .. })),
+            "no typed answer may be released after discard"
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_answer_is_withheld_when_corpus_is_discarded_during_final_synthesis() {
+        // Call 0 returns the search_logs call against the live corpus; the
+        // discard lands while the provider produces the final answer.
+        let events = linked_turn_with_discard_on_call(1).await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::Tool { name, ok: Some(true), .. }
+                    if name == crate::log_analysis::SEARCH_LOGS
+            )),
+            "positive control: evidence was gathered while the corpus was live"
+        );
+        assert_discarded_terminal_withholds_answer(&events);
+    }
+
+    #[tokio::test]
+    async fn linked_tool_round_after_discard_fails_visibly_and_withholds_answer() {
+        // The discard lands before the tool executes: the tool must fail
+        // visibly and the next provider round must hit the discard terminal.
+        let events = linked_turn_with_discard_on_call(0).await;
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                StreamEvent::Tool { name, ok: Some(true), .. }
+                    if name == crate::log_analysis::SEARCH_LOGS
+            )),
+            "a discarded corpus must not produce a successful log tool: {events:?}"
+        );
+        assert_discarded_terminal_withholds_answer(&events);
     }
 
     /// Zero-hit non-progress: required evidence stays unsatisfied so synthesis

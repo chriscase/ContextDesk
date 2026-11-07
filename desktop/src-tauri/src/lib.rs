@@ -5,6 +5,7 @@ mod handbook;
 mod investigation_report_export;
 mod investigation_team_known_answer_host;
 mod investigation_team_qualification_host;
+mod log_corpus_cache;
 mod log_diagnostic_report;
 mod log_diagnostics;
 mod logging_quality_host;
@@ -301,57 +302,9 @@ impl HostInitFlight {
     }
 }
 
-const LOG_CORPUS_HANDLE_CACHE_CAP: usize = 4;
-
-#[derive(Default)]
-struct LogCorpusHandleCacheState {
-    entries: HashMap<String, Arc<cd_core::log_analysis::LogCorpus>>,
-    order: std::collections::VecDeque<String>,
-}
-
-#[derive(Default)]
-struct LogCorpusHandleCache {
-    state: Mutex<LogCorpusHandleCacheState>,
-}
-
-impl LogCorpusHandleCache {
-    fn open(
-        &self,
-        cache_root: &std::path::Path,
-        corpus_id: &str,
-    ) -> Result<Arc<cd_core::log_analysis::LogCorpus>, String> {
-        let mut state = self.state.lock().expect("log corpus handle cache");
-        if let Some(corpus) = state.entries.get(corpus_id).cloned() {
-            state.order.retain(|id| id != corpus_id);
-            state.order.push_back(corpus_id.to_string());
-            return Ok(corpus);
-        }
-
-        // Hold the small cache lock during open so simultaneous startup reads
-        // coalesce into one schema/template/vector initialization.
-        let corpus = Arc::new(
-            cd_core::log_analysis::LogCorpus::open(cache_root, corpus_id)
-                .map_err(|error| error.to_string())?,
-        );
-        while state.entries.len() >= LOG_CORPUS_HANDLE_CACHE_CAP {
-            let Some(evicted) = state.order.pop_front() else {
-                break;
-            };
-            state.entries.remove(&evicted);
-        }
-        state
-            .entries
-            .insert(corpus_id.to_string(), Arc::clone(&corpus));
-        state.order.push_back(corpus_id.to_string());
-        Ok(corpus)
-    }
-
-    fn remove(&self, corpus_id: &str) {
-        let mut state = self.state.lock().expect("log corpus handle cache");
-        state.entries.remove(corpus_id);
-        state.order.retain(|id| id != corpus_id);
-    }
-}
+// Bounded per-corpus single-flight handle cache and its discard/invalidation
+// lifecycle live in `log_corpus_cache` (#753).
+use log_corpus_cache::LogCorpusHandleCache;
 
 struct AppState {
     branding: Branding,
@@ -373,7 +326,9 @@ struct AppState {
     /// forcing host construction; the host picks it up when ready.
     active_log_corpus: Mutex<Option<String>>,
     /// Bounded reusable corpus handles for Explorer/library read commands.
-    /// Coalesces repeated schema/template/vector initialization at startup.
+    /// Per-corpus single-flight: same-id cold opens coalesce, different ids
+    /// initialize independently, and discard/re-analysis never leave a stale
+    /// handle behind (#753, `log_corpus_cache`).
     log_corpus_handles: Arc<LogCorpusHandleCache>,
     /// One payload-free failed-ingest diagnostic. Memory-only: replaced when a
     /// later ingest starts, explicitly clearable, and absent after restart.
@@ -11869,9 +11824,10 @@ async fn reanalyze_log_corpus(
     .await
     .map_err(|error| format!("re-analysis task join: {error}"));
     state.cancels.lock().expect("cancels").remove(&cancel_key);
-    if matches!(&result, Ok(Ok(_))) {
-        state.log_corpus_handles.remove(&reanalyzed_corpus_id);
-    }
+    // Deterministic invalidation after any finished re-analysis: success
+    // republished the sidecars, and a failure may have published and rolled
+    // back. Cached handles are also lifecycle-checked on every hit (#753).
+    state.log_corpus_handles.invalidate(&reanalyzed_corpus_id);
     result?
 }
 
@@ -12032,11 +11988,19 @@ async fn log_search(
 }
 
 /// Discard a disposable corpus.
+///
+/// One fenced lifecycle transition (#753): every handle of the corpus is
+/// stale, the shared handle cache is invalidated inside the fence, admitted
+/// cold opens drain, and success is returned only once the directory is gone.
+/// Runs on a blocking worker so draining an in-flight open never stalls the UI.
 #[tauri::command]
-fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(), String> {
+async fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(), String> {
     let cache = log_cache_dir(&state)?;
-    state.log_corpus_handles.remove(&corpus_id);
-    cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    let discarded_id = corpus_id.clone();
+    tokio::task::spawn_blocking(move || handles.discard(&cache, &discarded_id))
+        .await
+        .map_err(|error| format!("log corpus discard task join: {error}"))??;
     if active_log_corpus_snapshot(&state).as_deref() == Some(corpus_id.as_str()) {
         set_active_log_corpus_state_nonblocking(&state, None);
     }

@@ -5,10 +5,13 @@
 //! correlate / anomalies / trace.
 //!
 //! Corpora are disposable (app cache), never mixed into durable SQLite memory.
+//! Every corpus handle is fenced by [`corpus_lifecycle`]: discard is one
+//! atomic transition and re-analysis republication is observable (#753).
 
 pub mod analysis;
 pub mod bookmarks;
 pub mod company_import_lab;
+pub mod corpus_lifecycle;
 pub mod diagnostics;
 pub mod drain;
 pub mod embed_policy;
@@ -64,6 +67,10 @@ pub use company_import_lab::{
     CompanyImportLabPackage, CompanyImportLabSize, CompanyImportLabVerifyReport, PhaseTimingBudget,
     COMPANY_IMPORT_LAB_BASE_TS, COMPANY_IMPORT_LAB_GENERATOR, COMPANY_IMPORT_LAB_ORACLE_SCHEMA,
     COMPANY_IMPORT_LAB_SEED,
+};
+pub use corpus_lifecycle::{
+    is_corpus_discarded_error, is_corpus_discarded_message, CorpusLifecyclePhase,
+    CorpusLifecycleTicket, LOG_CORPUS_DISCARDED,
 };
 pub use diagnostics::{
     classify_failed_ingest, FailedIngestDiagnostic, FailedIngestDiagnosticRecorder,

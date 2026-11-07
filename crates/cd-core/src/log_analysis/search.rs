@@ -292,7 +292,34 @@ pub fn search_logs_with_excluded_templates_and_rerank(
 /// Hybrid log search with caller-owned embedding and reranking transport
 /// ceilings. The legacy entry point retains its standalone 5-second embedding
 /// default; turn-owned hosts pass their effective whole-turn budget here.
+///
+/// Fenced by the corpus lifecycle (#753): a handle invalidated by a discard
+/// fails before the search, and hits computed while a discard began are
+/// rejected instead of being returned as evidence.
 pub fn search_logs_with_excluded_templates_and_timeouts(
+    corpus: &LogCorpus,
+    q: &SearchLogsQuery,
+    embed: Option<&dyn EmbedBackend>,
+    excluded_template_ids: &[u64],
+    rerank: Option<&dyn RerankBackend>,
+    embed_timeout_ms: u64,
+    rerank_timeout_ms: u64,
+) -> CoreResult<Vec<SearchHit>> {
+    corpus.ensure_live()?;
+    let hits = search_logs_live_handle(
+        corpus,
+        q,
+        embed,
+        excluded_template_ids,
+        rerank,
+        embed_timeout_ms,
+        rerank_timeout_ms,
+    )?;
+    corpus.ensure_live()?;
+    Ok(hits)
+}
+
+fn search_logs_live_handle(
     corpus: &LogCorpus,
     q: &SearchLogsQuery,
     embed: Option<&dyn EmbedBackend>,
@@ -1437,6 +1464,25 @@ mod tests {
 
         assert!(
             error.to_string().contains("exceeds signed storage range"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn search_on_a_discarded_handle_fails_closed_instead_of_returning_evidence() {
+        let (dir, corpus) = suppression_search_fixture();
+        let query = SearchLogsQuery {
+            query: Some("database".into()),
+            k: 10,
+            ..Default::default()
+        };
+        // Positive control: the live handle returns hits.
+        assert!(!search_logs(&corpus, &query, None).unwrap().is_empty());
+
+        LogCorpus::discard(dir.path(), corpus.id()).unwrap();
+        let error = search_logs(&corpus, &query, None).unwrap_err();
+        assert!(
+            crate::log_analysis::corpus_lifecycle::is_corpus_discarded_error(&error),
             "{error}"
         );
     }

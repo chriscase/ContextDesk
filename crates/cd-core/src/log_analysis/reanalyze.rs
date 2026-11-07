@@ -1,5 +1,12 @@
 //! Atomic local template re-analysis for existing log corpora (#518).
+//!
+//! Sidecar replacement runs inside a corpus-lifecycle publication (#753):
+//! concurrent cold opens wait instead of reading a half-published template
+//! set, handles opened earlier stop being *current* (hosts reopen them), and a
+//! discard drains the publication before unpublishing the directory. Once a
+//! discard has begun, re-analysis stops and reports a visible failure.
 
+use super::corpus_lifecycle;
 use super::store::{CorpusEmbeddingStatus, EmbeddingState, LogCorpus, TemplateRow};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
@@ -137,6 +144,8 @@ fn reanalyze_corpus_embeddings_inner(
     let root = corpus.root().to_path_buf();
     let mut meta = corpus.meta()?;
     let mut rows = corpus.list_templates();
+    // Keep only the lifecycle identity so a discard can stop this job early.
+    let lifecycle = corpus.lifecycle().clone();
     drop(corpus);
 
     rows.sort_by_key(|row| std::cmp::Reverse(row.info.count));
@@ -148,6 +157,7 @@ fn reanalyze_corpus_embeddings_inner(
     let mut embedded = 0usize;
     let mut expected_dims = None;
     for (index, row) in rows.iter_mut().take(selected).enumerate() {
+        lifecycle.ensure_live()?;
         if cancelled(cancel) {
             emit(
                 progress,
@@ -257,6 +267,9 @@ fn reanalyze_corpus_embeddings_inner(
         ));
     }
 
+    // Everything from the first visible rename through validation is one
+    // lifecycle publication; it is rejected once a discard has begun.
+    let publication = corpus_lifecycle::begin_publication(cache_root, corpus_id)?;
     std::fs::rename(&templates_path, &templates_backup)?;
     if let Err(error) = std::fs::rename(&templates_candidate, &templates_path) {
         let _ = std::fs::rename(&templates_backup, &templates_path);
@@ -280,7 +293,13 @@ fn reanalyze_corpus_embeddings_inner(
         return Err(error);
     }
 
-    let reopened = LogCorpus::open(cache_root, corpus_id)?;
+    let reopened = match LogCorpus::open_for_publication(cache_root, corpus_id, &publication) {
+        Ok(reopened) => reopened,
+        Err(error) => {
+            rollback_pair(&templates_path, &templates_backup, &meta_path, &meta_backup);
+            return Err(error);
+        }
+    };
     if reopened.event_count() != event_count_before || reopened.embedding_status() != status {
         drop(reopened);
         rollback_pair(&templates_path, &templates_backup, &meta_path, &meta_backup);
@@ -291,6 +310,7 @@ fn reanalyze_corpus_embeddings_inner(
     drop(reopened);
     let _ = std::fs::remove_file(&templates_backup);
     let _ = std::fs::remove_file(&meta_backup);
+    drop(publication);
 
     emit(
         progress,
@@ -509,5 +529,114 @@ mod tests {
                 EmbeddingState::KeywordOnly
             );
         }
+    }
+
+    #[test]
+    fn successful_reanalysis_makes_retained_handles_non_current_but_live() {
+        let (dir, id) = keyword_corpus();
+        let retained = LogCorpus::open(dir.path(), &id).unwrap();
+        assert!(retained.is_current());
+        reanalyze_corpus_embeddings_quiet(
+            dir.path(),
+            &id,
+            &ConceptEmbedBackend::new(32),
+            "concept-local",
+        )
+        .unwrap();
+        // Republication is not a discard: turn-local snapshots stay usable...
+        assert!(retained.is_live());
+        assert!(retained.ensure_live().is_ok());
+        // ...but cross-command caches must reopen to observe the new vectors.
+        assert!(!retained.is_current());
+        assert!(retained
+            .list_templates()
+            .iter()
+            .all(|row| row.vector.is_none()));
+        let reopened = LogCorpus::open(dir.path(), &id).unwrap();
+        assert!(reopened.is_current());
+        assert!(reopened
+            .list_templates()
+            .iter()
+            .all(|row| row.vector.is_some()));
+    }
+
+    #[test]
+    fn discard_before_publication_rejects_reanalysis_without_recreating_files() {
+        let (dir, id) = keyword_corpus();
+        let root = dir.path().join("log_corpora").join(&id);
+        let cache = dir.path().to_path_buf();
+        let discard_id = id.clone();
+        let hook = move |checkpoint: ReanalysisCheckpoint| -> CoreResult<()> {
+            if checkpoint == ReanalysisCheckpoint::CandidateReady {
+                LogCorpus::discard(&cache, &discard_id)?;
+            }
+            Ok(())
+        };
+        let error = reanalyze_corpus_embeddings_inner(
+            dir.path(),
+            &id,
+            &ConceptEmbedBackend::new(32),
+            "concept-local",
+            &NoopProcessProgress,
+            None,
+            Some(&hook),
+        )
+        .unwrap_err();
+        assert!(
+            corpus_lifecycle::is_corpus_discarded_error(&error),
+            "{error}"
+        );
+        assert!(!root.exists(), "re-analysis must not resurrect the corpus");
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn discard_waits_for_an_inflight_publication_then_wins_with_rollback() {
+        let (dir, id) = keyword_corpus();
+        let root = dir.path().join("log_corpora").join(&id);
+        let lifecycle = LogCorpus::open(dir.path(), &id)
+            .unwrap()
+            .lifecycle()
+            .lifecycle()
+            .clone();
+        let discard_thread = std::sync::Mutex::new(None);
+        let hook = |checkpoint: ReanalysisCheckpoint| -> CoreResult<()> {
+            if checkpoint == ReanalysisCheckpoint::TemplatesPublished {
+                let cache = dir.path().to_path_buf();
+                let discard_id = id.clone();
+                *discard_thread.lock().unwrap() = Some(std::thread::spawn(move || {
+                    LogCorpus::discard(&cache, &discard_id)
+                }));
+                // Deterministic barrier: the fence is up while this
+                // publication still holds the directory.
+                assert!(lifecycle.wait_for_phase(
+                    corpus_lifecycle::CorpusLifecyclePhase::Discarding,
+                    std::time::Duration::from_secs(10)
+                ));
+                assert!(root.exists(), "discard must drain the publication first");
+            }
+            Ok(())
+        };
+        let error = reanalyze_corpus_embeddings_inner(
+            dir.path(),
+            &id,
+            &ConceptEmbedBackend::new(32),
+            "concept-local",
+            &NoopProcessProgress,
+            None,
+            Some(&hook),
+        )
+        .unwrap_err();
+        assert!(
+            corpus_lifecycle::is_corpus_discarded_error(&error),
+            "validation reopen must be fenced: {error}"
+        );
+        let discard = discard_thread.lock().unwrap().take().expect("discard ran");
+        discard
+            .join()
+            .unwrap()
+            .expect("discard succeeds after drain");
+        assert!(!root.exists());
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
     }
 }

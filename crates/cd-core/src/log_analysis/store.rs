@@ -4,6 +4,9 @@
 //! Template vectors stay on pure-Rust [`VectorIndex`] (Exact/Hnsw) — DuckDB is
 //! the **event** store only, not the ANN backend.
 
+use super::corpus_lifecycle::{
+    self, CorpusLifecycleTicket, CorpusPublication, OpenAdmission, OpenRace,
+};
 use super::drain::TemplateInfo;
 use super::ingest_pipeline::{
     classify_ingest_pipeline_identity, deserialize_optional_ingest_pipeline_identity,
@@ -37,6 +40,59 @@ pub const META_VERSION: u32 = 2;
 
 /// Bound application-owned corpus metadata before allocation or parsing.
 const MAX_CORPUS_META_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Cold-open attempts when a sidecar publication overlaps the read (#753).
+const OPEN_REPUBLISH_ATTEMPTS: usize = 3;
+
+/// Test-only pause point between reading corpus files and completing the
+/// lifecycle admission, keyed by corpus id so parallel tests never interact.
+#[cfg(test)]
+type OpenHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[cfg(test)]
+static OPEN_HOOKS: LazyLock<Mutex<HashMap<String, OpenHook>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn set_open_hook_for_tests(corpus_id: &str, hook: Option<OpenHook>) {
+    let mut hooks = OPEN_HOOKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match hook {
+        Some(hook) => {
+            hooks.insert(corpus_id.to_string(), hook);
+        }
+        None => {
+            hooks.remove(corpus_id);
+        }
+    }
+}
+
+#[cfg(test)]
+fn run_open_hook(corpus_id: &str) {
+    let hook = OPEN_HOOKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(corpus_id)
+        .cloned();
+    if let Some(hook) = hook {
+        hook(corpus_id);
+    }
+}
+
+#[cfg(not(test))]
+fn run_open_hook(_corpus_id: &str) {}
+
+/// Complete a single-shot lifecycle admission (create / staging / validation).
+fn complete_admission(admission: OpenAdmission, corpus_id: &str) -> CoreResult<()> {
+    match admission.finish() {
+        Ok(()) => Ok(()),
+        Err(OpenRace::Discarded(error)) => Err(error),
+        Err(OpenRace::Republished) => Err(CoreError::Message(format!(
+            "log corpus {corpus_id} was republished while it was being opened; retry"
+        ))),
+    }
+}
 
 /// Maximum exact event-count predicates retained by one open corpus.
 ///
@@ -543,6 +599,8 @@ pub struct LogCorpus {
     /// handle, so it can never serve one corpus's policy to another and is
     /// bounded by however many handles the host keeps open.
     suppression_lens: Mutex<Option<super::suppression_lens::CachedSuppressionLens>>,
+    /// Discard fence / republication identity shared by every handle (#753).
+    lifecycle: CorpusLifecycleTicket,
     /// Test instrumentation: physical `COUNT(*)` scans, not cache reads.
     #[cfg(test)]
     event_count_scans: AtomicUsize,
@@ -557,6 +615,7 @@ impl LogCorpus {
         let id = Uuid::now_v7().to_string();
         let root = cache_root.join("log_corpora").join(&id);
         std::fs::create_dir_all(&root)?;
+        let admission = corpus_lifecycle::lifecycle_for(cache_root, &id).admit_open()?;
         let name_s = name.into();
         let meta = CorpusMeta {
             meta_version: META_VERSION,
@@ -580,7 +639,8 @@ impl LogCorpus {
         let event_revision = shared_event_revision_clock(&db_path, 0);
         let template_analysis_revision = shared_template_analysis_revision_clock(&db_path);
         let template_identities = shared_template_identity_store(&db_path, HashMap::new());
-        Ok(Self {
+        let corpus = Self {
+            lifecycle: admission.ticket(),
             id,
             name: name_s,
             root,
@@ -598,13 +658,48 @@ impl LogCorpus {
             event_count_scans: AtomicUsize::new(0),
             #[cfg(test)]
             suppression_lens_loads: AtomicUsize::new(0),
-        })
+        };
+        complete_admission(admission, &corpus.id)?;
+        Ok(corpus)
     }
 
     /// Open existing corpus.
+    ///
+    /// The open is admitted by the corpus lifecycle (#753): it is rejected
+    /// once a discard has begun, waits out an in-progress sidecar publication,
+    /// and is refused at completion if a discard fenced the corpus while its
+    /// files were read. No lifecycle lock is held while DuckDB opens.
     pub fn open(cache_root: &Path, id: &str) -> CoreResult<Self> {
         validate_corpus_id(id)?;
-        Self::open_contained(cache_root, id, id)
+        let lifecycle = corpus_lifecycle::lifecycle_for(cache_root, id);
+        for _ in 0..OPEN_REPUBLISH_ATTEMPTS {
+            let admission = lifecycle.admit_open()?;
+            let corpus = Self::open_contained(cache_root, id, id, admission.ticket())?;
+            run_open_hook(id);
+            match admission.finish() {
+                Ok(()) => return Ok(corpus),
+                Err(OpenRace::Discarded(error)) => return Err(error),
+                Err(OpenRace::Republished) => continue,
+            }
+        }
+        Err(CoreError::Message(format!(
+            "log corpus {id} was republished repeatedly while it was being opened; retry"
+        )))
+    }
+
+    /// Validation reopen performed inside the caller's own sidecar
+    /// publication. It does not wait for that publication, but is still
+    /// rejected once a discard has fenced the corpus.
+    pub(super) fn open_for_publication(
+        cache_root: &Path,
+        id: &str,
+        publication: &CorpusPublication,
+    ) -> CoreResult<Self> {
+        validate_corpus_id(id)?;
+        let admission = publication.admit_open()?;
+        let corpus = Self::open_contained(cache_root, id, id, admission.ticket())?;
+        complete_admission(admission, id)?;
+        Ok(corpus)
     }
 
     /// Open a package import while it is still hidden under its staging name.
@@ -618,13 +713,18 @@ impl LogCorpus {
     ) -> CoreResult<Self> {
         validate_import_staging_id(staging_id)?;
         validate_corpus_id(published_id)?;
-        Self::open_contained(cache_root, staging_id, published_id)
+        let admission = corpus_lifecycle::lifecycle_for(cache_root, staging_id).admit_open()?;
+        let corpus =
+            Self::open_contained(cache_root, staging_id, published_id, admission.ticket())?;
+        complete_admission(admission, published_id)?;
+        Ok(corpus)
     }
 
     fn open_contained(
         cache_root: &Path,
         directory_id: &str,
         metadata_id: &str,
+        lifecycle: CorpusLifecycleTicket,
     ) -> CoreResult<Self> {
         let root = contained_existing_corpus_root(cache_root, directory_id)?;
         let meta = read_meta_file(&root)?;
@@ -676,6 +776,7 @@ impl LogCorpus {
             }
         }
         Ok(Self {
+            lifecycle,
             id: metadata_id.to_string(),
             name,
             root,
@@ -716,6 +817,36 @@ impl LogCorpus {
         EVENT_ENGINE
     }
 
+    /// Lifecycle identity of this handle (#753).
+    pub fn lifecycle(&self) -> &CorpusLifecycleTicket {
+        &self.lifecycle
+    }
+
+    /// False once a discard of this corpus has begun (lock-free check).
+    pub fn is_live(&self) -> bool {
+        self.lifecycle.is_live()
+    }
+
+    /// Live and not republished (e.g. by re-analysis) since this handle opened.
+    ///
+    /// Hosts that retain handles across commands reopen when this is false.
+    pub fn is_current(&self) -> bool {
+        self.lifecycle.is_current()
+    }
+
+    /// Fail closed once this handle was invalidated by a discard.
+    ///
+    /// Errors start with [`corpus_lifecycle::LOG_CORPUS_DISCARDED`].
+    pub fn ensure_live(&self) -> CoreResult<()> {
+        self.lifecycle.ensure_live()
+    }
+
+    /// DuckDB connection for one fallible operation on a live handle.
+    fn live_db(&self) -> CoreResult<std::sync::MutexGuard<'_, Connection>> {
+        self.lifecycle.ensure_live()?;
+        self.db.lock().map_err(|_| lock_err())
+    }
+
     /// Snapshot of corpus meta (stats, source label, …).
     pub fn meta(&self) -> CoreResult<CorpusMeta> {
         Ok(self.meta.lock().map_err(|_| lock_err())?.clone())
@@ -729,6 +860,7 @@ impl LogCorpus {
         top_templates: Vec<TopTemplateSnapshot>,
         embedding: CorpusEmbeddingStatus,
     ) -> CoreResult<()> {
+        self.lifecycle.ensure_live()?;
         let mut meta = self.meta.lock().map_err(|_| lock_err())?;
         meta.meta_version = META_VERSION;
         // Reinforce current pipeline identity on every successful ingest publish.
@@ -759,6 +891,7 @@ impl LogCorpus {
                 "managed corpus identity must be 1-160 safe ASCII characters".into(),
             ));
         }
+        self.lifecycle.ensure_live()?;
         let mut meta = self.meta.lock().map_err(|_| lock_err())?;
         meta.managed_identity = Some(identity.to_string());
         write_meta_file(&self.root, &meta)?;
@@ -947,7 +1080,7 @@ impl LogCorpus {
         for (event, _) in &rows {
             event.validate_timestamp_provenance()?;
         }
-        let conn = self.db.lock().map_err(|_| lock_err())?;
+        let conn = self.live_db()?;
         conn.execute_batch("BEGIN").map_err(duck_err)?;
         let result = (|| {
             {
@@ -1132,7 +1265,7 @@ impl LogCorpus {
     /// Whether this corpus contains at least one authoritative redacted source
     /// representation. Legacy corpora return false after additive schema open.
     pub fn has_original_representations(&self) -> CoreResult<bool> {
-        let conn = self.db.lock().map_err(|_| lock_err())?;
+        let conn = self.live_db()?;
         let exists = conn
             .query_row(
                 "SELECT EXISTS(
@@ -1225,12 +1358,19 @@ impl LogCorpus {
     /// Run a closure with the DuckDB connection (explorer query plane).
     ///
     /// Prefer this over loading all events for large corpora.
+    ///
+    /// Fenced by the corpus lifecycle (#753): a stale handle is rejected before
+    /// the closure runs, and a result whose query overlapped the start of a
+    /// discard is rejected afterwards, so it can never be presented as evidence.
     pub fn with_connection<R>(
         &self,
         f: impl FnOnce(&Connection) -> CoreResult<R>,
     ) -> CoreResult<R> {
-        let conn = self.db.lock().map_err(|_| lock_err())?;
-        f(&conn)
+        let conn = self.live_db()?;
+        let result = f(&conn);
+        drop(conn);
+        self.lifecycle.ensure_live()?;
+        result
     }
 
     /// Event count (DuckDB).
@@ -1338,7 +1478,7 @@ impl LogCorpus {
     }
 
     pub(crate) fn load_all_events(&self) -> CoreResult<Vec<LogEvent>> {
-        let conn = self.db.lock().map_err(|_| lock_err())?;
+        let conn = self.live_db()?;
         let mut stmt = conn
             .prepare(
                 "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
@@ -1412,6 +1552,9 @@ impl LogCorpus {
             event.validate_timestamp_provenance()?;
             out.push(event);
         }
+        drop(stmt);
+        drop(conn);
+        self.lifecycle.ensure_live()?;
         Ok(out)
     }
 
@@ -1434,7 +1577,7 @@ impl LogCorpus {
         time_from: Option<i64>,
         time_to: Option<i64>,
     ) -> CoreResult<Vec<(u64, u64)>> {
-        let conn = self.db.lock().map_err(|_| lock_err())?;
+        let conn = self.live_db()?;
         let sql = r#"
             SELECT template_id, COUNT(*) AS c
             FROM events
@@ -1458,7 +1601,7 @@ impl LogCorpus {
 
     /// Count by service where level is error/fatal.
     pub fn scan_error_by_service(&self) -> CoreResult<Vec<(String, u64)>> {
-        let conn = self.db.lock().map_err(|_| lock_err())?;
+        let conn = self.live_db()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -1492,7 +1635,7 @@ impl LogCorpus {
         limit: usize,
     ) -> CoreResult<Vec<(u64, u64, u64)>> {
         let w = window_secs.max(1);
-        let conn = self.db.lock().map_err(|_| lock_err())?;
+        let conn = self.live_db()?;
         // Bucket events by floor(ts/window), then pair distinct templates that share a bucket.
         // This approximates "within window" co-occurrence without n² joins.
         let sql = r#"
@@ -1540,7 +1683,7 @@ impl LogCorpus {
         service: Option<&str>,
     ) -> CoreResult<Vec<(i64, u64, String, u64)>> {
         let width = width_secs.max(1);
-        let conn = self.db.lock().map_err(|_| lock_err())?;
+        let conn = self.live_db()?;
         let sql = r#"
             SELECT (ts / ?1) * ?1 AS bucket,
                    level,
@@ -1573,6 +1716,7 @@ impl LogCorpus {
 
     /// Flush templates JSON + checkpoint DuckDB.
     pub fn flush(&self) -> CoreResult<()> {
+        self.lifecycle.ensure_live()?;
         let templates = self.templates.lock().map_err(|_| lock_err())?;
         let rows: Vec<_> = templates.values().cloned().collect();
         std::fs::write(
@@ -1580,17 +1724,35 @@ impl LogCorpus {
             serde_json::to_vec_pretty(&rows)?,
         )?;
         // DuckDB is durable on append; optional checkpoint.
-        let conn = self.db.lock().map_err(|_| lock_err())?;
+        let conn = self.live_db()?;
         let _ = conn.execute_batch("CHECKPOINT");
         Ok(())
     }
 
     /// Discard corpus directory.
+    ///
+    /// One fenced lifecycle transition (#753, see [`corpus_lifecycle`]): every
+    /// handle of this corpus is stale before the directory is unpublished,
+    /// racing opens cannot publish a handle, and `Ok` is returned only once the
+    /// directory has left `log_corpora/`. A failure before that point changes
+    /// nothing on disk and can be retried.
     pub fn discard(cache_root: &Path, id: &str) -> CoreResult<()> {
+        Self::discard_with(cache_root, id, || {})
+    }
+
+    /// [`Self::discard`] with a host hook run inside the fenced window: after
+    /// every handle is stale and before the directory is unpublished, with no
+    /// lifecycle lock held. Hosts use it to drop cached handles and detach
+    /// in-flight cache initializations. The hook must not wait on an open of
+    /// the same corpus.
+    pub fn discard_with(cache_root: &Path, id: &str, on_fenced: impl FnOnce()) -> CoreResult<()> {
         validate_corpus_id(id)?;
-        let root = cache_root.join("log_corpora").join(id);
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
+        let outcome = corpus_lifecycle::discard_corpus_root(cache_root, id, on_fenced)?;
+        if outcome.residue.is_some() {
+            tracing::warn!(
+                corpus_id = id,
+                "discarded log corpus left unlisted residue; a later discard sweeps it"
+            );
         }
         Ok(())
     }
@@ -1607,6 +1769,7 @@ impl LogCorpus {
         if new_name.is_empty() {
             return Err(CoreError::Message("corpus name cannot be empty".into()));
         }
+        corpus_lifecycle::lifecycle_for(cache_root, id).ensure_not_fenced()?;
         let root = cache_root.join("log_corpora").join(id);
         let mut meta = read_meta_file(&root)?;
         meta.name = new_name.to_string();
@@ -3079,6 +3242,187 @@ mod tests {
         assert!(
             freq_dt.as_secs_f64() < 60.0,
             "frequency scan too slow: {freq_dt:?}"
+        );
+    }
+
+    // ---- #753 corpus lifecycle: atomic discard and fenced handles ----
+
+    const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+    const DRAIN_OBSERVATION: std::time::Duration = std::time::Duration::from_millis(150);
+
+    fn assert_discarded(error: &CoreError) {
+        assert!(
+            corpus_lifecycle::is_corpus_discarded_error(error),
+            "expected a discard-fence error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn concurrent_open_and_discard_never_publishes_a_surviving_handle() {
+        use std::sync::mpsc;
+        let dir = tempfile::tempdir().unwrap();
+        let retained = LogCorpus::create(dir.path(), "race").unwrap();
+        retained.flush().unwrap();
+        let id = retained.id().to_string();
+        let root = retained.root().to_path_buf();
+
+        // Barrier inside `open`: files read, admission not yet completed.
+        let (read_tx, read_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let read_tx = Mutex::new(read_tx);
+        let release_rx = Mutex::new(release_rx);
+        set_open_hook_for_tests(
+            &id,
+            Some(Arc::new(move |_: &str| {
+                read_tx.lock().unwrap().send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(LIFECYCLE_WAIT)
+                    .unwrap();
+            })),
+        );
+        let cache = dir.path().to_path_buf();
+        let open_id = id.clone();
+        let opener = std::thread::spawn(move || LogCorpus::open(&cache, &open_id).map(|_| ()));
+        read_rx
+            .recv_timeout(LIFECYCLE_WAIT)
+            .expect("racing open paused after reading the corpus");
+
+        let (fenced_tx, fenced_rx) = mpsc::channel();
+        let cache = dir.path().to_path_buf();
+        let discard_id = id.clone();
+        let discard = std::thread::spawn(move || {
+            LogCorpus::discard_with(&cache, &discard_id, move || {
+                fenced_tx.send(()).unwrap();
+            })
+        });
+        fenced_rx.recv_timeout(LIFECYCLE_WAIT).unwrap();
+
+        // Inside the transition: every handle is already stale...
+        assert!(!retained.is_live());
+        assert_discarded(&retained.with_connection(|_| Ok(())).unwrap_err());
+        assert_discarded(&LogCorpus::open(dir.path(), &id).err().expect("rejected"));
+        // ...but nothing is unpublished while the admitted open still runs.
+        std::thread::sleep(DRAIN_OBSERVATION);
+        assert!(!discard.is_finished(), "discard drains admitted opens");
+        assert!(root.exists());
+
+        release_tx.send(()).unwrap();
+        assert_discarded(&opener.join().unwrap().unwrap_err());
+        discard
+            .join()
+            .unwrap()
+            .expect("discard succeeds after drain");
+        set_open_hook_for_tests(&id, None);
+
+        assert!(!root.exists());
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+        assert_discarded(&retained.flush().unwrap_err());
+        assert_discarded(&LogCorpus::open(dir.path(), &id).err().expect("tombstoned"));
+    }
+
+    #[test]
+    fn query_result_that_overlapped_a_discard_start_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "overlap").unwrap();
+        let id = corpus.id().to_string();
+        let cache = dir.path().to_path_buf();
+        // Positive control: the same query succeeds on a live handle.
+        let live = corpus
+            .with_connection(|connection| {
+                connection
+                    .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(duck_err)
+            })
+            .unwrap();
+        assert_eq!(live, 0);
+
+        let error = corpus
+            .with_connection(|connection| {
+                let count = connection
+                    .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(duck_err)?;
+                // A second window discards while this query is in flight.
+                LogCorpus::discard(&cache, &id)?;
+                Ok(count)
+            })
+            .unwrap_err();
+        assert_discarded(&error);
+        assert!(!dir.path().join("log_corpora").join(&id).exists());
+    }
+
+    #[test]
+    fn failed_discard_changes_nothing_on_disk_and_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "rollback").unwrap();
+        corpus.flush().unwrap();
+        let id = corpus.id().to_string();
+        let root = corpus.root().to_path_buf();
+        let trash = dir
+            .path()
+            .join("log_corpora")
+            .join(corpus_lifecycle::DISCARD_TRASH_DIR);
+        std::fs::write(&trash, b"blocks the trash directory").unwrap();
+
+        let error = LogCorpus::discard(dir.path(), &id).unwrap_err();
+        assert!(
+            !corpus_lifecycle::is_corpus_discarded_error(&error),
+            "{error}"
+        );
+        assert!(root.join("meta.json").exists() && root.join("events.duckdb").exists());
+        assert_eq!(LogCorpus::list_ids(dir.path()).unwrap(), vec![id.clone()]);
+        assert!(
+            !corpus.is_live(),
+            "handles fenced by the attempt stay stale"
+        );
+        let reopened = LogCorpus::open(dir.path(), &id).expect("rolled back to live");
+        assert!(reopened.is_live());
+        assert_eq!(reopened.event_count(), 0);
+
+        std::fs::remove_file(&trash).unwrap();
+        LogCorpus::discard(dir.path(), &id).expect("retry succeeds");
+        assert!(!root.exists());
+        assert!(!reopened.is_live());
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn publication_makes_open_handles_non_current_and_new_opens_wait() {
+        use std::sync::mpsc;
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "republish").unwrap();
+        corpus.flush().unwrap();
+        let id = corpus.id().to_string();
+        let publication = corpus_lifecycle::begin_publication(dir.path(), &id).unwrap();
+        assert!(corpus.is_live() && !corpus.is_current());
+
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let cache = dir.path().to_path_buf();
+        let open_id = id.clone();
+        let opener = std::thread::spawn(move || {
+            let opened = LogCorpus::open(&cache, &open_id).map(|corpus| corpus.is_current());
+            opened_tx.send(()).unwrap();
+            opened
+        });
+        assert!(
+            opened_rx.recv_timeout(DRAIN_OBSERVATION).is_err(),
+            "an open must not read a half-published sidecar set"
+        );
+        drop(publication);
+        opened_rx.recv_timeout(LIFECYCLE_WAIT).unwrap();
+        assert!(
+            opener.join().unwrap().unwrap(),
+            "post-publication open is current"
+        );
+        assert!(!corpus.is_current());
+        assert!(
+            corpus.ensure_live().is_ok(),
+            "republication is not a discard"
         );
     }
 }
