@@ -66,11 +66,16 @@
 //!   never while acquiring the registry.
 //! * Host cache locks may be held while reading ticket atomics
 //!   ([`CorpusLifecycleTicket::is_live`], [`CorpusLifecycleTicket::is_current`])
-//!   but never while calling a function in this module that takes a cell lock.
+//!   but never while calling a function in this module that *waits* on a cell
+//!   (admission, publication, discard). [`CorpusLifecycleTicket::ensure_live`]
+//!   may be called under a host lock: on the stale path it takes the cell lock
+//!   as a leaf only to read the phase for its error message.
 //! * [`SharedPerCorpus`] registry mutex → nothing. Held only for map
 //!   bookkeeping; a per-key gate makes same-key initializers wait for one
 //!   leader while different keys initialize concurrently, so no registry lock
-//!   is held across DuckDB open or schema initialization.
+//!   is held across DuckDB open or schema initialization. The store's discard
+//!   release may take it while holding one corpus connection (connection →
+//!   registry); nothing takes them in the opposite order.
 //!
 //! The lifecycle is process-local, like the shared DuckDB connection registry
 //! in [`super::store`]. Other processes opening the same cache are outside this
@@ -919,18 +924,28 @@ impl<T> SharedPerCorpus<T> {
         }
     }
 
-    /// Remove and return the live value for `key` so a discard can close it.
-    /// An in-progress initialization is left untouched (discard drains every
-    /// admitted open before it releases files, so none is expected).
-    pub(crate) fn take(&self, key: &Path) -> Option<Arc<T>> {
-        let mut slots = self.lock_slots();
-        match slots.get(key) {
-            Some(SharedSlot::Ready(_)) => match slots.remove(key) {
-                Some(SharedSlot::Ready(value)) => value.upgrade(),
-                _ => None,
-            },
+    /// Live value for `key`, if any, without initializing one.
+    pub(crate) fn get(&self, key: &Path) -> Option<Arc<T>> {
+        match self.lock_slots().get(key) {
+            Some(SharedSlot::Ready(value)) => value.upgrade(),
             _ => None,
         }
+    }
+
+    /// Retire `key` only while it still maps to exactly `expected`, so a
+    /// discard can close that value; later lookups initialize a fresh one. An
+    /// in-progress initialization is never removed (discard drains every
+    /// admitted open before it releases files, so none is expected).
+    pub(crate) fn detach(&self, key: &Path, expected: &Arc<T>) -> bool {
+        let mut slots = self.lock_slots();
+        let matches = matches!(
+            slots.get(key),
+            Some(SharedSlot::Ready(value)) if std::ptr::eq(value.as_ptr(), Arc::as_ptr(expected))
+        );
+        if matches {
+            slots.remove(key);
+        }
+        matches
     }
 }
 
@@ -1530,15 +1545,22 @@ mod tests {
     }
 
     #[test]
-    fn shared_registry_take_detaches_the_live_value_and_reopens_fresh() {
+    fn shared_registry_detach_retires_only_the_expected_value() {
         let registry = shared_registry();
         let first = registry.get_or_open(Path::new("/t"), || Ok(1)).unwrap();
-        let taken = registry.take(Path::new("/t")).expect("live value taken");
-        assert!(Arc::ptr_eq(&first, &taken));
+        let peeked = registry.get(Path::new("/t")).expect("live value");
+        assert!(Arc::ptr_eq(&first, &peeked), "get never initializes anew");
+        let unrelated = Arc::new(1);
+        assert!(
+            !registry.detach(Path::new("/t"), &unrelated),
+            "a different value (equal contents) is not retired"
+        );
+        assert!(registry.detach(Path::new("/t"), &first));
+        assert!(registry.get(Path::new("/t")).is_none());
         let fresh = registry.get_or_open(Path::new("/t"), || Ok(2)).unwrap();
-        assert_eq!(*fresh, 2, "a taken value is never handed out again");
-        drop((first, taken));
-        drop(fresh);
-        assert!(registry.take(Path::new("/t")).is_none(), "dead value");
+        assert_eq!(*fresh, 2, "a retired value is never handed out again");
+        assert!(!registry.detach(Path::new("/t"), &first), "already retired");
+        drop((first, peeked, fresh));
+        assert!(registry.get(Path::new("/t")).is_none(), "dead value");
     }
 }

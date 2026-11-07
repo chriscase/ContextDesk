@@ -4,10 +4,10 @@ Issue: [#753](https://github.com/chriscase/ContextDesk/issues/753) — make log-
 discard atomic and corpus opens single-flight.
 
 Base: `b54844cb9e5a6e80bcde806e10ddcaf0d79fc2b6` (tree
-`9ecc54e25c7facf610f9e6ce445245f64c5d048c`). Candidate: two commits on
+`9ecc54e25c7facf610f9e6ce445245f64c5d048c`). Candidate: three commits on
 `claude/contextdesk-753-corpus-cache-lifecycle` — the implementation commit
-(`c1d3bea`) and the commit that updates this file with the independent-review
-fixes (§7).
+(`c1d3bea`), the first independent-review fixes (`7f3c2c7`), and the commit
+that updates this file with the second-review fixes (§7).
 
 Handbook: [Log evidence pipeline §6.9](../design/proven-methods/LOG_EVIDENCE_PIPELINE.md#69-corpus-handle-lifecycle-753).
 
@@ -127,6 +127,7 @@ A probe file (`v.len() == 0`) confirmed `clippy-driver` was linting
 | M12 | Discard entry point skips id validation | `discard_rejects_ids_that_could_escape_log_corpora` |
 | M13 | Rolled-back fence reports "discarded" | `unpublish_failure_rolls_back_to_live_and_retry_succeeds` |
 | M14 | Fence does not notify condvar waiters | `fence_wakes_phase_observers_without_waiting_for_their_timeout` |
+| M15 | Registry `detach` retires a value other than the one it locked | `shared_registry_detach_retires_only_the_expected_value` |
 
 M3 initially survived (the drain assertion raced the rename); the drain tests
 were strengthened with a bounded observation window that a correct discard can
@@ -150,7 +151,9 @@ Written but **not executed** (require real `cd-core` with DuckDB):
 - `store.rs`: `concurrent_open_and_discard_never_publishes_a_surviving_handle`
   (barrier via per-corpus test open hook),
   `query_result_that_overlapped_a_discard_start_is_rejected` (cross-thread),
-  `discard_closes_the_shared_connection_before_unpublishing`,
+  `discard_closes_the_shared_connection_before_unpublishing` (asserts the
+  stale handle's underlying connection no longer reaches the corpus schema),
+  `direct_scan_waiting_for_the_connection_during_a_discard_fails_as_discarded`,
   `failed_discard_changes_nothing_on_disk_and_can_be_retried`,
   `publication_makes_open_handles_non_current_and_new_opens_wait`.
 - `reanalyze.rs`: `successful_reanalysis_makes_retained_handles_non_current_but_live`,
@@ -200,7 +203,14 @@ failure rows, test recipe, anchors, matrix row, and residuals updated.
   rely on lazy eviction: stale entries are never served but are dropped on the
   next cache access rather than inside the fence.
 - An in-flight DuckDB query on a stale handle is not interrupted; its result is
-  rejected when it completes, and the discard's release step waits for it.
+  rejected when it completes, and the discard's release step waits for it
+  (bounded at 120 s; past that the files stay open until the query ends).
+- Each discard that still has retained stale handles allocates one inert
+  in-memory DuckDB instance that lives until the last stale handle drops
+  (for a linked turn, the end of the turn).
+- ToolHost keeps a stale turn handle until its scope setter runs; a host that
+  never calls the scope setters keeps reporting "reopen it and retry" after a
+  rolled-back discard. Desktop and cd-workflow reset the scope every turn.
 - Windows: the release step is meant to let the unpublish rename succeed with
   handles still retained; this has not been observed on a Windows host (the
   Windows CI shards will run the new tests).
@@ -218,8 +228,21 @@ and dispositions:
 | 1 | `lib.rs` test `blocking_helpers_preserve_startup_read_results` still called the removed `handles.remove` (test-target compile error) | Fixed: `invalidate`; every cache method call in `lib.rs` re-audited (only `open`/`invalidate`/`discard`) |
 | 2 | Directory rename with open DuckDB files may fail on Windows | Mitigated: discard closes the shared connection after the drain, before the rename; Windows still unobserved (§6) |
 | 3 | Fence did not `notify_all` condvar waiters | Fixed; regression `fence_wakes_phase_observers…` (M14) |
-| 4 | A rolled-back discard made handles claim "discarded" | Fixed: phase-aware stale error ("interrupted discard; still exists"), which routes to the existing stale-snapshot terminal (M13) |
+| 4 | A rolled-back discard made handles claim "discarded" | Fixed: phase-aware stale error ("interrupted discard; still exists"), not classified as a discard (M13). Before a provider round it routes to the stale-snapshot terminal; if the fence and its rollback both land during final synthesis, the answer is released — its evidence predates the fence and the corpus is unchanged |
 | 5 | New terminal reason not classified as withheld | Fixed within scope: reason `linked_log_snapshot_stale`, distinct error code kept; dedicated reason noted as an `events.rs` follow-up |
 | 6 | Core connection registry held a process-wide lock across `Connection::open`; ToolHost slot held across cold open | Fixed: per-key `SharedPerCorpus` registry (M10); ToolHost opens without the slot lock |
 | 7 | Public discard entry point skipped id validation | Fixed: crate-private and validating (M12) |
 | 8 | Prune test could not detect pruning; post-tool fence unexercised; answer fence non-sticky | Fixed: `Weak`-based prune assertion; ToolHost hook test; sticky stale slot |
+
+Second independent review (fix delta `c1d3bea..7f3c2c7`, read-only; one
+`rustfmt --check`): no compile, clippy, deadlock or evidence-leak blocker.
+
+| # | Finding | Disposition |
+| --- | --- | --- |
+| 1 | Direct `live_db` callers that passed the pre-check before the fence could query the swapped-in inert connection (catalog error, not a discard error); `event_count` returns 0 for stale handles | Fixed: `live_db` re-checks the fence after taking the connection lock (regression `direct_scan_waiting_for_the_connection_during_a_discard_fails_as_discarded`); `event_count` documented as infallible/0 |
+| 2 | Release waited on the connection mutex without a bound | Fixed: bounded, poison-tolerant wait (120 s); on timeout files stay open until the query ends |
+| 3 | Registry entry removed before the inert connection existed (two file connections possible on failure + rollback) | Fixed: inert connection created first; entry retired only while that exact connection is locked (`detach`, M15) |
+| 4 | Doc overstated the rolled-back-discard terminal | Corrected (row 4 above) |
+| 5 | `ensure_live` takes the cell lock under host locks, contradicting the module's lock list; stale `ensure_live` doc in store | Docs corrected (cell lock is a leaf on the stale path) |
+| 6 | One in-memory DuckDB instance per discard with retained stale handles; sticky slot never reopens after a rollback | Residual (§6) |
+| 7 | Rollback test used `event_count`; release test proved only registry removal | Strengthened: real-schema query after rollback; inert-connection assertion |

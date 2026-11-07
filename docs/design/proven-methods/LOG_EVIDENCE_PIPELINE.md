@@ -713,10 +713,14 @@ bookkeeping only; per-key gates are waited on without it); desktop cache
 state → nothing (may read lifecycle atomics only); per-flight outcome slot →
 nothing; ToolHost turn slot → lifecycle cell (only to format a stale-handle
 error). `on_fenced` runs with no lifecycle lock held and takes only the cache
-state lock. The release step waits on a corpus's own connection mutex for at
-most one in-flight query, then drops the old connection outside every lock;
-a discard must therefore never be issued while the caller holds that
-corpus's connection.
+state lock. The release step creates the inert connection first, waits
+(bounded) on the corpus's own connection mutex for at most one in-flight
+query, retires that exact registry entry while holding it (connection →
+registry; nothing takes them in the other order), and drops the old
+connection outside every lock. Every fenced DuckDB access re-checks the fence
+after taking the connection lock, so no stale handle ever queries the inert
+connection. A discard should not be issued while the caller holds that
+corpus's connection (the release would wait out its bound).
 
 ## 7. Performance and bounds
 

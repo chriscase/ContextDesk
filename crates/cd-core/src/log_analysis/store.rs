@@ -840,7 +840,9 @@ impl LogCorpus {
 
     /// Fail closed once this handle was invalidated by a discard.
     ///
-    /// Errors start with [`corpus_lifecycle::LOG_CORPUS_DISCARDED`].
+    /// While a discard runs or after it succeeded, errors start with
+    /// [`corpus_lifecycle::LOG_CORPUS_DISCARDED`]; a handle fenced by a
+    /// rolled-back discard reports an interrupted discard instead.
     pub fn ensure_live(&self) -> CoreResult<()> {
         self.lifecycle.ensure_live()
     }
@@ -848,7 +850,11 @@ impl LogCorpus {
     /// DuckDB connection for one fallible operation on a live handle.
     fn live_db(&self) -> CoreResult<std::sync::MutexGuard<'_, Connection>> {
         self.lifecycle.ensure_live()?;
-        self.db.lock().map_err(|_| lock_err())
+        let connection = self.db.lock().map_err(|_| lock_err())?;
+        // A discard can fence (and swap in an inert connection) while this
+        // caller waits for the lock; never query past the fence.
+        self.lifecycle.ensure_live()?;
+        Ok(connection)
     }
 
     /// Snapshot of corpus meta (stats, source label, …).
@@ -1378,6 +1384,10 @@ impl LogCorpus {
     }
 
     /// Event count (DuckDB).
+    ///
+    /// Infallible: returns 0 on any query error, including for a handle
+    /// invalidated by a discard (#753). Evidence paths must use fenced,
+    /// fallible accessors or [`Self::ensure_live`].
     pub fn event_count(&self) -> usize {
         let conn = match self.db.lock() {
             Ok(c) => c,
@@ -2094,30 +2104,65 @@ fn shared_corpus_connection(db_path: &Path) -> CoreResult<Arc<Mutex<Connection>>
     })
 }
 
+/// Upper bound for the discard release step to wait for an in-flight query.
+const RELEASE_CONNECTION_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Close this process's shared DuckDB connection for a corpus being discarded.
 ///
 /// Runs inside the discard transition after admitted opens drained and before
 /// the directory is unpublished (#753). Stale handles keep an inert in-memory
-/// connection (their fenced operations fail before touching it), so no file
-/// in the directory stays open and the unpublish rename also works where open
-/// files block directory renames. Waits only for an in-flight query on the
-/// connection mutex; the old connection is dropped outside every lock. Must
-/// not be reached while the caller itself holds this corpus's connection.
+/// connection; every fenced access re-checks the fence after taking the
+/// connection lock, so none of them ever queries it. No file in the directory
+/// then stays open in this process, so the unpublish rename also works where
+/// open files block directory renames.
+///
+/// The inert connection is created first and the registry entry is retired
+/// only while this exact connection is locked, so a failure at any step leaves
+/// one registered connection per database (never two). The wait for an
+/// in-flight query is bounded: on timeout the files simply stay open until
+/// that query ends (POSIX renames still succeed; elsewhere the unpublish may
+/// fail and the discard rolls back for a retry). Lock order: corpus
+/// connection → registry. The old connection is dropped outside every lock.
 fn release_shared_connection(db_path: &Path) {
-    let Some(connection) = CORPUS_CONNECTIONS.take(&canonical_db_key(db_path)) else {
+    let key = canonical_db_key(db_path);
+    let Some(connection) = CORPUS_CONNECTIONS.get(&key) else {
         return;
     };
     let Ok(inert) = Connection::open_in_memory() else {
         tracing::warn!("could not create an inert connection for a discarded corpus");
         return;
     };
-    let previous = {
-        let mut guard = connection
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::mem::replace(&mut *guard, inert)
+    let Some(mut guard) = lock_within(&connection, RELEASE_CONNECTION_WAIT) else {
+        tracing::warn!("a query kept a discarded corpus's connection busy; files stay open");
+        return;
     };
+    if !CORPUS_CONNECTIONS.detach(&key, &connection) {
+        return;
+    }
+    let previous = std::mem::replace(&mut *guard, inert);
+    drop(guard);
     drop(previous);
+}
+
+/// Bounded lock acquisition (poison-tolerant) for the discard release step.
+fn lock_within<T>(
+    mutex: &Mutex<T>,
+    timeout: std::time::Duration,
+) -> Option<std::sync::MutexGuard<'_, T>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut pause = std::time::Duration::from_millis(1);
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(std::time::Duration::from_millis(25));
+    }
 }
 
 fn canonical_db_key(db_path: &Path) -> PathBuf {
@@ -3412,11 +3457,46 @@ mod tests {
         let key = canonical_db_key(&db_path);
         LogCorpus::discard(dir.path(), &id).unwrap();
         assert!(
-            CORPUS_CONNECTIONS.take(&key).is_none(),
+            CORPUS_CONNECTIONS.get(&key).is_none(),
             "the discarded corpus's shared connection left the registry"
         );
         // The retained stale handle stays fenced after its files were closed.
         assert_discarded(&retained.with_connection(|_| Ok(())).unwrap_err());
+        // Underneath the fence it now holds the inert in-memory connection:
+        // the corpus schema (and its database file) is no longer reachable.
+        let inert =
+            retained
+                .db
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                    row.get::<_, i64>(0)
+                });
+        assert!(inert.is_err(), "file connection was replaced: {inert:?}");
+    }
+
+    #[test]
+    fn direct_scan_waiting_for_the_connection_during_a_discard_fails_as_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Arc::new(LogCorpus::create(dir.path(), "scan-wait").unwrap());
+        corpus.flush().unwrap();
+        let id = corpus.id().to_string();
+        // Hold the connection so the scan passes its pre-check and then waits.
+        let held = corpus.db.lock().unwrap();
+        let scanning = Arc::clone(&corpus);
+        let scan = std::thread::spawn(move || scanning.scan_error_by_service().map(|_| ()));
+        std::thread::sleep(DRAIN_OBSERVATION);
+        let cache = dir.path().to_path_buf();
+        let discard_id = id.clone();
+        let discard = std::thread::spawn(move || LogCorpus::discard(&cache, &discard_id));
+        std::thread::sleep(DRAIN_OBSERVATION);
+        drop(held);
+        // Whichever of the scan and the release takes the lock first, the scan
+        // must report the discard: never stale rows, never a catalog error
+        // from the inert connection.
+        assert_discarded(&scan.join().unwrap().unwrap_err());
+        discard.join().unwrap().expect("discard succeeds");
+        assert!(!dir.path().join("log_corpora").join(&id).exists());
     }
 
     #[test]
@@ -3445,7 +3525,17 @@ mod tests {
         );
         let reopened = LogCorpus::open(dir.path(), &id).expect("rolled back to live");
         assert!(reopened.is_live());
-        assert_eq!(reopened.event_count(), 0);
+        // A real file connection (not the inert one): the schema is queryable.
+        let rows = reopened
+            .with_connection(|connection| {
+                connection
+                    .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(duck_err)
+            })
+            .expect("fresh open after rollback reaches the corpus database");
+        assert_eq!(rows, 0);
 
         std::fs::remove_file(&trash).unwrap();
         LogCorpus::discard(dir.path(), &id).expect("retry succeeds");
