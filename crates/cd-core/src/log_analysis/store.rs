@@ -83,6 +83,41 @@ fn run_open_hook(corpus_id: &str) {
 #[cfg(not(test))]
 fn run_open_hook(_corpus_id: &str) {}
 
+/// Test-only observation point in `live_db`, after its pre-check passed and
+/// before it waits for the connection lock, keyed by corpus id. It lets a
+/// regression test prove deterministically that a caller is past the
+/// pre-check when a discard fences (#753). Compiled out of non-test builds.
+#[cfg(test)]
+static LIVE_DB_HOOKS: LazyLock<Mutex<HashMap<String, OpenHook>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn set_live_db_hook_for_tests(corpus_id: &str, hook: Option<OpenHook>) {
+    let mut hooks = LIVE_DB_HOOKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match hook {
+        Some(hook) => {
+            hooks.insert(corpus_id.to_string(), hook);
+        }
+        None => {
+            hooks.remove(corpus_id);
+        }
+    }
+}
+
+#[cfg(test)]
+fn run_live_db_hook(corpus_id: &str) {
+    let hook = LIVE_DB_HOOKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(corpus_id)
+        .cloned();
+    if let Some(hook) = hook {
+        hook(corpus_id);
+    }
+}
+
 /// Complete a single-shot lifecycle admission (create / staging / validation).
 fn complete_admission(admission: OpenAdmission, corpus_id: &str) -> CoreResult<()> {
     match admission.finish() {
@@ -850,6 +885,8 @@ impl LogCorpus {
     /// DuckDB connection for one fallible operation on a live handle.
     fn live_db(&self) -> CoreResult<std::sync::MutexGuard<'_, Connection>> {
         self.lifecycle.ensure_live()?;
+        #[cfg(test)]
+        run_live_db_hook(&self.id);
         let connection = self.db.lock().map_err(|_| lock_err())?;
         // A discard can fence (and swap in an inert connection) while this
         // caller waits for the lock; never query past the fence.
@@ -1758,8 +1795,10 @@ impl LogCorpus {
     /// every handle is stale and before the directory is unpublished, with no
     /// lifecycle lock held. Hosts use it to drop cached handles and detach
     /// in-flight cache initializations. The hook must not wait on an open of
-    /// the same corpus, and neither the hook nor the caller may hold this
-    /// corpus's connection (`with_connection`): the transition closes it.
+    /// the same corpus, and neither the hook nor the caller should hold this
+    /// corpus's connection (`with_connection`): the transition's release step
+    /// would wait out its 120 s bound and then leave the real connection open
+    /// (see [`release_shared_connection`]).
     pub fn discard_with(cache_root: &Path, id: &str, on_fenced: impl FnOnce()) -> CoreResult<()> {
         validate_corpus_id(id)?;
         let db_path = cache_root
@@ -2110,18 +2149,24 @@ const RELEASE_CONNECTION_WAIT: std::time::Duration = std::time::Duration::from_s
 /// Close this process's shared DuckDB connection for a corpus being discarded.
 ///
 /// Runs inside the discard transition after admitted opens drained and before
-/// the directory is unpublished (#753). Stale handles keep an inert in-memory
-/// connection; every fenced access re-checks the fence after taking the
-/// connection lock, so none of them ever queries it. No file in the directory
-/// then stays open in this process, so the unpublish rename also works where
-/// open files block directory renames.
+/// the directory is unpublished (#753). When the release succeeds, stale
+/// handles keep an inert in-memory connection and this process holds no file
+/// in the directory open. Every *fenced* access re-checks the fence after
+/// taking the connection lock, so no fenced access queries the inert
+/// connection; the infallible, unfenced [`LogCorpus::event_count`] may query
+/// it and then returns 0.
 ///
 /// The inert connection is created first and the registry entry is retired
 /// only while this exact connection is locked, so a failure at any step leaves
 /// one registered connection per database (never two). The wait for an
-/// in-flight query is bounded: on timeout the files simply stay open until
-/// that query ends (POSIX renames still succeed; elsewhere the unpublish may
-/// fail and the discard rolls back for a retry). Lock order: corpus
+/// in-flight query is bounded (120 s). If it times out, or the inert
+/// connection cannot be created, nothing is swapped or retired: the old *real*
+/// connection stays registered and open until the **last** retained stale
+/// handle holding it drops (for example a linked turn's sticky slot or a
+/// broad-triage job), not merely until the in-flight query ends. POSIX
+/// directory renames still succeed with files open. Where open files block
+/// directory renames the unpublish may fail and the discard rolls back for a
+/// retry; that path is not observed on such a host. Lock order: corpus
 /// connection → registry. The old connection is dropped outside every lock.
 fn release_shared_connection(db_path: &Path) {
     let key = canonical_db_key(db_path);
@@ -3475,27 +3520,100 @@ mod tests {
         assert!(inert.is_err(), "file connection was replaced: {inert:?}");
     }
 
+    /// Removes a `live_db` observation hook on every exit path, including a
+    /// failed assertion, so no hook outlives its test.
+    struct LiveDbHookGuard(String);
+
+    impl Drop for LiveDbHookGuard {
+        fn drop(&mut self) {
+            set_live_db_hook_for_tests(&self.0, None);
+        }
+    }
+
     #[test]
     fn direct_scan_waiting_for_the_connection_during_a_discard_fails_as_discarded() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
         let dir = tempfile::tempdir().unwrap();
         let corpus = Arc::new(LogCorpus::create(dir.path(), "scan-wait").unwrap());
         corpus.flush().unwrap();
         let id = corpus.id().to_string();
-        // Hold the connection so the scan passes its pre-check and then waits.
+
+        // Observe the scan inside `live_db`: its pre-check has passed and it
+        // is about to wait for the connection lock. The hook never blocks.
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let (prechecked_tx, prechecked_rx) = mpsc::sync_channel::<()>(1);
+        let prechecked_tx = Mutex::new(prechecked_tx);
+        let calls = Arc::clone(&hook_calls);
+        set_live_db_hook_for_tests(
+            &id,
+            Some(Arc::new(move |_: &str| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if let Ok(sender) = prechecked_tx.lock() {
+                    let _ = sender.try_send(());
+                }
+            })),
+        );
+        let _hook = LiveDbHookGuard(id.clone());
+
+        // 1. Hold the real connection so the scan cannot pass the lock.
         let held = corpus.db.lock().unwrap();
         let scanning = Arc::clone(&corpus);
-        let scan = std::thread::spawn(move || scanning.scan_error_by_service().map(|_| ()));
-        std::thread::sleep(DRAIN_OBSERVATION);
+        let (scanned_tx, scanned_rx) = mpsc::sync_channel(1);
+        let scan = std::thread::spawn(move || {
+            let _ = scanned_tx.send(scanning.scan_error_by_service().map(|_| ()));
+        });
+        prechecked_rx
+            .recv_timeout(LIFECYCLE_WAIT)
+            .expect("scan passed live_db's pre-check while the corpus was live");
+
+        // 2. Fence while the scan is past its pre-check and the lock is held.
+        let (fenced_tx, fenced_rx) = mpsc::sync_channel::<()>(1);
+        let (discarded_tx, discarded_rx) = mpsc::sync_channel(1);
         let cache = dir.path().to_path_buf();
         let discard_id = id.clone();
-        let discard = std::thread::spawn(move || LogCorpus::discard(&cache, &discard_id));
-        std::thread::sleep(DRAIN_OBSERVATION);
+        let discard = std::thread::spawn(move || {
+            let outcome = LogCorpus::discard_with(&cache, &discard_id, move || {
+                let _ = fenced_tx.send(());
+            });
+            let _ = discarded_tx.send(outcome);
+        });
+        fenced_rx
+            .recv_timeout(LIFECYCLE_WAIT)
+            .expect("discard reached its fence while the scan waited for the connection");
+        assert!(
+            !corpus.is_live(),
+            "the fence is observed before the lock is released"
+        );
+        assert!(
+            scanned_rx.try_recv().is_err(),
+            "the scan cannot finish while the test holds the connection"
+        );
+
+        // 3. Release the lock. The pre-check already passed (step 1), so the
+        //    only check left before the query is live_db's post-lock re-check:
+        //    a discard error here can only come from that re-check, whichever
+        //    of the scan and the discard's release step takes the lock first.
         drop(held);
-        // Whichever of the scan and the release takes the lock first, the scan
-        // must report the discard: never stale rows, never a catalog error
-        // from the inert connection.
-        assert_discarded(&scan.join().unwrap().unwrap_err());
-        discard.join().unwrap().expect("discard succeeds");
+        let scanned = scanned_rx
+            .recv_timeout(LIFECYCLE_WAIT)
+            .expect("scan completes once the connection is released");
+        match scanned {
+            Ok(()) => panic!("a scan that waited across the fence returned rows"),
+            Err(error) => assert_discarded(&error),
+        }
+        assert_eq!(
+            hook_calls.load(Ordering::SeqCst),
+            1,
+            "exactly one live_db pass: the scan's"
+        );
+        discarded_rx
+            .recv_timeout(LIFECYCLE_WAIT)
+            .expect("discard completes once the connection is released")
+            .expect("discard succeeds");
+        scan.join().expect("scan thread exits");
+        discard.join().expect("discard thread exits");
         assert!(!dir.path().join("log_corpora").join(&id).exists());
     }
 

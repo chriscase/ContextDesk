@@ -39,10 +39,15 @@
 //!    finish. Their completion re-checks the epoch, so none of them can publish
 //!    a live handle; once drained nothing in this process is still creating or
 //!    replacing files in the directory.
-//! 4. **Release** — the caller's `release_files` hook closes the corpus's
-//!    shared DuckDB connection (stale handles are left with an inert
-//!    in-memory connection), so no file in the directory stays open in this
-//!    process and the move below also works where open files block renames.
+//! 4. **Release** — the caller's `release_files` hook tries to close the
+//!    corpus's shared DuckDB connection. When that succeeds, stale handles
+//!    are left with an inert in-memory connection and this process holds no
+//!    file in the directory open, so the move below also works where open
+//!    files block renames. The store bounds its wait for an in-flight query
+//!    (120 s); if that wait times out, the old real connection stays open
+//!    until the last retained stale handle drops, and where open files block
+//!    directory renames the move below may fail and roll back (not observed
+//!    on such a host).
 //! 5. **Unpublish** — atomically rename `log_corpora/{id}` to
 //!    `log_corpora/.discarding/{id}.{suffix}`. This rename is the instant the
 //!    corpus leaves the filesystem namespace. If it fails, nothing on disk has
@@ -627,7 +632,8 @@ impl Drop for DiscardRollback<'_> {
 /// fence and `release_files` right after the drain, both before the directory
 /// is unpublished and both with no lifecycle lock held: hosts use the first to
 /// drop cached handles and detach in-flight cache initializations, the store
-/// uses the second to close the corpus's shared DuckDB connection.
+/// uses the second to try to close the corpus's shared DuckDB connection
+/// (bounded; on timeout the real connection stays open, see step 4 above).
 pub(crate) fn discard_corpus_root(
     cache_root: &Path,
     corpus_id: &str,

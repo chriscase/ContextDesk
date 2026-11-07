@@ -4,10 +4,12 @@ Issue: [#753](https://github.com/chriscase/ContextDesk/issues/753) — make log-
 discard atomic and corpus opens single-flight.
 
 Base: `b54844cb9e5a6e80bcde806e10ddcaf0d79fc2b6` (tree
-`9ecc54e25c7facf610f9e6ce445245f64c5d048c`). Candidate: three commits on
+`9ecc54e25c7facf610f9e6ce445245f64c5d048c`). Candidate: four commits on
 `claude/contextdesk-753-corpus-cache-lifecycle` — the implementation commit
-(`c1d3bea`), the first independent-review fixes (`7f3c2c7`), and the commit
-that updates this file with the second-review fixes (§7).
+(`c1d3bea`), the first independent-review fixes (`7f3c2c7`), the second-review
+fixes (`674634e`, the frozen candidate whose custody packet is preserved
+unchanged), and the custodian-admitted four-path successor that updates this
+file with the final-review corrections (§8).
 
 Handbook: [Log evidence pipeline §6.9](../design/proven-methods/LOG_EVIDENCE_PIPELINE.md#69-corpus-handle-lifecycle-753).
 
@@ -30,7 +32,7 @@ passed.
 - `crates/cd-core/src/log_analysis/corpus_lifecycle.rs`: per-directory cell with
   a fence epoch (discard), a content generation (re-analysis publication),
   phase, and admitted-section counts. Discard = fence (notifies waiters) →
-  `on_fenced` → drain → `release_files` (store closes the shared DuckDB
+  `on_fenced` → drain → `release_files` (store tries to close the shared DuckDB
   connection) → atomic rename into `log_corpora/.discarding/` → `Discarded`
   tombstone (bounded, `MAX_RETAINED_TOMBSTONES = 256`) → best-effort reclaim.
   Rollback to the prior phase on pre-rename failure (fenced handles then
@@ -153,7 +155,8 @@ Written but **not executed** (require real `cd-core` with DuckDB):
   `query_result_that_overlapped_a_discard_start_is_rejected` (cross-thread),
   `discard_closes_the_shared_connection_before_unpublishing` (asserts the
   stale handle's underlying connection no longer reaches the corpus schema),
-  `direct_scan_waiting_for_the_connection_during_a_discard_fails_as_discarded`,
+  `direct_scan_waiting_for_the_connection_during_a_discard_fails_as_discarded`
+  (deterministic since the successor, §8),
   `failed_discard_changes_nothing_on_disk_and_can_be_retried`,
   `publication_makes_open_handles_non_current_and_new_opens_wait`.
 - `reanalyze.rs`: `successful_reanalysis_makes_retained_handles_non_current_but_live`,
@@ -203,8 +206,19 @@ failure rows, test recipe, anchors, matrix row, and residuals updated.
   rely on lazy eviction: stale entries are never served but are dropped on the
   next cache access rather than inside the fence.
 - An in-flight DuckDB query on a stale handle is not interrupted; its result is
-  rejected when it completes, and the discard's release step waits for it
-  (bounded at 120 s; past that the files stay open until the query ends).
+  rejected when it completes, and the discard's release step waits for it,
+  bounded at 120 s. If that wait times out (or the inert connection cannot be
+  created), nothing is swapped or retired: the old **real** connection stays
+  registered and open until the **last** retained stale handle holding it
+  drops (for example a linked turn's sticky slot or a broad-triage job), not
+  merely until the query ends. POSIX directory renames still succeed with
+  files open. On hosts where open files block directory renames (Windows) the
+  unpublish may then fail and the discard rolls back. Neither path has been
+  observed on such a host or in a packaged/native build.
+- The inert-connection guarantee covers **fenced** access only: every fenced
+  DuckDB access re-checks the fence after taking the connection lock and never
+  queries the inert connection. The infallible, unfenced `event_count()` may
+  query it and then returns 0.
 - Each discard that still has retained stale handles allocates one inert
   in-memory DuckDB instance that lives until the last stale handle drops
   (for a linked turn, the end of the turn).
@@ -226,7 +240,7 @@ and dispositions:
 | # | Finding | Disposition |
 | --- | --- | --- |
 | 1 | `lib.rs` test `blocking_helpers_preserve_startup_read_results` still called the removed `handles.remove` (test-target compile error) | Fixed: `invalidate`; every cache method call in `lib.rs` re-audited (only `open`/`invalidate`/`discard`) |
-| 2 | Directory rename with open DuckDB files may fail on Windows | Mitigated: discard closes the shared connection after the drain, before the rename; Windows still unobserved (§6) |
+| 2 | Directory rename with open DuckDB files may fail on Windows | Mitigated: discard closes the shared connection after the drain, before the rename, when its bounded (120 s) wait succeeds; after a timeout the real connection stays open until the last retained stale handle drops (§6); Windows still unobserved |
 | 3 | Fence did not `notify_all` condvar waiters | Fixed; regression `fence_wakes_phase_observers…` (M14) |
 | 4 | A rolled-back discard made handles claim "discarded" | Fixed: phase-aware stale error ("interrupted discard; still exists"), not classified as a discard (M13). Before a provider round it routes to the stale-snapshot terminal; if the fence and its rollback both land during final synthesis, the answer is released — its evidence predates the fence and the corpus is unchanged |
 | 5 | New terminal reason not classified as withheld | Fixed within scope: reason `linked_log_snapshot_stale`, distinct error code kept; dedicated reason noted as an `events.rs` follow-up |
@@ -240,9 +254,44 @@ Second independent review (fix delta `c1d3bea..7f3c2c7`, read-only; one
 | # | Finding | Disposition |
 | --- | --- | --- |
 | 1 | Direct `live_db` callers that passed the pre-check before the fence could query the swapped-in inert connection (catalog error, not a discard error); `event_count` returns 0 for stale handles | Fixed: `live_db` re-checks the fence after taking the connection lock (regression `direct_scan_waiting_for_the_connection_during_a_discard_fails_as_discarded`); `event_count` documented as infallible/0 |
-| 2 | Release waited on the connection mutex without a bound | Fixed: bounded, poison-tolerant wait (120 s); on timeout files stay open until the query ends |
+| 2 | Release waited on the connection mutex without a bound | Fixed: bounded, poison-tolerant wait (120 s). The timeout consequence ("files stay open until the query ends") was stated wrongly here; corrected in §8 |
 | 3 | Registry entry removed before the inert connection existed (two file connections possible on failure + rollback) | Fixed: inert connection created first; entry retired only while that exact connection is locked (`detach`, M15) |
 | 4 | Doc overstated the rolled-back-discard terminal | Corrected (row 4 above) |
 | 5 | `ensure_live` takes the cell lock under host locks, contradicting the module's lock list; stale `ensure_live` doc in store | Docs corrected (cell lock is a leaf on the stale path) |
 | 6 | One in-memory DuckDB instance per discard with retained stale handles; sticky slot never reopens after a rollback | Residual (§6) |
 | 7 | Rollback test used `event_count`; release test proved only registry removal | Strengthened: real-schema query after rollback; inert-connection assertion |
+
+## 8. Final review (review 3) and custodian-admitted successor
+
+Review 3: the same reviewer agent `ad68937cd62855578`, resumed for a read-only
+exact-source check of `674634e`. Verdict **NO BLOCKER**, with three LOW
+findings. The custodian then admitted a successor by the same author, limited
+to `store.rs` (regression test and accurate residual comments, no new
+behavior), `corpus_lifecycle.rs` (documentation), this file, and
+`LOG_EVIDENCE_PIPELINE.md`.
+
+| # | Review-3 finding | Successor change |
+| --- | --- | --- |
+| 1 | `direct_scan_waiting_for_the_connection_during_a_discard_fails_as_discarded` ordered the fence before releasing the held connection lock only with a 150 ms sleep; a late fence could let the scan return rows, and a late scan could pass only through the pre-check | Deterministic rewrite. A `cfg(test)`-only observation point in `live_db`, after the pre-check and before the lock wait (`set_live_db_hook_for_tests` / `run_live_db_hook`, keyed by corpus id and compiled out of non-test builds), proves the scan passed the pre-check while live. `discard_with`'s fence callback proves the fence is up before the test releases the held connection. With the pre-check proven passed, a discard error can only come from the post-lock re-check, whichever of the scan and the release takes the lock first. Every wait is `recv_timeout` on a bounded `sync_channel`, threads are joined only after they report, and a drop guard removes the hook on every exit path. No sleep remains in this test |
+| 2 | The timeout residual was understated: on a release timeout the old real connection stays open until the last retained stale handle drops, and two statements claimed unconditionally that no file stays open | Corrected in `release_shared_connection` and `discard_with` docs, the module's transition step 4, handbook §6.9 and §16, and §6–§7 here |
+| 3 | The handbook said no stale handle ever queries the inert connection, but the unfenced `event_count()` does (and returns 0) | Corrected to "no *fenced* access" plus the explicit `event_count()` caveat (handbook §6.9, §6 here, `release_shared_connection` docs) |
+
+Successor verification, actually run: `rustfmt --edition 2021 --check` on
+`store.rs` and `corpus_lifecycle.rs` (the first run failed on one assertion
+layout, which was then fixed by rustfmt and rechecked clean); the recursive
+check rooted at `log_analysis/mod.rs` (clean); and
+`scripts/check_design_handbook.mjs` (OK). No added line exceeds 100
+characters.
+
+Known remaining wording outside the admitted successor paths: the comment at
+`crates/cd-core/src/tool_host.rs:4000` ("the discard already closed its
+database files") holds only when the release step succeeds. It is part of the
+original 13-path reservation but not of this four-path successor, so it is
+left unchanged pending admission.
+
+**Not run:** the rewritten regression test and the seam have not been
+compiled or executed. They need cd-core with DuckDB, a route that is not
+admitted in this environment. The standalone lifecycle and cache batches were
+not rerun, since only documentation and this DuckDB test changed. Code review
+of the successor is not compilation, and every gate in §4 is still
+outstanding.

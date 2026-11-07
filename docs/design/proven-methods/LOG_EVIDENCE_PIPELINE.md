@@ -677,8 +677,10 @@ makes discard and republication authoritative for all of them:
 - **Discard transition** (`LogCorpus::discard_with`): fence (phase
   `Discarding`, epoch += 1, waiters notified) → host `on_fenced` hook
   invalidates caches → drain admitted cold opens and publications → release
-  the corpus's shared DuckDB connection (stale handles keep an inert
-  in-memory connection, so no file in the directory stays open in-process) →
+  the corpus's shared DuckDB connection (on success stale handles keep an
+  inert in-memory connection and no file in the directory stays open
+  in-process; after a 120 s release timeout the old real connection stays
+  open until the last retained stale handle drops) →
   atomically rename `log_corpora/{id}` into the unlisted
   `log_corpora/.discarding/` → publish `Discarded` (a bounded tombstone
   retained after the last handle drops) → best-effort reclaim. A failure
@@ -717,10 +719,12 @@ state lock. The release step creates the inert connection first, waits
 (bounded) on the corpus's own connection mutex for at most one in-flight
 query, retires that exact registry entry while holding it (connection →
 registry; nothing takes them in the other order), and drops the old
-connection outside every lock. Every fenced DuckDB access re-checks the fence
-after taking the connection lock, so no stale handle ever queries the inert
-connection. A discard should not be issued while the caller holds that
-corpus's connection (the release would wait out its bound).
+connection outside every lock. Every *fenced* DuckDB access re-checks the
+fence after taking the connection lock, so no fenced access queries the inert
+connection; the infallible, unfenced `event_count()` may query it and returns
+0. A discard should not be issued while the caller holds that corpus's
+connection: the release would wait out its 120 s bound and then leave the old
+real connection open until the last retained stale handle drops.
 
 ## 7. Performance and bounds
 
@@ -971,8 +975,13 @@ to “helpfully” interpret an offsetless production timestamp.
 - #753 (local integration): the discard fence and tombstones are process-local;
   another process opening the same cache is not fenced. The release step waits
   for (does not interrupt) one in-flight query on the discarded corpus's
-  connection. Windows directory-rename behaviour with the connection released
-  is not yet observed on a Windows host. A dedicated withheld turn reason for
+  connection, bounded at 120 s. If the wait times out, nothing is swapped or
+  retired: the old real connection stays open until the last retained stale
+  handle holding it drops (for example a linked turn's sticky slot), not
+  merely until the query ends. POSIX directory renames succeed with files
+  open; on hosts where open files block directory renames (Windows) the
+  unpublish may then fail and roll back. Neither the release nor the rename
+  path has been observed on a Windows host or in a packaged/native build. A dedicated withheld turn reason for
   discards would need `crates/cd-core/src/events.rs` (outside this slice); the
   turn currently ends with the existing withheld reason
   `linked_log_snapshot_stale`. Sidecar writers outside
