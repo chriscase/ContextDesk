@@ -4,8 +4,10 @@ Issue: [#753](https://github.com/chriscase/ContextDesk/issues/753) — make log-
 discard atomic and corpus opens single-flight.
 
 Base: `b54844cb9e5a6e80bcde806e10ddcaf0d79fc2b6` (tree
-`9ecc54e25c7facf610f9e6ce445245f64c5d048c`). Candidate: the commit on
-`claude/contextdesk-753-corpus-cache-lifecycle` that adds this file.
+`9ecc54e25c7facf610f9e6ce445245f64c5d048c`). Candidate: two commits on
+`claude/contextdesk-753-corpus-cache-lifecycle` — the implementation commit
+(`c1d3bea`) and the commit that updates this file with the independent-review
+fixes (§7).
 
 Handbook: [Log evidence pipeline §6.9](../design/proven-methods/LOG_EVIDENCE_PIPELINE.md#69-corpus-handle-lifecycle-753).
 
@@ -27,26 +29,36 @@ passed.
 
 - `crates/cd-core/src/log_analysis/corpus_lifecycle.rs`: per-directory cell with
   a fence epoch (discard), a content generation (re-analysis publication),
-  phase, and admitted-section counts. Discard = fence → `on_fenced` →
-  drain → atomic rename into `log_corpora/.discarding/` → `Discarded`
+  phase, and admitted-section counts. Discard = fence (notifies waiters) →
+  `on_fenced` → drain → `release_files` (store closes the shared DuckDB
+  connection) → atomic rename into `log_corpora/.discarding/` → `Discarded`
   tombstone (bounded, `MAX_RETAINED_TOMBSTONES = 256`) → best-effort reclaim.
-  Rollback on pre-rename failure; idempotent re-discard.
+  Rollback to the prior phase on pre-rename failure (fenced handles then
+  report an *interrupted* discard, not "discarded"); idempotent re-discard;
+  ids validated inside the crate-private discard entry point. Also hosts
+  `SharedPerCorpus<T>`, the per-key single-flight registry now backing the
+  store's one-connection-per-database map.
 - `store.rs`: every `LogCorpus` carries a `CorpusLifecycleTicket`; `open`,
   `create`, staging and publication-validation opens are admitted;
   `with_connection` and fallible DuckDB accessors are fenced before (and
-  `with_connection`/`load_all_events` after) the query; `discard_with` hook.
+  `with_connection`/`load_all_events` after) the query; `discard_with` hook;
+  the shared-connection registry no longer holds a process-wide lock across
+  `Connection::open` + schema init; discard releases the corpus's shared
+  connection after the drain and before the rename.
 - `search.rs`, `why.rs`: explicit pre/post fences (`with_events` degrades load
   errors to empty, so a stale handle must not look like "no results").
 - `reanalyze.rs`: sidecar replacement runs inside a lifecycle publication;
   stops once discarded; a fenced validation reopen rolls both sidecars back.
 - `tool_host.rs`: stale slot hits and stale seeded preflight handles are
-  rejected (slot released, never silently reopened); evidence tools re-check
+  rejected and the stale handle stays in the slot (sticky, never silently
+  reopened); cold opens run without the slot lock; evidence tools re-check
   after computing; broad-triage phase checkpoints include the fence;
   `ensure_linked_log_corpus_live`.
 - `agent.rs`: fence immediately before every linked-answer release (main
   loop, budget synthesis, synthesis retry, fast-triage, contribution,
   multi-model, multi-stage); stale-snapshot errors caused by a discard route
-  to the dedicated `linked_log_corpus_discarded` terminal.
+  to the dedicated terminal: error code `linked_log_corpus_discarded`, turn
+  reason `linked_log_snapshot_stale` (already in `WITHHELD_TURN_REASONS`).
 - `desktop/src-tauri/src/log_corpus_cache.rs`: generic per-corpus single-flight
   engine + `LogCorpusHandleCache` glue (`open`, `invalidate`, `discard`).
   `lib.rs`: old global-lock cache removed; `discard_log_corpus` is now an async
@@ -77,18 +89,19 @@ directly, with no cargo, no registry and no network:
 
 | Harness | What is real | What is shimmed |
 | --- | --- | --- |
-| Lifecycle | `corpus_lifecycle.rs` (all code + 15 tests) | `crate::error` (same `Message`/`Policy`/`Io` variants and `Display`), `tempfile::tempdir` |
+| Lifecycle | `corpus_lifecycle.rs` (all code + 21 tests) | `crate::error` (same `Message`/`Policy`/`Io` variants and `Display`), `tempfile::tempdir` |
 | Desktop cache | `log_corpus_cache.rs` (all code + 11 tests) **and** the real `corpus_lifecycle.rs` | `cd_core::log_analysis::LogCorpus` replaced by a fake store with the same admit → read → finish(retry) structure, no DuckDB |
 
 Results (each suite run three times, `--test-threads=8`):
 
 ```text
-lifecycle_tests  : test result: ok. 15 passed; 0 failed (x3)
-desktop_cache    : test result: ok. 11 passed; 0 failed (x3)
-rustc -D warnings (lib + test targets)            : clean
-clippy-driver -D warnings (lifecycle lib + test)  : clean
-clippy-driver -D warnings (cache test target)     : clean
-clippy-driver -D warnings -A dead_code (cache lib, harness has no lib.rs callers): clean
+lifecycle_tests  : test result: ok. 21 passed; 0 failed (x3, final sources)
+desktop_cache    : test result: ok. 11 passed; 0 failed (x3, final sources)
+rustc -D warnings (test targets)                   : clean
+clippy-driver -D warnings (lifecycle test, cache test): clean
+clippy-driver -D warnings -A dead_code (lifecycle lib, cache lib): clean
+  (dead_code allowed only where the real callers — store.rs / lib.rs — are
+   absent from the harness; the shim cd_core rlib likewise)
 rustfmt --check: every touched .rs file, plus recursive checks rooted at
   crates/cd-core/src/log_analysis/mod.rs and desktop/src-tauri/src/lib.rs: clean
 ```
@@ -109,10 +122,17 @@ A probe file (`v.len() == 0`) confirmed `clippy-driver` was linting
 | M7 | Panicking leader publishes no outcome | `panicking_initialization_releases_waiters_and_allows_retry` |
 | M8 | Hits do not refresh LRU order | `four_entry_lru_bound_is_preserved` |
 | M9 | Publication start does not advance the content generation | `open_overlapping_a_publication_start_must_reopen`, `publication_is_drained_and_opens_wait…` |
+| M10 | Shared-connection registry lock held across the open | `shared_registry_coalesces_same_key_and_keeps_keys_independent` |
+| M11 | Discard skips the file-release step | `files_are_released_after_the_drain_and_before_unpublish` |
+| M12 | Discard entry point skips id validation | `discard_rejects_ids_that_could_escape_log_corpora` |
+| M13 | Rolled-back fence reports "discarded" | `unpublish_failure_rolls_back_to_live_and_retry_succeeds` |
+| M14 | Fence does not notify condvar waiters | `fence_wakes_phase_observers_without_waiting_for_their_timeout` |
 
 M3 initially survived (the drain assertion raced the rename); the drain tests
 were strengthened with a bounded observation window that a correct discard can
-never violate, after which M3 was detected.
+never violate, after which M3 was detected. M1–M6, M9 and M10–M14 were re-run
+on the final sources and all were detected; M7/M8 touch code unchanged since
+their run.
 
 ## 4. Not run (honest gate status)
 
@@ -129,7 +149,8 @@ Written but **not executed** (require real `cd-core` with DuckDB):
 
 - `store.rs`: `concurrent_open_and_discard_never_publishes_a_surviving_handle`
   (barrier via per-corpus test open hook),
-  `query_result_that_overlapped_a_discard_start_is_rejected`,
+  `query_result_that_overlapped_a_discard_start_is_rejected` (cross-thread),
+  `discard_closes_the_shared_connection_before_unpublishing`,
   `failed_discard_changes_nothing_on_disk_and_can_be_retried`,
   `publication_makes_open_handles_non_current_and_new_opens_wait`.
 - `reanalyze.rs`: `successful_reanalysis_makes_retained_handles_non_current_but_live`,
@@ -138,6 +159,8 @@ Written but **not executed** (require real `cd-core` with DuckDB):
 - `search.rs`: `search_on_a_discarded_handle_fails_closed_instead_of_returning_evidence`.
 - `why.rs`: `why_analysis_on_a_discarded_handle_fails_visibly_instead_of_returning_empty`.
 - `tool_host.rs`: `discarded_turn_corpus_stops_returning_evidence_and_fails_visibly`,
+  `evidence_computed_while_a_discard_begins_is_returned_as_a_failure`
+  (test hook between tool computation and the post-tool fence),
   `discard_racing_a_turn_preflight_handle_fails_the_seed_and_the_pin`.
 - `agent.rs`: `linked_answer_is_withheld_when_corpus_is_discarded_during_final_synthesis`,
   `linked_tool_round_after_discard_fails_visibly_and_withholds_answer`.
@@ -157,10 +180,10 @@ desktop cache call sites) must be re-run under cargo; they were not executed.
 | Discard rejects/cancels new operations; racing open cannot reinsert | admission epoch check, phase gate, flight detach + leader liveness check | `open_admitted_before_the_fence…`, `open_racing_discard_cannot_reinsert_a_handle` PASS; store barrier test NOT_RUN |
 | Active linked turns stop returning evidence; failure visible | ToolHost slot/seed/post-tool fences; agent pre-release fence; `linked_log_corpus_discarded` | ToolHost/agent tests written, NOT_RUN |
 | Barrier-controlled concurrent open/discard: no handle survives discard success | lifecycle + store + cache barrier tests | Lifecycle/cache PASS; store NOT_RUN |
-| Per-corpus single-flight: same-id coalesce, cross-id independent, hits unblocked | `SingleFlightCorpusCache::get_or_open` | PASS (+ M4 detected) |
+| Per-corpus single-flight: same-id coalesce, cross-id independent, hits unblocked | `SingleFlightCorpusCache::get_or_open`; core `SharedPerCorpus` connection registry | PASS (+ M4, M10 detected); real DuckDB opens NOT_RUN |
 | Preserve four-entry bound and deterministic reanalysis invalidation | `LOG_CORPUS_HANDLE_CACHE_CAP = 4`; content generation + `invalidate` after any finished re-analysis | `four_entry_lru_bound_is_preserved`, `republication_and_explicit_invalidation_force_a_reopen` PASS; reanalysis store tests NOT_RUN |
 | Concurrency tests: coalescing, independence, failure/retry, reanalysis, discard, poisoned/cancelled init | cache + lifecycle suites | PASS in harness |
-| Locks out of DuckDB open/query; lock ordering documented | module docs, handbook §6.9 | Review + M4 |
+| Locks out of DuckDB open/query; lock ordering documented | module docs, handbook §6.9 | Review + M4/M10; residual: release step waits for one in-flight query |
 | Retest linked search/cluster/timeline reuse and packaged multi-window lifecycle | — | NOT_RUN (cargo + packaged gates pending) |
 
 Handbook impact: `LOG_EVIDENCE_PIPELINE.md` status row, invariant 14, §6.9,
@@ -177,4 +200,26 @@ failure rows, test recipe, anchors, matrix row, and residuals updated.
   rely on lazy eviction: stale entries are never served but are dropped on the
   next cache access rather than inside the fence.
 - An in-flight DuckDB query on a stale handle is not interrupted; its result is
-  rejected when it completes.
+  rejected when it completes, and the discard's release step waits for it.
+- Windows: the release step is meant to let the unpublish rename succeed with
+  handles still retained; this has not been observed on a Windows host (the
+  Windows CI shards will run the new tests).
+- A dedicated withheld turn reason (`linked_log_corpus_discarded`) would need a
+  one-entry change to `WITHHELD_TURN_REASONS` in `crates/cd-core/src/events.rs`,
+  outside this slice; the existing withheld reason is used instead.
+
+## 7. Independent review and dispositions
+
+A distinct Claude reviewer inspected `c1d3bea` read-only (no build). Findings
+and dispositions:
+
+| # | Finding | Disposition |
+| --- | --- | --- |
+| 1 | `lib.rs` test `blocking_helpers_preserve_startup_read_results` still called the removed `handles.remove` (test-target compile error) | Fixed: `invalidate`; every cache method call in `lib.rs` re-audited (only `open`/`invalidate`/`discard`) |
+| 2 | Directory rename with open DuckDB files may fail on Windows | Mitigated: discard closes the shared connection after the drain, before the rename; Windows still unobserved (§6) |
+| 3 | Fence did not `notify_all` condvar waiters | Fixed; regression `fence_wakes_phase_observers…` (M14) |
+| 4 | A rolled-back discard made handles claim "discarded" | Fixed: phase-aware stale error ("interrupted discard; still exists"), which routes to the existing stale-snapshot terminal (M13) |
+| 5 | New terminal reason not classified as withheld | Fixed within scope: reason `linked_log_snapshot_stale`, distinct error code kept; dedicated reason noted as an `events.rs` follow-up |
+| 6 | Core connection registry held a process-wide lock across `Connection::open`; ToolHost slot held across cold open | Fixed: per-key `SharedPerCorpus` registry (M10); ToolHost opens without the slot lock |
+| 7 | Public discard entry point skipped id validation | Fixed: crate-private and validating (M12) |
+| 8 | Prune test could not detect pruning; post-tool fence unexercised; answer fence non-sticky | Fixed: `Weak`-based prune assertion; ToolHost hook test; sticky stale slot |

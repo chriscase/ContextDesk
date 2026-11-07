@@ -39,13 +39,17 @@
 //!    finish. Their completion re-checks the epoch, so none of them can publish
 //!    a live handle; once drained nothing in this process is still creating or
 //!    replacing files in the directory.
-//! 4. **Unpublish** — atomically rename `log_corpora/{id}` to
+//! 4. **Release** — the caller's `release_files` hook closes the corpus's
+//!    shared DuckDB connection (stale handles are left with an inert
+//!    in-memory connection), so no file in the directory stays open in this
+//!    process and the move below also works where open files block renames.
+//! 5. **Unpublish** — atomically rename `log_corpora/{id}` to
 //!    `log_corpora/.discarding/{id}.{suffix}`. This rename is the instant the
 //!    corpus leaves the filesystem namespace. If it fails, nothing on disk has
-//!    changed: the phase rolls back to `Live` (old handles stay stale, fresh
-//!    opens receive the new epoch) and the error is returned for an honest
-//!    retry.
-//! 5. **Publish** — phase → `Discarded`, then best-effort removal of the
+//!    changed: the phase rolls back to its prior value (old handles stay
+//!    stale and report an *interrupted* discard, fresh opens receive the new
+//!    epoch) and the error is returned for an honest retry.
+//! 6. **Publish** — phase → `Discarded`, then best-effort removal of the
 //!    renamed tree (and of older residue under `.discarding/`). A removal
 //!    failure leaves only unlisted residue that later discards sweep; it can
 //!    never resurrect or partially expose the corpus.
@@ -63,6 +67,10 @@
 //! * Host cache locks may be held while reading ticket atomics
 //!   ([`CorpusLifecycleTicket::is_live`], [`CorpusLifecycleTicket::is_current`])
 //!   but never while calling a function in this module that takes a cell lock.
+//! * [`SharedPerCorpus`] registry mutex → nothing. Held only for map
+//!   bookkeeping; a per-key gate makes same-key initializers wait for one
+//!   leader while different keys initialize concurrently, so no registry lock
+//!   is held across DuckDB open or schema initialization.
 //!
 //! The lifecycle is process-local, like the shared DuckDB connection registry
 //! in [`super::store`]. Other processes opening the same cache are outside this
@@ -392,16 +400,31 @@ impl CorpusLifecycleTicket {
         self.is_live() && self.cell.content.load(Ordering::SeqCst) == self.content
     }
 
-    /// Fail closed with a [`LOG_CORPUS_DISCARDED`] error for a stale handle.
+    /// Fail closed for a stale handle.
+    ///
+    /// While a discard is running or after it succeeded the error starts with
+    /// [`LOG_CORPUS_DISCARDED`]. If the discard that fenced this handle rolled
+    /// back (the corpus still exists), the error says so instead, because the
+    /// corpus was not discarded and a fresh open is valid.
     pub fn ensure_live(&self) -> CoreResult<()> {
         if self.is_live() {
-            Ok(())
-        } else {
-            Err(discarded_error(
+            return Ok(());
+        }
+        Err(match self.cell.phase() {
+            CorpusLifecyclePhase::Discarding => discarded_error(
+                &self.cell.directory_id,
+                "discard in progress; this handle's results are not evidence",
+            ),
+            CorpusLifecyclePhase::Discarded => discarded_error(
                 &self.cell.directory_id,
                 "this handle was invalidated by a discard; its results are not evidence",
-            ))
-        }
+            ),
+            CorpusLifecyclePhase::Live => CoreError::Message(format!(
+                "log corpus {} handle was invalidated by an interrupted discard; \
+                 the corpus still exists, reopen it and retry",
+                self.cell.directory_id
+            )),
+        })
     }
 
     /// Shared cell (tests and diagnostics).
@@ -594,16 +617,38 @@ impl Drop for DiscardRollback<'_> {
 
 /// Discard `cache_root/log_corpora/{corpus_id}` as one fenced transition.
 ///
-/// The caller must have validated `corpus_id` as a public corpus id.
-/// `on_fenced` runs after the fence and before the directory is unpublished,
-/// with no lifecycle lock held; hosts use it to drop cached handles and detach
-/// in-flight cache initializations.
-pub fn discard_corpus_root(
+/// `corpus_id` must be a public corpus id (validated here as well, since this
+/// function moves and deletes directories). `on_fenced` runs right after the
+/// fence and `release_files` right after the drain, both before the directory
+/// is unpublished and both with no lifecycle lock held: hosts use the first to
+/// drop cached handles and detach in-flight cache initializations, the store
+/// uses the second to close the corpus's shared DuckDB connection.
+pub(crate) fn discard_corpus_root(
     cache_root: &Path,
     corpus_id: &str,
     on_fenced: impl FnOnce(),
+    release_files: impl FnOnce(),
 ) -> CoreResult<DiscardOutcome> {
-    discard_corpus_root_with(cache_root, corpus_id, on_fenced, &remove_tree)
+    discard_corpus_root_with(
+        cache_root,
+        corpus_id,
+        on_fenced,
+        release_files,
+        &remove_tree,
+    )
+}
+
+fn validate_public_corpus_id(id: &str) -> CoreResult<()> {
+    let is_safe = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if is_safe {
+        Ok(())
+    } else {
+        Err(CoreError::Message("invalid corpus id".into()))
+    }
 }
 
 fn remove_tree(path: &Path) -> std::io::Result<()> {
@@ -614,8 +659,10 @@ fn discard_corpus_root_with(
     cache_root: &Path,
     corpus_id: &str,
     on_fenced: impl FnOnce(),
+    release_files: impl FnOnce(),
     remove_tree: &dyn Fn(&Path) -> std::io::Result<()>,
 ) -> CoreResult<DiscardOutcome> {
+    validate_public_corpus_id(corpus_id)?;
     let cell = lifecycle_for(cache_root, corpus_id);
 
     // 1. Fence. Concurrent discards of the same corpus serialize here.
@@ -632,6 +679,8 @@ fn discard_corpus_root_with(
         cell.epoch.fetch_add(1, Ordering::SeqCst);
         prior
     };
+    // Wake phase observers and admission waiters: they must see the fence now.
+    cell.changed.notify_all();
     let rollback = DiscardRollback {
         cell: &cell,
         prior,
@@ -656,7 +705,10 @@ fn discard_corpus_root_with(
         }
     }
 
-    // 4. Unpublish atomically.
+    // 4. Close this process's files in the directory (no lifecycle lock held).
+    release_files();
+
+    // 5. Unpublish atomically.
     let corpora = cache_root.join("log_corpora");
     let root = corpora.join(corpus_id);
     let tombstone = match std::fs::symlink_metadata(&root) {
@@ -665,7 +717,7 @@ fn discard_corpus_root_with(
         Ok(_) => unpublish(&corpora, &root, corpus_id)?,
     };
 
-    // 5. Publish discard success, then reclaim space best-effort.
+    // 6. Publish discard success, then reclaim space best-effort.
     rollback.publish_discarded();
     let residue = tombstone
         .as_deref()
@@ -729,6 +781,159 @@ fn reclaim(
     residue
 }
 
+/// Process-wide registry of one shared resource per corpus key (for example
+/// the single DuckDB connection per corpus database).
+///
+/// Initialization is single-flight **per key**: same-key callers wait for one
+/// leader, different keys initialize concurrently, and the registry mutex is
+/// never held while `open` runs (DuckDB open and schema initialization). Values
+/// are held weakly, so a resource lives exactly as long as its handles.
+pub(crate) struct SharedPerCorpus<T> {
+    slots: Mutex<HashMap<PathBuf, SharedSlot<T>>>,
+}
+
+enum SharedSlot<T> {
+    Ready(std::sync::Weak<T>),
+    Opening(Arc<OpeningGate>),
+}
+
+struct OpeningGate {
+    done: Mutex<bool>,
+    finished: Condvar,
+}
+
+impl OpeningGate {
+    fn finish(&self) {
+        *self.done.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.finished.notify_all();
+    }
+
+    fn wait(&self) {
+        let done = self.done.lock().unwrap_or_else(PoisonError::into_inner);
+        let _done = self
+            .finished
+            .wait_while(done, |done| !*done)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+enum SharedRole<T> {
+    Ready(Arc<T>),
+    Wait(Arc<OpeningGate>),
+    Lead(Arc<OpeningGate>),
+}
+
+/// Releases a leader's gate on every exit path (success, error, unwind).
+struct SharedLeader<'a, T> {
+    registry: &'a SharedPerCorpus<T>,
+    key: &'a Path,
+    gate: Arc<OpeningGate>,
+}
+
+impl<T> Drop for SharedLeader<'_, T> {
+    fn drop(&mut self) {
+        {
+            let mut slots = self.registry.lock_slots();
+            let ours = matches!(
+                slots.get(self.key),
+                Some(SharedSlot::Opening(gate)) if Arc::ptr_eq(gate, &self.gate)
+            );
+            if ours {
+                slots.remove(self.key);
+            }
+        }
+        self.gate.finish();
+    }
+}
+
+impl<T> SharedPerCorpus<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn lock_slots(&self) -> MutexGuard<'_, HashMap<PathBuf, SharedSlot<T>>> {
+        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Shared value for `key`, opening it once if no live value exists.
+    pub(crate) fn get_or_open(
+        &self,
+        key: &Path,
+        open: impl FnOnce() -> CoreResult<T>,
+    ) -> CoreResult<Arc<T>> {
+        let mut open = Some(open);
+        loop {
+            let role = {
+                let mut slots = self.lock_slots();
+                slots.retain(|_, slot| match slot {
+                    SharedSlot::Ready(value) => value.strong_count() > 0,
+                    SharedSlot::Opening(_) => true,
+                });
+                match slots.get(key) {
+                    Some(SharedSlot::Ready(value)) => match value.upgrade() {
+                        Some(value) => SharedRole::Ready(value),
+                        None => {
+                            let gate = Arc::new(OpeningGate {
+                                done: Mutex::new(false),
+                                finished: Condvar::new(),
+                            });
+                            slots.insert(key.to_path_buf(), SharedSlot::Opening(Arc::clone(&gate)));
+                            SharedRole::Lead(gate)
+                        }
+                    },
+                    Some(SharedSlot::Opening(gate)) => SharedRole::Wait(Arc::clone(gate)),
+                    None => {
+                        let gate = Arc::new(OpeningGate {
+                            done: Mutex::new(false),
+                            finished: Condvar::new(),
+                        });
+                        slots.insert(key.to_path_buf(), SharedSlot::Opening(Arc::clone(&gate)));
+                        SharedRole::Lead(gate)
+                    }
+                }
+            };
+            match role {
+                SharedRole::Ready(value) => return Ok(value),
+                // The leader finished (published or failed); look again.
+                SharedRole::Wait(gate) => gate.wait(),
+                SharedRole::Lead(gate) => {
+                    let leader = SharedLeader {
+                        registry: self,
+                        key,
+                        gate,
+                    };
+                    let Some(open) = open.take() else {
+                        return Err(CoreError::Message(
+                            "shared corpus resource initializer already consumed".into(),
+                        ));
+                    };
+                    let value = Arc::new(open()?);
+                    self.lock_slots()
+                        .insert(key.to_path_buf(), SharedSlot::Ready(Arc::downgrade(&value)));
+                    drop(leader);
+                    return Ok(value);
+                }
+            }
+        }
+    }
+
+    /// Remove and return the live value for `key` so a discard can close it.
+    /// An in-progress initialization is left untouched (discard drains every
+    /// admitted open before it releases files, so none is expected).
+    pub(crate) fn take(&self, key: &Path) -> Option<Arc<T>> {
+        let mut slots = self.lock_slots();
+        match slots.get(key) {
+            Some(SharedSlot::Ready(_)) => match slots.remove(key) {
+                Some(SharedSlot::Ready(value)) => value.upgrade(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,6 +959,10 @@ mod tests {
         ticket
     }
 
+    fn discard(cache: &Path, id: &str, on_fenced: impl FnOnce()) -> CoreResult<DiscardOutcome> {
+        discard_corpus_root(cache, id, on_fenced, || {})
+    }
+
     fn assert_discarded(error: &CoreError) {
         assert!(
             is_corpus_discarded_error(error),
@@ -770,7 +979,7 @@ mod tests {
         assert!(retained.is_live() && retained.is_current());
 
         let fenced_view = std::cell::Cell::new(None);
-        let outcome = discard_corpus_root(cache.path(), "c-1", || {
+        let outcome = discard(cache.path(), "c-1", || {
             // Inside the transition: already fenced, still on disk.
             fenced_view.set(Some((retained.is_live(), root.exists())));
         })
@@ -815,7 +1024,7 @@ mod tests {
         let (fenced_tx, fenced_rx) = mpsc::channel();
         let cache_root = cache.path().to_path_buf();
         let discard = std::thread::spawn(move || {
-            discard_corpus_root(&cache_root, "race-open", move || {
+            discard(&cache_root, "race-open", move || {
                 fenced_tx.send(()).unwrap();
             })
         });
@@ -855,7 +1064,7 @@ mod tests {
         let (fenced_tx, fenced_rx) = mpsc::channel();
         let cache_root = cache.path().to_path_buf();
         let discard = std::thread::spawn(move || {
-            discard_corpus_root(&cache_root, "open-error", move || {
+            discard(&cache_root, "open-error", move || {
                 fenced_tx.send(()).unwrap();
             })
         });
@@ -925,7 +1134,7 @@ mod tests {
         let (fenced_tx, fenced_rx) = mpsc::channel();
         let cache_root = cache.path().to_path_buf();
         let discard = std::thread::spawn(move || {
-            discard_corpus_root(&cache_root, "pub-discard", move || {
+            discard(&cache_root, "pub-discard", move || {
                 fenced_tx.send(()).unwrap();
             })
         });
@@ -952,17 +1161,26 @@ mod tests {
         let trash = cache.path().join("log_corpora").join(DISCARD_TRASH_DIR);
         std::fs::write(&trash, b"not a directory").unwrap();
 
-        let error = discard_corpus_root(cache.path(), "rollback", || {}).unwrap_err();
+        let error = discard(cache.path(), "rollback", || {}).unwrap_err();
         assert!(!is_corpus_discarded_error(&error), "io failure: {error}");
         assert!(root.exists(), "nothing was deleted");
         let cell = lifecycle_for(cache.path(), "rollback");
         assert_eq!(cell.phase(), CorpusLifecyclePhase::Live, "rolled back");
         assert!(!stale.is_live(), "handles fenced by the attempt stay stale");
+        let stale_error = stale.ensure_live().unwrap_err();
+        assert!(
+            !is_corpus_discarded_error(&stale_error),
+            "a rolled-back discard must not claim the corpus was discarded: {stale_error}"
+        );
+        assert!(
+            stale_error.to_string().contains("still exists"),
+            "{stale_error}"
+        );
         let fresh = opened_ticket(cache.path(), "rollback");
         assert!(fresh.is_live(), "fresh opens after rollback are live");
 
         std::fs::remove_file(&trash).unwrap();
-        let outcome = discard_corpus_root(cache.path(), "rollback", || {}).unwrap();
+        let outcome = discard(cache.path(), "rollback", || {}).unwrap();
         assert!(outcome.unpublished);
         assert!(!root.exists());
         assert!(!fresh.is_live());
@@ -974,14 +1192,14 @@ mod tests {
         let root = corpus_dir(cache.path(), "hook-panic");
         let cache_root = cache.path().to_path_buf();
         let result = std::panic::catch_unwind(move || {
-            let _ = discard_corpus_root(&cache_root, "hook-panic", || panic!("injected hook"));
+            let _ = discard(&cache_root, "hook-panic", || panic!("injected hook"));
         });
         assert!(result.is_err());
         assert!(root.exists());
         let cell = lifecycle_for(cache.path(), "hook-panic");
         assert_eq!(cell.phase(), CorpusLifecyclePhase::Live);
         assert!(
-            discard_corpus_root(cache.path(), "hook-panic", || {})
+            discard(cache.path(), "hook-panic", || {})
                 .unwrap()
                 .unpublished
         );
@@ -991,7 +1209,7 @@ mod tests {
     fn reclaim_failure_leaves_only_unlisted_residue_and_next_discard_sweeps_it() {
         let cache = tempfile::tempdir().unwrap();
         let root = corpus_dir(cache.path(), "residue-a");
-        let outcome = discard_corpus_root_with(cache.path(), "residue-a", || {}, &|_| {
+        let outcome = discard_corpus_root_with(cache.path(), "residue-a", || {}, || {}, &|_| {
             Err(std::io::Error::other("injected removal failure"))
         })
         .unwrap();
@@ -1006,7 +1224,7 @@ mod tests {
         );
 
         corpus_dir(cache.path(), "residue-b");
-        let next = discard_corpus_root(cache.path(), "residue-b", || {}).unwrap();
+        let next = discard(cache.path(), "residue-b", || {}).unwrap();
         assert_eq!(next.residue, None);
         assert!(!residue.exists(), "older residue swept");
         assert!(!cache
@@ -1021,7 +1239,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(cache.path().join("log_corpora")).unwrap();
         let ghost = opened_ticket(cache.path(), "ghost");
-        let outcome = discard_corpus_root(cache.path(), "ghost", || {}).unwrap();
+        let outcome = discard(cache.path(), "ghost", || {}).unwrap();
         assert_eq!(
             outcome,
             DiscardOutcome {
@@ -1030,7 +1248,7 @@ mod tests {
             }
         );
         assert!(!ghost.is_live());
-        let again = discard_corpus_root(cache.path(), "ghost", || {}).unwrap();
+        let again = discard(cache.path(), "ghost", || {}).unwrap();
         assert!(!again.unpublished);
     }
 
@@ -1042,7 +1260,7 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let first_root = cache.path().to_path_buf();
         let first = std::thread::spawn(move || {
-            discard_corpus_root(&first_root, "twice", move || {
+            discard(&first_root, "twice", move || {
                 fenced_tx.send(()).unwrap();
                 release_rx.recv_timeout(WAIT).unwrap();
             })
@@ -1051,7 +1269,7 @@ mod tests {
         let second_root = cache.path().to_path_buf();
         let (second_done_tx, second_done_rx) = mpsc::channel();
         let second = std::thread::spawn(move || {
-            let result = discard_corpus_root(&second_root, "twice", || {});
+            let result = discard(&second_root, "twice", || {});
             second_done_tx.send(()).unwrap();
             result
         });
@@ -1075,9 +1293,18 @@ mod tests {
         let held = opened_ticket(cache.path(), "prune");
         let same = lifecycle_for(cache.path(), "prune");
         assert!(Arc::ptr_eq(held.lifecycle(), &same), "one cell per corpus");
+        let observed = Arc::downgrade(&same);
+        // Still referenced by `held`: a lookup must not prune it.
         drop(same);
+        let _ = lifecycle_for(cache.path(), "prune-other");
+        assert!(observed.upgrade().is_some(), "referenced cell retained");
         drop(held);
-        // A fresh cell after pruning starts live; no stale state leaks forward.
+        // Unreferenced live cell: the next lookup prunes it from the registry.
+        let _ = lifecycle_for(cache.path(), "prune-other");
+        assert!(
+            observed.upgrade().is_none(),
+            "unreferenced live cell pruned"
+        );
         let fresh = lifecycle_for(cache.path(), "prune");
         assert_eq!(fresh.phase(), CorpusLifecyclePhase::Live);
         assert!(fresh.wait_for_phase(CorpusLifecyclePhase::Live, WAIT));
@@ -1088,7 +1315,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         corpus_dir(cache.path(), "late-open");
         let ticket = opened_ticket(cache.path(), "late-open");
-        discard_corpus_root(cache.path(), "late-open", || {}).unwrap();
+        discard(cache.path(), "late-open", || {}).unwrap();
         drop(ticket);
         // Force pruning passes; the tombstone is retained without referents.
         let _ = lifecycle_for(cache.path(), "other-lookup");
@@ -1097,7 +1324,7 @@ mod tests {
         assert_discarded(&cell.admit_open().unwrap_err());
         // Re-discard of a tombstone is idempotent and keeps it discarded.
         drop(cell);
-        let again = discard_corpus_root(cache.path(), "late-open", || {}).unwrap();
+        let again = discard(cache.path(), "late-open", || {}).unwrap();
         assert!(!again.unpublished);
         assert_eq!(
             lifecycle_for(cache.path(), "late-open").phase(),
@@ -1146,5 +1373,172 @@ mod tests {
         assert!(!is_corpus_discarded_error(&CoreError::Policy(
             "log corpus was discarded".into()
         )));
+    }
+
+    #[test]
+    fn files_are_released_after_the_drain_and_before_unpublish() {
+        let cache = tempfile::tempdir().unwrap();
+        let root = corpus_dir(cache.path(), "release-order");
+        let cell = lifecycle_for(cache.path(), "release-order");
+        let admission = cell.admit_open().unwrap();
+        let (fenced_tx, fenced_rx) = mpsc::channel();
+        let (released_tx, released_rx) = mpsc::channel();
+        let cache_root = cache.path().to_path_buf();
+        let release_cell = Arc::clone(&cell);
+        let release_root = root.clone();
+        let discard = std::thread::spawn(move || {
+            discard_corpus_root(
+                &cache_root,
+                "release-order",
+                move || fenced_tx.send(()).unwrap(),
+                move || {
+                    released_tx
+                        .send((release_root.exists(), release_cell.active_sections()))
+                        .unwrap();
+                },
+            )
+        });
+        fenced_rx.recv_timeout(WAIT).unwrap();
+        assert!(
+            released_rx.recv_timeout(DRAIN_OBSERVATION).is_err(),
+            "files must not be released while an admitted open runs"
+        );
+        drop(admission);
+        let (root_present, sections) = released_rx.recv_timeout(WAIT).unwrap();
+        assert!(root_present, "release happens before unpublish");
+        assert_eq!(sections, (0, 0), "release happens after the drain");
+        assert!(discard.join().unwrap().unwrap().unpublished);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn fence_wakes_phase_observers_without_waiting_for_their_timeout() {
+        let cache = tempfile::tempdir().unwrap();
+        corpus_dir(cache.path(), "wake");
+        let cell = lifecycle_for(cache.path(), "wake");
+        // A publication keeps the discard blocked in its drain, so only the
+        // fence itself can wake the observer.
+        let publication = begin_publication(cache.path(), "wake").unwrap();
+        let observer_cell = Arc::clone(&cell);
+        let observer = std::thread::spawn(move || {
+            let started = Instant::now();
+            let reached = observer_cell.wait_for_phase(CorpusLifecyclePhase::Discarding, WAIT);
+            (reached, started.elapsed())
+        });
+        std::thread::sleep(DRAIN_OBSERVATION);
+        let cache_root = cache.path().to_path_buf();
+        let discard = std::thread::spawn(move || discard(&cache_root, "wake", || {}));
+        let (reached, waited) = observer.join().unwrap();
+        assert!(reached);
+        assert!(
+            waited < WAIT / 2,
+            "the fence must notify observers (waited {waited:?})"
+        );
+        drop(publication);
+        assert!(discard.join().unwrap().unwrap().unpublished);
+    }
+
+    #[test]
+    fn discard_rejects_ids_that_could_escape_log_corpora() {
+        let cache = tempfile::tempdir().unwrap();
+        let outside = cache.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(cache.path().join("log_corpora")).unwrap();
+        for id in ["", "../outside", "a/b", ".discarding", "..", "x\\y"] {
+            assert!(discard(cache.path(), id, || {}).is_err(), "{id:?}");
+        }
+        assert!(outside.exists(), "nothing outside log_corpora is touched");
+    }
+
+    fn shared_registry() -> Arc<SharedPerCorpus<usize>> {
+        Arc::new(SharedPerCorpus::new())
+    }
+
+    #[test]
+    fn shared_registry_coalesces_same_key_and_keeps_keys_independent() {
+        let registry = shared_registry();
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let leader_registry = Arc::clone(&registry);
+        let leader_opens = Arc::clone(&opens);
+        let leader = std::thread::spawn(move || {
+            leader_registry.get_or_open(Path::new("/slow"), move || {
+                leader_opens.fetch_add(1, Ordering::SeqCst);
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(WAIT).unwrap();
+                Ok(7)
+            })
+        });
+        entered_rx.recv_timeout(WAIT).unwrap();
+
+        // A different key initializes while "/slow" is mid-open.
+        let (other_tx, other_rx) = mpsc::channel();
+        let other_registry = Arc::clone(&registry);
+        std::thread::spawn(move || {
+            let value = other_registry
+                .get_or_open(Path::new("/fast"), || Ok(1))
+                .unwrap();
+            other_tx.send(*value).unwrap();
+        });
+        assert_eq!(
+            other_rx
+                .recv_timeout(WAIT)
+                .expect("independent key not blocked"),
+            1
+        );
+
+        // Same key waits for the leader instead of opening again.
+        let waiter_registry = Arc::clone(&registry);
+        let waiter_opens = Arc::clone(&opens);
+        let waiter = std::thread::spawn(move || {
+            waiter_registry.get_or_open(Path::new("/slow"), move || {
+                waiter_opens.fetch_add(1, Ordering::SeqCst);
+                Ok(99)
+            })
+        });
+        std::thread::sleep(DRAIN_OBSERVATION);
+        assert!(
+            !waiter.is_finished(),
+            "same-key caller waits for the leader"
+        );
+        release_tx.send(()).unwrap();
+        let led = leader.join().unwrap().unwrap();
+        let joined = waiter.join().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&led, &joined), "one shared value per key");
+        assert_eq!(opens.load(Ordering::SeqCst), 1, "exactly one open");
+    }
+
+    #[test]
+    fn shared_registry_failure_and_panic_release_the_key_for_retry() {
+        let registry = shared_registry();
+        let error = registry
+            .get_or_open(Path::new("/k"), || Err(CoreError::Message("boom".into())))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "boom");
+        assert_eq!(*registry.get_or_open(Path::new("/k"), || Ok(2)).unwrap(), 2);
+
+        let panicking = Arc::clone(&registry);
+        let panicked = std::thread::spawn(move || {
+            let _ = panicking.get_or_open(Path::new("/p"), || -> CoreResult<usize> {
+                panic!("injected open panic")
+            });
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert_eq!(*registry.get_or_open(Path::new("/p"), || Ok(3)).unwrap(), 3);
+    }
+
+    #[test]
+    fn shared_registry_take_detaches_the_live_value_and_reopens_fresh() {
+        let registry = shared_registry();
+        let first = registry.get_or_open(Path::new("/t"), || Ok(1)).unwrap();
+        let taken = registry.take(Path::new("/t")).expect("live value taken");
+        assert!(Arc::ptr_eq(&first, &taken));
+        let fresh = registry.get_or_open(Path::new("/t"), || Ok(2)).unwrap();
+        assert_eq!(*fresh, 2, "a taken value is never handed out again");
+        drop((first, taken));
+        drop(fresh);
+        assert!(registry.take(Path::new("/t")).is_none(), "dead value");
     }
 }

@@ -675,13 +675,21 @@ makes discard and republication authoritative for all of them:
   *current*. Re-analysis is not a discard: turn-local snapshots stay usable,
   cross-command caches reopen.
 - **Discard transition** (`LogCorpus::discard_with`): fence (phase
-  `Discarding`, epoch += 1) → host `on_fenced` hook invalidates caches →
-  drain admitted cold opens and publications → atomically rename
-  `log_corpora/{id}` into the unlisted `log_corpora/.discarding/` → publish
-  `Discarded` (a bounded tombstone retained after the last handle drops) →
-  best-effort reclaim. A failure before the rename changes nothing on disk and
-  rolls the phase back for an honest retry; a reclaim failure leaves only
-  unlisted residue that later discards sweep.
+  `Discarding`, epoch += 1, waiters notified) → host `on_fenced` hook
+  invalidates caches → drain admitted cold opens and publications → release
+  the corpus's shared DuckDB connection (stale handles keep an inert
+  in-memory connection, so no file in the directory stays open in-process) →
+  atomically rename `log_corpora/{id}` into the unlisted
+  `log_corpora/.discarding/` → publish `Discarded` (a bounded tombstone
+  retained after the last handle drops) → best-effort reclaim. A failure
+  before the rename changes nothing on disk and restores the prior phase for
+  an honest retry; handles fenced by that attempt then report an
+  *interrupted* discard (the corpus still exists), never "discarded". A
+  reclaim failure leaves only unlisted residue that later discards sweep.
+- **Shared connection registry.** One DuckDB connection per corpus database
+  is initialized single-flight per key: same-path opens share one
+  `Connection::open` + schema initialization, while different corpora open
+  concurrently because no registry lock is held during that work.
 - **Desktop cache** ([`log_corpus_cache.rs`](../../../desktop/src-tauri/src/log_corpus_cache.rs)):
   per-corpus single flight replaces the former global-mutex cold open. Same-id
   callers coalesce, different ids initialize independently, hits never wait
@@ -689,17 +697,26 @@ makes discard and republication authoritative for all of them:
   evicted on access, failures/panics release waiters and allow retry, and
   invalidation detaches in-flight opens so their results are never inserted.
 - **Linked turns.** ToolHost rejects stale slot hits and stale seeded
-  preflight handles, re-checks the slot after every evidence tool, and the
-  agent re-checks it immediately before releasing any linked answer text
-  (main loop, budget synthesis, synthesis retry, and the broad-triage
-  fast/contribution/multi-model/multi-stage paths). A discard ends the turn
-  with `linked_log_corpus_discarded`.
+  preflight handles (the stale handle stays in the slot, so the rejection is
+  sticky for the rest of the turn and never silently reopens), re-checks the
+  slot after every evidence tool, and performs cold opens without holding the
+  slot lock. The agent re-checks immediately before releasing any linked
+  answer text (main loop, budget synthesis, synthesis retry, and the
+  broad-triage fast/contribution/multi-model/multi-stage paths). A discard
+  ends the turn with error code `linked_log_corpus_discarded` and the
+  existing withheld turn reason `linked_log_snapshot_stale`.
 
 Lock ordering: lifecycle registry → nothing; lifecycle cell → nothing (held
 only for O(1) bookkeeping and condvar waits, never across filesystem, DuckDB,
-callback, or cache work); desktop cache state → nothing (may read lifecycle
-atomics only); per-flight outcome slot → nothing. `on_fenced` runs with no
-lifecycle lock held and takes only the cache state lock.
+callback, or cache work); shared connection registry → nothing (map
+bookkeeping only; per-key gates are waited on without it); desktop cache
+state → nothing (may read lifecycle atomics only); per-flight outcome slot →
+nothing; ToolHost turn slot → lifecycle cell (only to format a stale-handle
+error). `on_fenced` runs with no lifecycle lock held and takes only the cache
+state lock. The release step waits on a corpus's own connection mutex for at
+most one in-flight query, then drops the old connection outside every lock;
+a discard must therefore never be issued while the caller holds that
+corpus's connection.
 
 ## 7. Performance and bounds
 
@@ -755,8 +772,8 @@ latency, template count, and cancellation—not only ingest throughput.
 | Malformed package             | Preflight/hash/schema checks     | Import error                  | Obtain valid package                       | No partial corpus publication             |
 | Stale evidence identity       | Source/time hint revalidation    | Stale/missing                 | Locate replacement explicitly              | No silent rebinding                       |
 | Noise overwhelms results      | User observation/filter counts   | Partial exact-template policy; #671 open | Preview/confirm a reviewed exact template; use filters otherwise | No deletion claim; incomplete lifecycle and hardening stay visible |
-| Discard races open/read/re-analysis/linked turn | Lifecycle epoch, admission completion, post-query and pre-release fences | `log corpus was discarded` error; linked turn ends `linked_log_corpus_discarded` | Reimport the logs | No surviving handle, no cache reinsertion, no evidence after discard success |
-| Discard cannot move the corpus aside | Rename/trash error before unpublish | Discard error | Retry discard | Nothing deleted; phase rolled back; previously open handles stay stale |
+| Discard races open/read/re-analysis/linked turn | Lifecycle epoch, admission completion, post-query and pre-release fences | `log corpus was discarded` error; linked turn ends withheld with `linked_log_corpus_discarded` | Reimport the logs | No surviving handle, no cache reinsertion, no evidence after discard success |
+| Discard cannot move the corpus aside | Rename/trash error before unpublish | Discard error; fenced handles report an interrupted discard | Retry discard; reopen to keep working | Nothing deleted; prior phase restored; fenced handles stay stale |
 | Discarded tree cannot be reclaimed | Removal error after unpublish | Discard succeeds (warning logged) | Next discard sweeps `.discarding/` | Corpus already unlisted and unopenable |
 
 ## 9. Observability
@@ -948,7 +965,13 @@ to “helpfully” interpret an offsetless production timestamp.
 - Large 10–100M-line behavior needs periodic scale proof beyond the deterministic
   100k acceptance fixture.
 - #753 (local integration): the discard fence and tombstones are process-local;
-  another process opening the same cache is not fenced. Sidecar writers outside
+  another process opening the same cache is not fenced. The release step waits
+  for (does not interrupt) one in-flight query on the discarded corpus's
+  connection. Windows directory-rename behaviour with the connection released
+  is not yet observed on a Windows host. A dedicated withheld turn reason for
+  discards would need `crates/cd-core/src/events.rs` (outside this slice); the
+  turn currently ends with the existing withheld reason
+  `linked_log_snapshot_stale`. Sidecar writers outside
   `store.rs`/`reanalyze.rs` (suppression, bookmarks, timezone, operational
   metrics) are fenced only where they go through handle DuckDB access; they are
   not drained as publications, so a write racing the unpublish rename either

@@ -1517,6 +1517,10 @@ pub struct ToolHost {
     pinned_log_suppression: Option<PinnedLogSuppressionLens>,
     #[cfg(test)]
     broad_triage_phase_hook: Option<BroadLogTriagePhaseHook>,
+    /// Test-only hook between an evidence tool's computation and its discard
+    /// re-check, so the post-tool fence can be exercised deterministically.
+    #[cfg(test)]
+    log_evidence_tool_hook: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     /// Restrict the advertised/executable model surface to read-only log tools.
     ///
     /// Used by the desktop's turn-local linked-log fallback when the optional
@@ -1669,6 +1673,8 @@ impl ToolHost {
             pinned_log_suppression: None,
             #[cfg(test)]
             broad_triage_phase_hook: None,
+            #[cfg(test)]
+            log_evidence_tool_hook: None,
             log_only_tool_surface: false,
             router_budget: crate::router::RouterBudget::default(),
             model_context_budgets: crate::model_context::ModelContextBudgets::default(),
@@ -3981,24 +3987,34 @@ impl ToolHost {
             .log_cache_dir
             .as_ref()
             .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        {
+            let handle = self.log_corpus_handle.lock().map_err(|_| {
+                CoreError::Message("log corpus handle is temporarily unavailable".into())
+            })?;
+            if let Some((cached_id, corpus)) = handle.as_ref() {
+                if cached_id == corpus_id {
+                    // A discard fenced the turn's corpus (#753). Never reopen
+                    // behind the turn's back: evidence from before and after a
+                    // discard must not mix. The stale handle stays in the slot
+                    // so every later check in this turn fails the same visible
+                    // way (the discard already closed its database files).
+                    corpus.ensure_live()?;
+                    return Ok(Arc::clone(corpus));
+                }
+            }
+        }
+        // Cold open with no slot lock held: it may wait in lifecycle admission.
+        let corpus = Arc::new(crate::log_analysis::LogCorpus::open(cache, corpus_id)?);
         let mut handle = self.log_corpus_handle.lock().map_err(|_| {
             CoreError::Message("log corpus handle is temporarily unavailable".into())
         })?;
-        let cached = handle
-            .as_ref()
-            .filter(|(cached_id, _)| cached_id == corpus_id)
-            .map(|(_, corpus)| Arc::clone(corpus));
-        if let Some(corpus) = cached {
-            // A discard fenced the turn's corpus (#753). Never reopen behind
-            // the turn's back: evidence from before and after a discard must
-            // not mix, and the failure must stay visible to the model and UI.
-            if let Err(error) = corpus.ensure_live() {
-                *handle = None;
-                return Err(error);
+        if let Some((cached_id, cached)) = handle.as_ref() {
+            if cached_id == corpus_id {
+                // Another call on this host published one meanwhile; keep one.
+                cached.ensure_live()?;
+                return Ok(Arc::clone(cached));
             }
-            return Ok(corpus);
         }
-        let corpus = Arc::new(crate::log_analysis::LogCorpus::open(cache, corpus_id)?);
         *handle = Some((corpus_id.to_string(), Arc::clone(&corpus)));
         Ok(corpus)
     }
@@ -4007,20 +4023,15 @@ impl ToolHost {
     ///
     /// Run after every evidence-returning log tool so a result whose
     /// computation overlapped the start of a discard is returned as a visible
-    /// tool failure, never as evidence (#753). The stale handle is released so
-    /// its files can close.
+    /// tool failure, never as evidence (#753).
     fn ensure_turn_log_corpus_live(&self) -> CoreResult<()> {
-        let mut handle = self.log_corpus_handle.lock().map_err(|_| {
+        let handle = self.log_corpus_handle.lock().map_err(|_| {
             CoreError::Message("log corpus handle is temporarily unavailable".into())
         })?;
-        let stale = handle
-            .as_ref()
-            .and_then(|(_, corpus)| corpus.ensure_live().err());
-        if let Some(error) = stale {
-            *handle = None;
-            return Err(error);
+        match handle.as_ref() {
+            Some((_, corpus)) => corpus.ensure_live(),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Discard fence for publishing a linked answer (#753).
@@ -4028,19 +4039,15 @@ impl ToolHost {
     /// Every evidence identity in a linked turn came through the turn-local
     /// handle for `corpus_id`. Once a discard of that corpus has begun, the
     /// answer must be withheld even if the discard landed during synthesis.
+    /// The check is sticky: the stale handle is kept, so it keeps failing.
     pub fn ensure_linked_log_corpus_live(&self, corpus_id: &str) -> CoreResult<()> {
-        let mut handle = self.log_corpus_handle.lock().map_err(|_| {
+        let handle = self.log_corpus_handle.lock().map_err(|_| {
             CoreError::Message("log corpus handle is temporarily unavailable".into())
         })?;
-        let stale = handle
-            .as_ref()
-            .filter(|(cached_id, _)| cached_id == corpus_id)
-            .and_then(|(_, corpus)| corpus.ensure_live().err());
-        if let Some(error) = stale {
-            *handle = None;
-            return Err(error);
+        match handle.as_ref() {
+            Some((cached_id, corpus)) if cached_id == corpus_id => corpus.ensure_live(),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     /// Borrow the durable memory store when configured (ambient recall / tools).
@@ -4675,6 +4682,10 @@ impl ToolHost {
             }
         };
         if is_log_evidence_tool(name) {
+            #[cfg(test)]
+            if let Some(hook) = self.log_evidence_tool_hook.as_ref() {
+                hook(name);
+            }
             self.ensure_turn_log_corpus_live()?;
         }
 
@@ -12502,12 +12513,13 @@ mod tests {
             "discard success implies a stale handle"
         );
 
-        // The linked-answer fence rejects and releases the stale handle.
-        let error = host
-            .ensure_linked_log_corpus_live(&discarded_id)
-            .expect_err("answer publication must be fenced");
-        assert!(is_corpus_discarded_error(&error), "{error}");
-        assert!(host.log_corpus_handle.lock().unwrap().is_none());
+        // The linked-answer fence rejects, and stays rejecting (sticky).
+        for _ in 0..2 {
+            let error = host
+                .ensure_linked_log_corpus_live(&discarded_id)
+                .expect_err("answer publication must be fenced");
+            assert!(is_corpus_discarded_error(&error), "{error}");
+        }
 
         // A stale preflight handle can never be seeded as turn evidence.
         let error = host
@@ -12532,10 +12544,9 @@ mod tests {
                 .await
                 .expect_err("discarded corpus must not yield a tool result");
             assert!(is_corpus_discarded_error(&error), "{tool}: {error}");
-            assert!(
-                host.log_corpus_handle.lock().unwrap().is_none(),
-                "{tool}: no stale handle may be retained"
-            );
+            let slot = host.log_corpus_handle.lock().unwrap();
+            let (_, held) = slot.as_ref().expect("stale handle kept (sticky)");
+            assert!(!held.is_live(), "{tool}: never silently reopened");
         }
 
         // Negative control: an unrelated corpus keeps working on the same host.
@@ -12548,6 +12559,54 @@ mod tests {
         .await
         .expect("unrelated corpus is unaffected by the discard");
         assert!(host.ensure_linked_log_corpus_live(&survivor_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn evidence_computed_while_a_discard_begins_is_returned_as_a_failure() {
+        use crate::log_analysis::is_corpus_discarded_error;
+
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = Arc::new(crate::log_analysis::LogCorpus::create(&cache, "mid-tool").unwrap());
+        let corpus_id = corpus.id().to_string();
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut host = ToolHost::new(
+            Workspace::new("mid-tool", vec![workspace]),
+            KeywordIndex::new(),
+            None,
+        );
+        host.set_log_analysis(true, Some(cache.clone()));
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+        // Positive control without the hook: the tool returns a result.
+        host.execute(
+            crate::log_analysis::TIMELINE,
+            &json!({"width_secs": 60}),
+            None,
+        )
+        .await
+        .expect("live corpus returns timeline evidence");
+
+        // The tool's queries complete on a live handle, then a second window
+        // discards before the host returns the result.
+        let hook_cache = cache.clone();
+        let hook_id = corpus_id.clone();
+        host.log_evidence_tool_hook = Some(Arc::new(move |_tool: &str| {
+            crate::log_analysis::LogCorpus::discard(&hook_cache, &hook_id)
+                .expect("discard during tool");
+        }));
+        let error = host
+            .execute(
+                crate::log_analysis::TIMELINE,
+                &json!({"width_secs": 60}),
+                None,
+            )
+            .await
+            .expect_err("post-tool fence must withdraw the computed evidence");
+        assert!(is_corpus_discarded_error(&error), "{error}");
+        assert!(!corpus.is_live());
     }
 
     #[test]

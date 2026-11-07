@@ -5,7 +5,7 @@
 //! the **event** store only, not the ANN backend.
 
 use super::corpus_lifecycle::{
-    self, CorpusLifecycleTicket, CorpusPublication, OpenAdmission, OpenRace,
+    self, CorpusLifecycleTicket, CorpusPublication, OpenAdmission, OpenRace, SharedPerCorpus,
 };
 use super::drain::TemplateInfo;
 use super::ingest_pipeline::{
@@ -134,8 +134,12 @@ static TEMPLATE_IDENTITY_STORES: LazyLock<Mutex<HashMap<PathBuf, Weak<TemplateId
 /// A separately opened DuckDB connection can retain the snapshot from before
 /// another connection commits an event revision. Sharing the connection keeps
 /// already-open query handles on the same publication boundary.
-static CORPUS_CONNECTIONS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<Connection>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+///
+/// Initialization is single-flight per database (#753): same-path opens share
+/// one `Connection::open` + schema initialization, while different corpora
+/// open concurrently because no registry lock is held during that work.
+static CORPUS_CONNECTIONS: LazyLock<SharedPerCorpus<Mutex<Connection>>> =
+    LazyLock::new(SharedPerCorpus::new);
 
 /// Fixed-size identity for an exact event-count predicate.
 ///
@@ -1744,10 +1748,17 @@ impl LogCorpus {
     /// every handle is stale and before the directory is unpublished, with no
     /// lifecycle lock held. Hosts use it to drop cached handles and detach
     /// in-flight cache initializations. The hook must not wait on an open of
-    /// the same corpus.
+    /// the same corpus, and neither the hook nor the caller may hold this
+    /// corpus's connection (`with_connection`): the transition closes it.
     pub fn discard_with(cache_root: &Path, id: &str, on_fenced: impl FnOnce()) -> CoreResult<()> {
         validate_corpus_id(id)?;
-        let outcome = corpus_lifecycle::discard_corpus_root(cache_root, id, on_fenced)?;
+        let db_path = cache_root
+            .join("log_corpora")
+            .join(id)
+            .join("events.duckdb");
+        let outcome = corpus_lifecycle::discard_corpus_root(cache_root, id, on_fenced, || {
+            release_shared_connection(&db_path)
+        })?;
         if outcome.residue.is_some() {
             tracing::warn!(
                 corpus_id = id,
@@ -2076,18 +2087,37 @@ fn shared_template_identity_store(
 
 fn shared_corpus_connection(db_path: &Path) -> CoreResult<Arc<Mutex<Connection>>> {
     let key = canonical_db_key(db_path);
-    let mut connections = CORPUS_CONNECTIONS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    connections.retain(|_, connection| connection.strong_count() > 0);
-    if let Some(connection) = connections.get(&key).and_then(Weak::upgrade) {
-        return Ok(connection);
-    }
-    let connection = Connection::open(db_path).map_err(duck_err)?;
-    init_schema(&connection)?;
-    let connection = Arc::new(Mutex::new(connection));
-    connections.insert(key, Arc::downgrade(&connection));
-    Ok(connection)
+    CORPUS_CONNECTIONS.get_or_open(&key, || {
+        let connection = Connection::open(db_path).map_err(duck_err)?;
+        init_schema(&connection)?;
+        Ok(Mutex::new(connection))
+    })
+}
+
+/// Close this process's shared DuckDB connection for a corpus being discarded.
+///
+/// Runs inside the discard transition after admitted opens drained and before
+/// the directory is unpublished (#753). Stale handles keep an inert in-memory
+/// connection (their fenced operations fail before touching it), so no file
+/// in the directory stays open and the unpublish rename also works where open
+/// files block directory renames. Waits only for an in-flight query on the
+/// connection mutex; the old connection is dropped outside every lock. Must
+/// not be reached while the caller itself holds this corpus's connection.
+fn release_shared_connection(db_path: &Path) {
+    let Some(connection) = CORPUS_CONNECTIONS.take(&canonical_db_key(db_path)) else {
+        return;
+    };
+    let Ok(inert) = Connection::open_in_memory() else {
+        tracing::warn!("could not create an inert connection for a discarded corpus");
+        return;
+    };
+    let previous = {
+        let mut guard = connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::replace(&mut *guard, inert)
+    };
+    drop(previous);
 }
 
 fn canonical_db_key(db_path: &Path) -> PathBuf {
@@ -3324,10 +3354,10 @@ mod tests {
 
     #[test]
     fn query_result_that_overlapped_a_discard_start_is_rejected() {
+        use std::sync::mpsc;
         let dir = tempfile::tempdir().unwrap();
         let corpus = LogCorpus::create(dir.path(), "overlap").unwrap();
         let id = corpus.id().to_string();
-        let cache = dir.path().to_path_buf();
         // Positive control: the same query succeeds on a live handle.
         let live = corpus
             .with_connection(|connection| {
@@ -3340,6 +3370,10 @@ mod tests {
             .unwrap();
         assert_eq!(live, 0);
 
+        let (fenced_tx, fenced_rx) = mpsc::channel();
+        let cache = dir.path().to_path_buf();
+        let discard_id = id.clone();
+        let mut discard = None;
         let error = corpus
             .with_connection(|connection| {
                 let count = connection
@@ -3347,13 +3381,42 @@ mod tests {
                         row.get::<_, i64>(0)
                     })
                     .map_err(duck_err)?;
-                // A second window discards while this query is in flight.
-                LogCorpus::discard(&cache, &id)?;
+                // A second window discards while this query still holds the
+                // connection; its fence lands before the query returns.
+                discard = Some(std::thread::spawn(move || {
+                    LogCorpus::discard_with(&cache, &discard_id, move || {
+                        fenced_tx.send(()).unwrap();
+                    })
+                }));
+                fenced_rx.recv_timeout(LIFECYCLE_WAIT).unwrap();
                 Ok(count)
             })
             .unwrap_err();
         assert_discarded(&error);
+        discard
+            .take()
+            .expect("discard thread")
+            .join()
+            .unwrap()
+            .expect("discard completes once the query releases the connection");
         assert!(!dir.path().join("log_corpora").join(&id).exists());
+    }
+
+    #[test]
+    fn discard_closes_the_shared_connection_before_unpublishing() {
+        let dir = tempfile::tempdir().unwrap();
+        let retained = LogCorpus::create(dir.path(), "release").unwrap();
+        retained.flush().unwrap();
+        let id = retained.id().to_string();
+        let db_path = retained.root().join("events.duckdb");
+        let key = canonical_db_key(&db_path);
+        LogCorpus::discard(dir.path(), &id).unwrap();
+        assert!(
+            CORPUS_CONNECTIONS.take(&key).is_none(),
+            "the discarded corpus's shared connection left the registry"
+        );
+        // The retained stale handle stays fenced after its files were closed.
+        assert_discarded(&retained.with_connection(|_| Ok(())).unwrap_err());
     }
 
     #[test]

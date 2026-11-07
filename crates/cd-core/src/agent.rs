@@ -4321,9 +4321,11 @@ fn linked_corpus_discard_fence(host: &ToolHost, opts: &AgentOptions) -> Option<C
 
 /// Visible terminal for a linked turn whose corpus was discarded (#753).
 ///
-/// Never a success: the answer and its evidence identities are withheld. A
-/// later synthesis-only retry fails closed at host corpus validation because
-/// the evidence no longer exists.
+/// Never a success: the answer and its evidence identities are withheld. The
+/// error code is specific; the turn ends with the existing withheld reason
+/// `linked_log_snapshot_stale` (the corpus changed under the turn), so every
+/// surface classifies it as withheld rather than as a provider failure. A
+/// later synthesis-only retry fails closed at host corpus validation.
 fn terminal_linked_corpus_discarded(
     mut out: EventCollector<'_>,
     trail: &[String],
@@ -4334,13 +4336,14 @@ fn terminal_linked_corpus_discarded(
     out.push(StreamEvent::SearchTrail { steps });
     out.push(StreamEvent::Error {
         code: "linked_log_corpus_discarded".into(),
-        message: "The linked corpus was discarded during this investigation. ContextDesk \
-                  withheld the answer and its evidence because they no longer belong to an \
-                  existing corpus; import the logs again to investigate them."
+        message: "The linked corpus was discarded (or is being discarded) during this \
+                  investigation. ContextDesk withheld the answer and its evidence because they \
+                  may no longer belong to an existing corpus; import the logs again to \
+                  investigate them."
             .into(),
     });
     out.push(StreamEvent::TurnCompleted {
-        reason: "linked_log_corpus_discarded".into(),
+        reason: "linked_log_snapshot_stale".into(),
     });
     Ok(out.into_events())
 }
@@ -9393,9 +9396,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                StreamEvent::TurnCompleted { reason } if reason == "linked_log_corpus_discarded"
+                StreamEvent::TurnCompleted { reason } if reason == "linked_log_snapshot_stale"
             )),
-            "turn must end on the discard terminal: {events:?}"
+            "turn must end withheld (not failed, not completed): {events:?}"
+        );
+        assert!(
+            crate::events::WITHHELD_TURN_REASONS.contains(&"linked_log_snapshot_stale"),
+            "the terminal reason must classify as withheld"
         );
         let answer = events
             .iter()

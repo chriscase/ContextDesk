@@ -40,10 +40,12 @@
 //! 2. `Flight::outcome`: one flight's result slot. Never held while taking
 //!    `state`, and `state` is never held while taking it.
 //!
-//! The core lifecycle locks (registry → cell) are only taken by
-//! `LogCorpus::open`/`discard_with`, which run with neither cache lock held;
-//! the discard hook ([`SingleFlightCorpusCache::invalidate`]) takes only
-//! `state`, briefly, while no lifecycle lock is held.
+//! The core lifecycle locks (registry → cell) and the core per-database
+//! connection registry (single-flight per key, never locked across DuckDB
+//! open) are only taken inside `LogCorpus::open`/`discard_with`, which run
+//! with neither cache lock held; the discard hook
+//! ([`SingleFlightCorpusCache::invalidate`]) takes only `state`, briefly,
+//! while no lifecycle lock is held.
 
 use cd_core::log_analysis::{LogCorpus, LOG_CORPUS_DISCARDED};
 use std::collections::{HashMap, VecDeque};

@@ -17008,7 +17008,7 @@ mod log_explorer_async_query_host_tests {
             Arc::ptr_eq(&first, &second),
             "startup reads must reuse one initialized corpus handle"
         );
-        handles.remove(&report.corpus_id);
+        handles.invalidate(&report.corpus_id);
         let reopened = handles
             .open(&cache, &report.corpus_id)
             .expect("reopened handle");
