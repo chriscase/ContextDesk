@@ -415,7 +415,7 @@ describe("Source Catalog Console", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/changed before the action/);
     expect(alert.textContent).toMatch(/may be hidden by the current filters/);
-    expect(document.activeElement).toBe(alert);
+    await waitFor(() => expect(document.activeElement).toBe(alert));
     expect(screen.queryByRole("button", { name: "Restore Synthetic assistant" })).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Lifecycle" }), { target: { value: "all" } });
     expect(screen.getByRole("button", { name: "Restore Synthetic assistant" })).toBeTruthy();
