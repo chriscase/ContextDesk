@@ -11,15 +11,9 @@ use std::process::Command;
 use cd_core::normalized_log_events::MAX_DIAGNOSTICS;
 
 fn lab() -> Command {
-    // Built by the same `cargo test` invocation; resolve the binary next to
-    // the test executable rather than shelling out to cargo again.
-    let mut path = std::env::current_exe().expect("test exe");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.push("cd_normalized_log_lab");
-    Command::new(path)
+    // Cargo supplies the binary for this integration test on every platform;
+    // do not infer its location from Cargo's internal test artifact layout.
+    Command::new(env!("CARGO_BIN_EXE_cd_normalized_log_lab"))
 }
 
 fn repo_root() -> std::path::PathBuf {

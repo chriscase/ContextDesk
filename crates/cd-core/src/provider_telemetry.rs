@@ -664,7 +664,7 @@ fn response_model_identity_is_valid(value: &str) -> bool {
         return false;
     }
     let segments = value.split('/').collect::<Vec<_>>();
-    if segments.is_empty()
+    !(segments.is_empty()
         || segments.iter().any(|segment| {
             segment.is_empty()
                 || *segment == "."
@@ -680,11 +680,7 @@ fn response_model_identity_is_valid(value: &str) -> bool {
                 || identity_is_endpoint_hostport(segment)
         })
         || identity_is_endpoint_hostport(value)
-        || response_model_segments_are_route_shaped(&segments)
-    {
-        return false;
-    }
-    true
+        || response_model_segments_are_route_shaped(&segments))
 }
 
 fn identity_is_windows_drive(value: &str) -> bool {

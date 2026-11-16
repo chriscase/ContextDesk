@@ -502,6 +502,51 @@ echo stub >"$TMP/mac-target/debug/build/libduckdb-sys-mac/out/libduckdb.a"
 expect_ok "macOS/Linux libduckdb.a in out/ is a valid artifact" \
   sh "$CACHE" --assert-dir "$TMP/mac-target"
 
+# Cargo 1.100 stores build units under build/<package>/<hash>/out.
+# Preserve the old-layout assertions above and the same fail-closed checks.
+for native in libduckdb.a duckdb.lib; do
+  target="$TMP/unit-layout-$native"
+  mkdir -p "$target/debug/build/cd-core/abc123/out" \
+    "$target/debug/build/libduckdb-sys/def456/out"
+  echo stub >"$target/debug/build/cd-core/abc123/out/libcd_core-abc123.rlib"
+  expect_fail "new layout without DuckDB stays cold ($native)" \
+    sh "$CACHE" --assert-dir "$target"
+  : >"$target/debug/build/libduckdb-sys/def456/out/$native"
+  expect_fail "new layout zero-byte DuckDB stays cold ($native)" \
+    sh "$CACHE" --assert-dir "$target"
+  echo stub >"$target/debug/build/libduckdb-sys/def456/out/$native"
+  expect_ok "new layout native DuckDB qualifies ($native)" \
+    sh "$CACHE" --assert-dir "$target"
+  expect_ok "new layout exact hit is warm ($native)" \
+    sh "$CACHE" --out "$TMP/unit-$native.json" --hit true --role shard \
+    --restore-dir "$target"
+  [ "$(jq -r '.cache_state' "$TMP/unit-$native.json")" = warm ] || fail "new layout must be warm"
+done
+
+mkdir -p "$TMP/unit-rlib/debug/build/duckdb/abc123/out"
+echo stub >"$TMP/unit-rlib/debug/build/duckdb/abc123/out/libduckdb-abc123.rlib"
+expect_ok "new layout DuckDB rlib qualifies" \
+  sh "$CACHE" --assert-dir "$TMP/unit-rlib"
+
+mkdir -p "$TMP/unit-native-only/debug/build/libduckdb-sys/abc123/out"
+echo stub >"$TMP/unit-native-only/debug/build/libduckdb-sys/abc123/out/libduckdb.a"
+expect_fail "new layout build-script native library alone is not Rust deps" \
+  sh "$CACHE" --assert-dir "$TMP/unit-native-only"
+mkdir -p "$TMP/unit-native-only/debug/build/cd-core/def456/out"
+: >"$TMP/unit-native-only/debug/build/cd-core/def456/out/libcd_core-def456.rlib"
+expect_fail "new layout zero-byte Rust library with valid DuckDB stays cold" \
+  sh "$CACHE" --assert-dir "$TMP/unit-native-only"
+
+mkdir -p "$TMP/unit-empty/debug/build/libduckdb-sys/abc123/out/libduckdb.a" \
+  "$TMP/unit-empty/debug/build/cd-core/def456/out"
+echo stub >"$TMP/unit-empty/debug/build/cd-core/def456/out/libcd_core-def456.rlib"
+expect_fail "new layout directory named like a library stays cold" \
+  sh "$CACHE" --assert-dir "$TMP/unit-empty"
+rmdir "$TMP/unit-empty/debug/build/libduckdb-sys/abc123/out/libduckdb.a"
+echo stub >"$TMP/unit-empty/debug/build/libduckdb-sys/abc123/out/duckdb.txt"
+expect_fail "new layout non-library DuckDB output stays cold" \
+  sh "$CACHE" --assert-dir "$TMP/unit-empty"
+
 expect_fail "assert-dir rejects a CACHEDIR.TAG-only tree" \
   sh "$CACHE" --assert-dir "$TMP/tag-only-target"
 expect_ok "assert-dir accepts a compiled workspace + DuckDB tree" \

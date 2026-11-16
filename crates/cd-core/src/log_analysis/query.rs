@@ -3053,12 +3053,8 @@ fn event_matches_filter(event: &ExplorerEvent, filter: &EventQuery) -> bool {
             return false;
         }
     }
-    if filter.wall_time_only
-        && classify_active_timestamp_basis(event.active_timestamp_basis) != TimeQuality::Wall
-    {
-        return false;
-    }
-    true
+    !filter.wall_time_only
+        || classify_active_timestamp_basis(event.active_timestamp_basis) == TimeQuality::Wall
 }
 
 // ── SQL builders (parameterized) ────────────────────────────────────────────
