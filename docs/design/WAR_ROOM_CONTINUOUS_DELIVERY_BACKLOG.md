@@ -7,12 +7,16 @@ already shipped, rechecks dependencies and risks, selects the highest-value
 ready slice, freezes its exact base, and starts that slice when it does not
 conflict with protected work.
 
-Baseline for Goal 10: `main` `c672948b8b74471b197ecf848a26fecadd0eece9`,
-tree `806a1613e4a9b048ba9808b49155f0d3449b3f3d`. Goals 08 and 09 joined main
-through merged PRs #1187 and #1188. Earlier observations remain in frozen
-contracts and receipts. The separate Windows temporary-corpus cleanup failure
-and historical Catalog focus synchronization candidate #1176 are reliability
-work, not part of this product slice.
+Cleanup reconciliation baseline: `main`
+`fede8e0b1a53fce767ca888a48a621bb98dd7ac7`, tree
+`16293b46f0274a3dac3607f43d09d231e280c264`. Goal 10 joined main through
+merged PR #1189. Catalog focus synchronization joined through #1190, followed
+by saved-view browser qualification and the remaining bounded-refusal focus
+test synchronization through #1191. Historical #1176 and #1158 are closed as
+superseded; their branches and evidence remain retained. Earlier observations
+remain in frozen contracts and receipts. The historical Windows temporary-
+corpus cleanup failure remains separate reliability evidence, not a new
+product requirement or a claim of current failure.
 
 ## Delivery loop
 
@@ -82,7 +86,7 @@ The browser contract exports activity DTOs and parsers without Node crypto or
 cursor decoding. Cursor generation, fingerprinting, and request validation
 remain server-only.
 
-## Shipped handoffs and active unmerged benchmark slice
+## Shipped handoffs, benchmark, and evidence-label slices
 
 Goal 05 is shipped through merged [PR #1184](https://github.com/chriscase/ContextDesk/pull/1184).
 Its [frozen contract](../goals/05-S3-EVIDENCE-RECONCILIATION.md) and
@@ -94,7 +98,7 @@ Impact caption observation remains separate reliability evidence.
 Goal 06 shipped through merged [PR #1185](https://github.com/chriscase/ContextDesk/pull/1185).
 Its [contract](../goals/06-TRUSTED-EXPORT-HANDOFF.md) and
 [receipt](../goals/TRUSTED_EXPORT_HANDOFF_RECEIPT.md) preserve the export and
-manual-import evidence. Historical #1177 and #1179 remain source material.
+manual-import evidence. Historical #1177 and closed-superseded #1179 remain source material.
 
 Goal 07 shipped through merged [PR #1186](https://github.com/chriscase/ContextDesk/pull/1186). It adds a focused, append-only human
 assessment history for a manually imported response while preserving the
@@ -131,17 +135,27 @@ Trusted Investigation Discovery shipped through merged PR #1181. The desktop
 investigation-team save-status synchronization shipped through merged PR #1182.
 Activity Center first-frame scope safety shipped through #1183. S3 recovery
 shipped through #1184. Unmerged historical branches remain source material.
-Goal 10 is the current unmerged slice: [structured evidence labels and shared
+Goal 10 shipped through merged [PR #1189](https://github.com/chriscase/ContextDesk/pull/1189): [structured evidence labels and shared
 review workspace](../goals/10-STRUCTURED-EVIDENCE-LABELS.md) on
 `integrate/evidence-label-workspace-v1`. It extends the shipped annotation table,
 bulk note transaction, Runtime seam and workspace with exact add/remove labels,
 privacy-aware current projection and durable history, and Keystone adoption.
 Bulk notes and Investigation First selection are already shipped foundations.
 
-The following successors and #1158 remain deferred:
+Saved-view browser qualification from #1158 shipped through merged
+[PR #1191](https://github.com/chriscase/ContextDesk/pull/1191), including explicit
+filtered-row preservation after browser-storage failure. Its [disposition](https://github.com/chriscase/ContextDesk/pull/1158#issuecomment-6913317115)
+records exact receiving-source and qualification evidence. Catalog focus
+synchronization from #1176 shipped through [PR #1190](https://github.com/chriscase/ContextDesk/pull/1190);
+its [disposition](https://github.com/chriscase/ContextDesk/pull/1176#issuecomment-6908527610)
+preserves the one-line source proof. [PR #1179](https://github.com/chriscase/ContextDesk/pull/1179#issuecomment-6913375622)
+is closed as superseded historical planning, not merged. None of these
+dispositions authorizes deleting retained branches or starting a successor.
+
+The following successors remain deferred; no new product slice is selected:
 
 1. **Investigation label search and facets.** Consume Goal 10's canonical exact,
-   case-sensitive label contract after integration. Do not create duplicate
+   case-sensitive label contract now on main. Do not create duplicate
    label truth. Recorded status/entity/software impact/contributor/date filters
    already shipped through #1181.
 2. **Portable label round-trip.** A separately versioned portable contract and
