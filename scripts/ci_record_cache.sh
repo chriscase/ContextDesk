@@ -7,7 +7,7 @@
 # a hit without downloading files (hosted run 31845262696).
 #
 # `cache_state` is `warm` only when the files are actually present *and*
-# look like a compiled workspace (debug/deps rust artifacts plus DuckDB).
+# look like a compiled workspace (Rust artifacts plus DuckDB).
 # A top-level CACHEDIR.TAG or empty target/ is still cold.
 #
 # No network, no secrets. Requires: jq.
@@ -139,7 +139,10 @@ has_duckdb_artifact() {
       fi
     done
   fi
-  for d in "$dir"/debug/build/libduckdb-sys-* "$dir"/debug/build/duckdb-*; do
+  # Cargo 1.100 uses build/<package>/<unit>/out instead of deps/ and
+  # build/<package>-<unit>/out. Keep both layouts, with the same file checks.
+  for d in "$dir"/debug/build/libduckdb-sys-* "$dir"/debug/build/duckdb-* \
+    "$dir"/debug/build/libduckdb-sys/* "$dir"/debug/build/duckdb/*; do
     [ -d "$d" ] || continue
     for probe in "$d"/* "$d"/out/* "$d"/out/.libs/*; do
       [ -e "$probe" ] || continue
@@ -153,10 +156,16 @@ has_duckdb_artifact() {
 
 has_compiled_deps() {
   dir=$1
-  [ -d "$dir/debug/deps" ] || return 1
   for probe in "$dir"/debug/deps/*; do
     [ -e "$probe" ] || continue
     if is_compiled_lib "$probe"; then
+      return 0
+    fi
+  done
+  # Build-script native outputs alone must not satisfy the Rust deps gate.
+  # Cargo compilation units emit Rust rlibs/rmeta in this new location.
+  for probe in "$dir"/debug/build/*/*/out/*.rlib "$dir"/debug/build/*/*/out/*.rmeta; do
+    if is_nonzero_file "$probe"; then
       return 0
     fi
   done
@@ -205,7 +214,7 @@ if [ -n "$ASSERT_DIR" ]; then
       echo "ci_record_cache: $ASSERT_DIR is missing or empty" >&2
       ;;
     no-artifacts)
-      echo "ci_record_cache: $ASSERT_DIR has no compiled rust deps (target/debug/deps)" >&2
+      echo "ci_record_cache: $ASSERT_DIR has no compiled rust deps (debug/deps or debug/build/<package>/<unit>/out)" >&2
       ;;
     no-duckdb)
       echo "ci_record_cache: $ASSERT_DIR is missing bundled DuckDB artifacts" >&2
