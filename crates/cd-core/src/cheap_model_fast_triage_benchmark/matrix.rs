@@ -246,10 +246,7 @@ fn row_matches(exp: &GoldenExpectation, score: &PathScore) -> bool {
     // Host goldens own partial-credit authority: when a row forbids partial
     // extraction credit, a score that still awards it is a golden mismatch
     // (e.g. unsupported causal claim must not look like useful partial work).
-    if !exp.allow_partial_extraction_credit && score.credit.partial_extraction_credit {
-        return false;
-    }
-    true
+    exp.allow_partial_extraction_credit || !score.credit.partial_extraction_credit
 }
 
 /// Run the full hermetic matrix against goldens.
