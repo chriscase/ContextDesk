@@ -1,4 +1,4 @@
-import {act,cleanup,fireEvent,render,renderHook,screen,waitFor} from "@testing-library/react";
+import {act,cleanup,fireEvent,render,renderHook,screen,waitFor,within} from "@testing-library/react";
 import {useLayoutEffect} from "react";
 import {afterEach,describe,expect,it,vi} from "vitest";
 import {EvidenceAnnotationWorkspace,useLabelIntent,type EvidenceAnnotationWorkspaceProps} from "./EvidenceAnnotationWorkspace.js";
@@ -6,7 +6,7 @@ import {evidenceLabelModel} from "../../runtime/public.js";
 afterEach(cleanup);
 const unknown={status:"failed",error:{kind:"unavailable",reason:"commit_outcome_unknown"}};
 function props(overrides:Partial<EvidenceAnnotationWorkspaceProps>={}):EvidenceAnnotationWorkspaceProps {
- return {labelModel:evidenceLabelModel,scopeKey:"A:alice:authority1",evidence:[{id:"a",filename:"a.log",uri:null},{id:"b",filename:"b.log",uri:null}],selectedArtifactIds:["a","b"],annotations:{availability:"available",value:[],refresh:"settled"},canAnnotate:true,canReadPrivate:true,readOnly:false,bulkCommand:vi.fn(async(_input:unknown)=>unknown),bulkMutation:{status:"idle"},bulkErrorCopy:null,onRefresh:vi.fn(async()=>{}),onClearSelection:vi.fn(),readCompletion:{requested:1,succeeded:1,failed:-1},...overrides};
+ return {inventoryCurrent:true,labelModel:evidenceLabelModel,scopeKey:"A:alice:authority1",evidence:[{id:"a",privacyClass:"share_safe",filename:"a.log",uri:null},{id:"b",privacyClass:"owner_only",filename:"b.log",uri:null}],selectedArtifactIds:["a","b"],annotations:{availability:"available",value:[],refresh:"settled"},canAnnotate:true,canReadPrivate:true,readOnly:false,bulkCommand:vi.fn(async(_input:unknown)=>unknown),bulkMutation:{status:"idle"},bulkErrorCopy:null,onRefresh:vi.fn(async()=>{}),onClearSelection:vi.fn(),readCompletion:{requested:1,succeeded:1,failed:-1},...overrides};
 }
 describe("mounted structured label workspace",()=>{
  it("freezes exact explicit operation and targets across selection changes, and requires a causal successful read after every unknown",async()=>{
@@ -81,4 +81,42 @@ describe("retained structured label callbacks",()=>{
   const p=props({bulkCommand:command});const view=render(<Probe p={p}/>);fireEvent.click(screen.getByText("Draft"));callOld=true;
   view.rerender(<Probe p={{...p,scopeKey:"A:alice:authority2"}}/>);await act(async()=>{});expect(command).not.toHaveBeenCalled();
  });
+});
+
+describe("read-only label discovery", () => {
+  const event = (artifactId: string, label: string, sequence: number,
+    privacyClass: "share_safe" | "owner_only" = "share_safe", operation: "add" | "remove" = "add") => ({
+    id: String(sequence), artifactId, privacyClass, labelEvent: {label, operation, sequence, intentKey: "synthetic-intent"},
+  });
+  it("browses only distinct loaded files with a current visible label, without changing the working set", () => {
+    const p = props({ selectedArtifactIds: [], readOnly: true, annotations: {
+      availability: "available", refresh: "settled", value: [
+        event("a", "Review", 1), event("a", "Review", 2, "owner_only"),
+        event("b", "Review", 3), event("a", "review", 4), event("a", "Gone", 5),
+        event("a", "Gone", 6, "share_safe", "remove"), event("orphan", "Not in inventory", 7),
+        event("b", "Private", 8, "owner_only"),
+      ],
+    }});
+    const view = render(<EvidenceAnnotationWorkspace {...p}/>);
+    const browse = () => within(screen.getByRole("region", {name: "Browse evidence by label"}));
+    expect(browse().getByRole("option", {name: "Review (2)"})).toBeTruthy();
+    expect(browse().getByRole("option", {name: "review (1)"})).toBeTruthy();
+    expect(browse().queryByRole("option", {name: /Gone|Not in inventory/})).toBeNull();
+    fireEvent.change(browse().getByLabelText("Current evidence label"), {target: {value: "Review"}});
+    expect(browse().getAllByRole("listitem").map(el => el.textContent).sort()).toEqual(["a.log", "b.log"]);
+    fireEvent.change(browse().getByLabelText("Current evidence label"), {target: {value: "Private"}});
+    view.rerender(<EvidenceAnnotationWorkspace {...p} canReadPrivate={false}/>);
+    expect(browse().queryByRole("option", {name: /Private/})).toBeNull();
+    expect(browse().getByRole("option", {name: "Review (1)"})).toBeTruthy();
+    expect(browse().queryByRole("list")).toBeNull();
+    view.rerender(<EvidenceAnnotationWorkspace {...p} inventoryCurrent={false}/>);
+    expect(screen.queryByRole("region", {name:"Browse evidence by label"})).toBeNull();
+    view.rerender(<EvidenceAnnotationWorkspace {...p} scopeKey="different-case"/>);
+    expect(browse().queryByRole("list")).toBeNull();
+    view.rerender(<EvidenceAnnotationWorkspace {...p} annotations={{...p.annotations, refresh:"failed"}}/>);
+    expect(screen.queryByRole("region", {name:"Browse evidence by label"})).toBeNull();
+    expect(p.bulkCommand).not.toHaveBeenCalled();
+    expect(p.onClearSelection).not.toHaveBeenCalled();
+    expect(p.onRefresh).not.toHaveBeenCalled();
+  });
 });

@@ -546,7 +546,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           })}
         </ul>
       ) : null}
-      <EvidenceAnnotationWorkspace labelModel={evidenceLabelModel}
+      <EvidenceAnnotationWorkspace inventoryCurrent={inventory.availability === "available" && inventory.refresh === "settled"} labelModel={evidenceLabelModel}
         scopeKey={`${runtime.presentationScopeKey}\u0000${props.focusCaseId ?? "none"}\u0000${runtime.identity.id}\u0000${runtime.identity.username}`}
         readCompletion={runtime.resources.annotationReadCompletion}
         evidence={inventory.availability === "available" ? inventory.value.map(({ evidence }) => evidence) : []}

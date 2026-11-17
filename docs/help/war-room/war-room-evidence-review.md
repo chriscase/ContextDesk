@@ -26,10 +26,16 @@ before accepting a claim.
 
 ## Structured labels and shared evidence review
 
-Goal 10 is a draft integration awaiting independent review. Investigation First
+Investigation First
 and Keystone share the existing evidence annotation workspace. In Investigation
 First, select evidence rows; in Keystone, select the evidence working set. A
 single label operation supports 1–64 files. Bulk notes were already shipped.
+
+To find files without selecting them first, choose a **Current evidence label**
+under **Browse evidence by label**. Each exact label shows how many distinct
+loaded files currently carry it in this investigation. Choosing a label lists
+visible filenames without changing your selection. This list is hidden until
+both inventory and annotation history are current; it never searches file contents.
 
 Review **Current labels** separately from **Durable history**. Enter one exact
 label (1–120 trimmed, safe single-line characters), choose its privacy, and
