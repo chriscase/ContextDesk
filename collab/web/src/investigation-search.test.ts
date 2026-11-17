@@ -34,6 +34,14 @@ function filter(overrides: Partial<InvestigationFilter> = {}): InvestigationFilt
 }
 
 describe("search covers what the investigation says about itself", () => {
+  it("combines unordered participant, entity, and title terms; every term is required", () => {
+    expect(matchesQuery(row(), "ALICE   northwind checkout", ["Northwind Trading"])).toBe(true);
+    expect(matchesQuery(row(), "alice northwind checkout")).toBe(false);
+    expect(matchesQuery(row(), '"alice checkout"')).toBe(false);
+    expect(matchesQuery(row(), 'alice "timeouts checkout"')).toBe(false);
+    expect(matchesQuery(row(), 'alice "checkout timeouts')).toBe(true);
+  });
+
   it("matches the affected parties a reader would remember it by", () => {
     expect(matchesQuery(row(), normalizeQuery("storefront operators"))).toBe(true);
   });

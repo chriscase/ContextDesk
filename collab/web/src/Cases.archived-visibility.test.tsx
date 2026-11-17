@@ -97,6 +97,19 @@ describe("the working list leaves archived investigations out", () => {
 });
 
 describe("search reaches the situation text the card is remembered by", () => {
+  it("combines clues from one investigation, never across investigations", async () => {
+    stubFetch();
+    const search = await openInventory();
+    fireEvent.change(search, { target: { value: 'incident "storefront operators"' } });
+    expect(screen.getByRole("button", { name: "Fixture incident" })).toBeTruthy();
+    fireEvent.change(search, { target: { value: "incident mailer" } });
+    expect(screen.getByText(/No investigations match/i)).toBeTruthy();
+    fireEvent.change(search, { target: { value: "retired filed" } });
+    expect(screen.getByText(/1 archived investigation is hidden/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show them" }));
+    expect(screen.getByRole("button", { name: "Retired mailer backlog" })).toBeTruthy();
+  });
+
   it("finds an investigation by its affected parties", async () => {
     stubFetch();
     const search = await openInventory();

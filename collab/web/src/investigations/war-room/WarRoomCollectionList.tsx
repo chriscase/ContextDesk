@@ -85,7 +85,7 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
             type="search"
             value={props.query.q}
             onChange={(event) => updateQuery(props.query, props.onQueryChange, { q: event.target.value })}
-            placeholder="Title, problem, product, or build"
+            placeholder='Combine keywords or use "exact phrases"'
             aria-label="Search investigations by title, situation text, context, or ID"
           />
         </label>

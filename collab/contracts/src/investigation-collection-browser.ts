@@ -21,6 +21,19 @@ import {
 } from "./investigation-software-impact.js";
 import { isIsoInstant } from "./temporal.js";
 
+/** Quoted phrases stay within one field; bare terms may match different fields
+ * on the same record. An unfinished phrase works while the user types. */
+export function investigationSearchTerms(query: string): string[] {
+  return Array.from(query.trim().toLocaleLowerCase().matchAll(/"([^"]*)"?|([^\s"]+)/gu),
+    (match) => (match[1] ?? match[2] ?? "").trim()).filter(Boolean);
+}
+
+export function matchesInvestigationTerms(values: readonly string[], terms: readonly string[]): boolean {
+  if (!terms.length) return true;
+  const folded = values.map((value) => value.toLocaleLowerCase());
+  return terms.every((term) => folded.some((value) => value.includes(term)));
+}
+
 export const INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID =
   "cd-collab.investigation_collection_query.v1" as const;
 export const INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID =

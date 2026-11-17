@@ -1504,7 +1504,7 @@ export function Cases(props: {
             type="search"
             value={caseSearch}
             onChange={(e) => setCaseSearch(e.target.value)}
-            placeholder="Title, problem, affected parties, people, or ID"
+            placeholder='Combine keywords or use "exact phrases"'
             aria-label="Search investigations by title, situation text, people, context, or ID"
           />
         </label>
