@@ -1972,6 +1972,34 @@ fn time_op_result_ms<R, E>(
     result
 }
 
+// Unlike read_to_end, do not automatically retry Interrupted: our bounded
+// source reader uses it as the cancellation signal.
+fn read_ingest_prefix(
+    reader: &mut dyn Read,
+    limit: usize,
+    cancel: Option<&CancelFlag>,
+    mut read_error: impl FnMut(std::io::Error) -> CoreError,
+) -> CoreResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 2048];
+    while bytes.len() < limit {
+        if cancelled(cancel) {
+            return Err(CoreError::Cancelled);
+        }
+        let remaining = (limit - bytes.len()).min(chunk.len());
+        let result = reader.read(&mut chunk[..remaining]);
+        if cancelled(cancel) {
+            return Err(CoreError::Cancelled);
+        }
+        let n = result.map_err(&mut read_error)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    Ok(bytes)
+}
+
 /// Parse lines from a streaming reader into the corpus batch (shared by dir + zip).
 #[allow(clippy::too_many_arguments)]
 fn ingest_lines_from_reader(
@@ -1999,26 +2027,29 @@ fn ingest_lines_from_reader(
     // A BufRead implementation may expose only one byte at a time. Read a
     // fixed signature window, then replay it for either parser without losing
     // source bytes or reading an unbounded ordinary log into memory.
-    let mut probe = Vec::new();
-    (&mut *reader)
-        .take(2048)
-        .read_to_end(&mut probe)
-        .map_err(|e| CoreError::Message(e.to_string()))?;
-    if cancelled(cancel) {
-        return Err(CoreError::Cancelled);
-    }
+    // Both bounded pre-reads are member reads, just like the line reader below.
+    // On failure the parser has not established a record location yet.
+    let mut member_read_error = |error: std::io::Error| {
+        emit_ingest_evidence(
+            progress,
+            LogIngestEvidenceReason::ReadFailed,
+            Path::new(source_label),
+        );
+        stats
+            .defects
+            .record_fatal(ImportDefectCode::MemberReadFailed, source_label, None);
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            CoreError::Policy(error.to_string())
+        } else {
+            CoreError::Message(format!("raw log source read failed: {error}"))
+        }
+    };
+    let probe = read_ingest_prefix(reader, 2048, cancel, &mut member_read_error)?;
     let is_html = has_html_signature(&probe);
     let mut replay = BufReader::new(std::io::Cursor::new(probe).chain(reader));
     let reader: &mut dyn BufRead = &mut replay;
     if is_html {
-        let mut raw = Vec::new();
-        reader
-            .take((MAX_HTML_BYTES + 1) as u64)
-            .read_to_end(&mut raw)
-            .map_err(|e| CoreError::Message(e.to_string()))?;
-        if cancelled(cancel) {
-            return Err(CoreError::Cancelled);
-        }
+        let raw = read_ingest_prefix(reader, MAX_HTML_BYTES + 1, cancel, member_read_error)?;
         if raw.len() > MAX_HTML_BYTES || raw.len() as u64 > limits.max_file_bytes {
             return Err(CoreError::Policy(
                 "HTML diagnostic exceeds bounded extraction limit".into(),
@@ -5065,6 +5096,37 @@ mod tests {
                     "broken.zip"
                 }
             );
+        }
+    }
+
+    #[test]
+    fn bounded_pre_reads_observe_cancel_without_retry_or_false_read_failure() {
+        struct Interrupt<'a>(&'a CancelFlag, bool);
+        impl Read for Interrupt<'_> {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                assert!(!self.1, "must not retry cancelled source");
+                self.1 = true;
+                self.0.cancel();
+                Err(std::io::ErrorKind::Interrupted.into())
+            }
+        }
+        for html_body in [false, true] {
+            let flag = CancelFlag::new();
+            let mut source = Interrupt(&flag, false);
+            let read_error = |_| panic!("cancellation is not read failure");
+            let result = if html_body {
+                let prefix = std::io::Cursor::new(vec![b'x'; 2048]);
+                read_ingest_prefix(
+                    &mut prefix.chain(&mut source),
+                    super::super::html_diagnostic::MAX_HTML_BYTES + 1,
+                    Some(&flag),
+                    read_error,
+                )
+            } else {
+                read_ingest_prefix(&mut source, 2048, Some(&flag), read_error)
+            };
+            assert!(matches!(result, Err(CoreError::Cancelled)));
+            assert!(source.1);
         }
     }
 
