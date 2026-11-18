@@ -18,6 +18,7 @@ pub mod format_profile;
 pub mod frame;
 pub mod governed_citation;
 pub mod hybrid_retrieval;
+pub mod import_attempt_diagnostic;
 pub mod import_diagnose;
 pub mod import_outcome;
 pub mod import_preview;

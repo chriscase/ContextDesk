@@ -85,6 +85,44 @@ export function ImportFlow({
     importFlowReducer,
     initialState ?? INITIAL_IMPORT_FLOW_STATE,
   );
+  const [diagnosticId, setDiagnosticId] = useState<string | null>(null);
+  const diagnosticIdRef = useRef<string | null>(null);
+  const [diagnosticMessage, setDiagnosticMessage] = useState<string | null>(null);
+  const [diagnosticSaving, setDiagnosticSaving] = useState(false);
+  const reserveDiagnostic = async () => {
+    diagnosticIdRef.current = null;
+    setDiagnosticId(null);
+    setDiagnosticMessage(null);
+    if (!engine.import.beginDiagnostic) return undefined;
+    try {
+      const id = await engine.import.beginDiagnostic();
+      if (!mountedRef.current) return undefined;
+      diagnosticIdRef.current = id;
+      setDiagnosticId(id);
+      return id;
+    } catch {
+      if (mountedRef.current) setDiagnosticMessage("Import diagnostics are unavailable for this attempt.");
+      return undefined;
+    }
+  };
+  const exportDiagnostic = async () => {
+    const id = diagnosticIdRef.current;
+    if (!id || !engine.import.saveDiagnostic) return;
+    setDiagnosticSaving(true);
+    setDiagnosticMessage(null);
+    try {
+      const result = await engine.import.saveDiagnostic(id);
+      if (mountedRef.current && diagnosticIdRef.current === id) {
+        setDiagnosticMessage(result.status === "saved" ? "Import diagnostic saved." : "Export cancelled. No file was written.");
+      }
+    } catch {
+      if (mountedRef.current && diagnosticIdRef.current === id) {
+        setDiagnosticMessage("Could not export this attempt. Its report may have expired; existing files are never replaced.");
+      }
+    } finally {
+      if (mountedRef.current) setDiagnosticSaving(false);
+    }
+  };
   const [confirmed, setConfirmed] = useState(false);
   const [previewExitRequested, setPreviewExitRequested] = useState(false);
   const [previewCancelError, setPreviewCancelError] = useState<string | null>(null);
@@ -178,7 +216,9 @@ export function ImportFlow({
     setPreviewExitRequested(false);
     setPreviewCancelError(null);
     try {
-      const plan = await engine.import.preview(path);
+      const id = await reserveDiagnostic();
+      if (!mountedRef.current || previewExitRequestedRef.current) return;
+      const plan = await engine.import.preview(path, id);
       if (!mountedRef.current || previewExitRequestedRef.current) return;
       dispatch({ type: "PREVIEW_OK", plan });
     } catch (error) {
@@ -213,7 +253,14 @@ export function ImportFlow({
     dispatch({ type: "RUN_STARTED" });
     const correlationId = onRunStarted?.(sourceKind) ?? undefined;
     try {
+      const id = await reserveDiagnostic();
+      if (!mountedRef.current || stateRef.current.exitRequested) {
+        dispatch({ type: "RUN_CANCELLED" });
+        onRunSettled?.({ startedAtMs, endedAtMs: Date.now(), outcome: "cancelled", sourceKind });
+        return;
+      }
       const report = await engine.import.run({
+        diagnosticId: id,
         path: current.path,
         name: current.corpusName.trim() || undefined,
         planToken: current.plan.planToken,
@@ -281,6 +328,15 @@ export function ImportFlow({
 
   return (
     <div className={`import-flow import-flow--${variant}`}>
+      {diagnosticId && engine.import.saveDiagnostic && !["choose", "previewing", "running"].includes(state.stage) ? (
+        <section className="import-flow__diagnostic" aria-label="Import diagnostic">
+          <button type="button" disabled={diagnosticSaving} onClick={() => void exportDiagnostic()}>
+            {diagnosticSaving ? "Exporting…" : "Export import diagnostic…"}
+          </button>
+          <p className="import-flow__hint">Privacy-safe counts and reason codes from this attempt only. No paths, filenames, log text, timestamps, credentials, or provider details. Save to a new JSON file.</p>
+          {diagnosticMessage ? <p role="status">{diagnosticMessage}</p> : null}
+        </section>
+      ) : null}
       {state.stage === "choose" ? (
         <section className="import-flow__choose" aria-label="Choose input">
           <p className="import-flow__lead">

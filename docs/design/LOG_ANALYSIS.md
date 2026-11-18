@@ -355,9 +355,19 @@ Enforcement is automated (`import_diagnose` denylist tests), not review-only.
 
 ### Transport-neutral API
 
-Hosts that want a future “Export import diagnostic” button should call
-`cd_core::log_analysis::diagnose_log_import` and
-`write_import_diagnostic_report` — no renderer UI is required by this module.
+Offline hosts call `cd_core::log_analysis::diagnose_log_import` and
+`write_import_diagnostic_report`. The desktop reviewed import flow instead uses
+`import_attempt_diagnostic::ImportAttemptDiagnostic` to capture the **actual**
+preview, verified selection, ingest result, or terminal failure. It never runs
+an offline replay while claiming to describe the user’s completed attempt.
+
+The desktop host retains 16 process-local one-shot handles. The renderer may
+request a reservation and ask the native host to export one handle; it cannot
+supply report content, output path, overwrite permission, or preview aggregates.
+Only a matching host-held plan token can carry preview aggregates into a run.
+Every export serializes an allowlisted projection and atomically publishes via
+`persist_noclobber`; expired, pending, and unknown handles fail closed, with no
+fallback to the latest report. No capability/CSP/plugin changes are needed.
 The writer refuses an existing output path; choose a new path or remove a
 previously reviewed report before rerunning it.
 
