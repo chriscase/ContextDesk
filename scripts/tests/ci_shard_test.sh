@@ -719,7 +719,7 @@ for block in ubuntu_runs.splitlines():
     if stripped == "cargo test --workspace":
         raise SystemExit("ubuntu rust job must not run cargo test --workspace")
 
-for preflight in ("rust-macos", "rust-windows"):
+for preflight in ("rust-windows",):
     runs = "\n".join(s.get("run") or "" for s in steps(jobs[preflight]))
     if "cargo test --workspace --no-run" in runs:
         raise SystemExit(f"{preflight} must not rebuild the workspace suite")
@@ -729,8 +729,7 @@ for preflight in ("rust-macos", "rust-windows"):
     if not uploads or uploads[0]["with"].get("overwrite") not in (True, "true"):
         raise SystemExit(f"{preflight} cache-status upload must support failed-job reruns")
 
-for name, os_name in (("rust-macos-cache-probe", "macos-latest"),
-                      ("rust-windows-cache-probe", "windows-latest")):
+for name, os_name in (("rust-windows-cache-probe", "windows-latest"),):
     probe = jobs[name]
     if probe.get("outputs", {}).get("cache-hit") != "${{ steps.rust-cache.outputs.cache-hit }}":
         raise SystemExit(f"{name} must expose cache-hit")
@@ -744,8 +743,7 @@ for name, os_name in (("rust-macos-cache-probe", "macos-latest"),
     if cache.get("env-vars"):
         raise SystemExit(f"{name} must keep rust-cache default env prefixes")
 
-for name, os_name in (("rust-macos-cache-warmup", "macos-latest"),
-                      ("rust-windows-cache-warmup", "windows-latest")):
+for name, os_name in (("rust-windows-cache-warmup", "windows-latest"),):
     warmup = jobs[name]
     if "cargo test --workspace --no-run" not in "\n".join(s.get("run") or "" for s in steps(warmup)):
         raise SystemExit(f"{name} must compile workspace tests on a cache miss")
@@ -783,7 +781,7 @@ for name, forbidden in (
         raise SystemExit(f"{name} must not wait on the other desktop OS")
 
 for os_name, shard_job, agg_job, preflight in (
-    ("macos-latest", "rust-macos-shard", "rust-macos-tests", "rust-macos"),
+    # macOS runner-local preparation, receipts and topology: ci_macos_local_test.py.
     ("windows-latest", "rust-windows-shard", "rust-windows-tests", "rust-windows"),
 ):
     logical_os = os_name.removesuffix("-latest")

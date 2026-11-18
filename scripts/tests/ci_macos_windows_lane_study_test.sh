@@ -40,7 +40,7 @@ grep -q 'name: rust (windows-latest)' "$WF" ||
 for os in macos windows; do
   [ "$(sh "$CONFIG" count "$os")" = 4 ] ||
     fail "$os canonical shard count is not four"
-  grep -q "fromJSON(needs.rust-shard-config.outputs.${os}_matrix)" "$WF" ||
+  grep -q "fromJSON(needs.rust-shard-config.outputs.${os}_matrix" "$WF" ||
     fail "ci.yml does not consume the canonical $os shard matrix"
 done
 # Each OS chain must stay independent: macOS jobs must not wait on Windows
@@ -77,7 +77,7 @@ grep -q 'Do not skip units' "$TMP/text" ||
   fail "study text dropped the no-skip rule"
 grep -q 'Do not treat cache miss as success' "$TMP/text" ||
   fail "study text dropped the honest-cache rule"
-grep -q 'Staged workflow shape' "$TMP/text" ||
+grep -q 'Historical distributed workflow shape' "$TMP/text" ||
   fail "study text no longer describes the staged implementation"
 
 units=$(jq -r .unit_count "$TMP/json")
