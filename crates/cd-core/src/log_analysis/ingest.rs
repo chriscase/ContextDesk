@@ -2414,6 +2414,7 @@ fn ingest_framed_record(
             timestamp_provenance: parsed.timestamp_provenance,
             active_timestamp_basis: parsed.active_timestamp_basis,
             unresolved_local_timestamp: parsed.unresolved_local_timestamp,
+            severity: parsed.severity,
             level: parsed.level,
             service: parsed.service,
             host: parsed.host,

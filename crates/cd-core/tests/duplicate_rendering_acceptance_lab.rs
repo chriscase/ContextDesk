@@ -311,6 +311,7 @@ fn naive_adjacency_group_count(rows: &[(u64, String, String)]) -> usize {
 
 fn synthetic_event(seq: u64, ts: i64, source: &str, message: &str) -> ExplorerEvent {
     ExplorerEvent {
+        severity: Default::default(),
         seq,
         ts,
         timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -677,6 +678,7 @@ fn product_path_revision_change_and_non_mutating_analysis() {
     // Concurrent mutation after pin observation bumps the durable revision.
     corpus
         .push_events(&[LogEvent {
+            severity: Default::default(),
             seq: 99_999,
             ts: 1_700_000_999,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,

@@ -949,6 +949,7 @@ fn mutation_interleaved_threads_do_not_merge_into_one_episode() {
 
     fn ev(seq: u64, ts: i64, source: &str, msg: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1006,6 +1007,7 @@ fn mutation_conflicting_trace_ids_refuse_duplicate_merge() {
 
     fn ev(seq: u64, ts: i64, source: &str, msg: &str, trace: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1098,6 +1100,7 @@ fn mutation_revision_drift_fail_closed_on_real_format_corpus() {
         .expect("pins event revision");
     corpus2
         .push_events(&[LogEvent {
+            severity: Default::default(),
             seq: 99_999_991,
             ts: 1_700_000_999,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1208,6 +1211,7 @@ fn mutation_near_window_timestamp_jitter_without_execution_key_fails_closed() {
     // claim a strongly-supported multi-app 8-rendering episode.
     fn ev(seq: u64, ts: i64, source: &str, msg: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1293,6 +1297,7 @@ fn mutation_render_cap_discloses_partial_without_inventing_episode_geometry() {
     // Exceed physical rendering cap via analyze_bounded_events.
     fn ev(seq: u64, ts: i64, msg: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1345,6 +1350,7 @@ fn mutation_ambiguous_shared_type_without_execution_boundary_fails_closed() {
     // app + stderr streams — must not form a strongly-supported 8-rendering episode.
     fn ev(seq: u64, source: &str, msg: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts: 1_000,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1442,6 +1448,7 @@ fn mutation_message_equality_alone_does_not_merge_far_windows() {
 
     fn ev(seq: u64, ts: i64, source: &str, msg: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1485,6 +1492,7 @@ fn mutation_input_reorder_is_deterministic_for_bounded_events() {
 
     fn ev(seq: u64, ts: i64, source: &str, msg: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1544,6 +1552,7 @@ fn mutation_reused_thread_name_across_far_windows_does_not_cross_merge() {
 
     fn ev(seq: u64, ts: i64, source: &str, msg: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1588,6 +1597,7 @@ fn mutation_missing_stderr_header_does_not_invent_episode_counts() {
 
     fn ev(seq: u64, ts: i64, source: &str, msg: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,

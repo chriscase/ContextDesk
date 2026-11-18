@@ -336,3 +336,19 @@ force HTML parsing. Sample fragments cannot establish whole-document eligibility
 Reports with operative stylesheets cannot establish visible content statically. They remain supporting evidence; the reader reports visibility as unverified rather than presenting an empty report as complete. No stylesheet is fetched or executed.
 
 For HTML-derived events, **Original** may show a withholding notice instead of markup. Records containing character references, attributes, comments, or redacted content are not stored as raw text: decoding or dropping markup could otherwise undo redaction. The source byte count and digest still refer to the original input, which the importer does not modify.
+
+## Reading severity in an event
+
+The Explorer's **Level** is the band used for filtering and template ranking.
+Open the event details to distinguish that band from what the producer actually
+recorded. The source may say `DEBUG5`, for example, while the filter shows
+`debug`. Numeric source values stay numeric: Windows Event Level 2 is an error,
+whereas a bare JSON `"level": 2` is not enough to identify a scale. A mapped
+OpenTelemetry number is an interpretation, not a new statement by the producer.
+
+A valid syslog priority supplies severity independently of its facility. An
+explicit envelope level takes precedence over payload text. HTTP status, process
+stream, and words such as “no errors detected” do not declare severity. When a
+message alone suggests an error or warning, details identify that inference;
+an event without trustworthy evidence stays unknown. Older corpora keep their
+existing filter levels and do not acquire invented source values on reopen.

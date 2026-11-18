@@ -57,6 +57,13 @@ fn fixtures_dir() -> PathBuf {
 
 fn explorer_event_full() -> ExplorerEvent {
     ExplorerEvent {
+        severity: cd_core::log_analysis::LogSeverityEvidence {
+            severity_number: Some(17),
+            severity_text: None,
+            source_severity: Some(serde_json::json!(50)),
+            severity_inferred: false,
+            provenance: "schema_mapped".into(),
+        },
         seq: 42,
         ts: 1_735_991_449,
         timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -75,6 +82,7 @@ fn explorer_event_full() -> ExplorerEvent {
 
 fn explorer_event_sparse() -> ExplorerEvent {
     ExplorerEvent {
+        severity: Default::default(),
         seq: 43,
         ts: 17_123,
         timestamp_provenance: TimestampProvenance::OrderOnly,

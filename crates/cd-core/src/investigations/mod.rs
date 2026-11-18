@@ -3066,6 +3066,7 @@ mod tests {
         corpus
             .push_events(&[
                 LogEvent {
+                    severity: Default::default(),
                     seq: 10,
                     ts: 1_700_000_010,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -3081,6 +3082,7 @@ mod tests {
                     source: "api/app.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 11,
                     ts: 1_700_000_011,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -3096,6 +3098,7 @@ mod tests {
                     source: "api/app.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 12,
                     ts: 1_700_000_012,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,

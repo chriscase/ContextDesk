@@ -382,6 +382,9 @@ impl CorpusSummary {
 /// One stored line event after parse/template/redact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEvent {
+    /// Additive lossless severity evidence; legacy rows do not invent source values.
+    #[serde(default, flatten)]
+    pub severity: super::severity::LogSeverityEvidence,
     /// Event sequence within corpus.
     pub seq: u64,
     /// Unix seconds.
@@ -946,6 +949,9 @@ impl LogCorpus {
         }
         for (event, _) in &rows {
             event.validate_timestamp_provenance()?;
+            if !event.severity.is_valid() {
+                return Err(CoreError::Message("invalid severity evidence".into()));
+            }
         }
         let conn = self.db.lock().map_err(|_| lock_err())?;
         conn.execute_batch("BEGIN").map_err(duck_err)?;
@@ -977,6 +983,8 @@ impl LogCorpus {
                         e.timestamp_provenance.as_storage_str(),
                         e.active_timestamp_basis.as_storage_str(),
                         e.unresolved_local_timestamp.as_deref(),
+                        serde_json::to_string(&e.severity)
+                            .map_err(|e| CoreError::Message(e.to_string()))?,
                     ])
                     .map_err(|e| CoreError::Message(format!("duckdb append: {e}")))?;
                 }
@@ -1342,7 +1350,7 @@ impl LogCorpus {
         let mut stmt = conn
             .prepare(
                 "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
-                        timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp \
+                        timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp, severity_evidence \
                  FROM events ORDER BY seq",
             )
             .map_err(duck_err)?;
@@ -1364,6 +1372,7 @@ impl LogCorpus {
                     r.get::<_, Option<String>>(10)?,
                     r.get::<_, Option<String>>(11)?,
                     r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<String>>(13)?,
                 ))
             })
             .map_err(duck_err)?;
@@ -1383,6 +1392,7 @@ impl LogCorpus {
                 stored_provenance,
                 stored_active_basis,
                 unresolved_local_timestamp,
+                stored_severity,
             ) = row.map_err(duck_err)?;
             let timestamp_provenance = TimestampProvenance::from_storage_str(
                 stored_provenance.as_deref(),
@@ -1393,6 +1403,7 @@ impl LogCorpus {
             )
             .ok_or_else(|| CoreError::Message("event has invalid active timestamp basis".into()))?;
             let event = LogEvent {
+                severity: decode_severity_evidence(stored_severity.as_deref())?,
                 seq: u64::try_from(seq)
                     .map_err(|_| CoreError::Message("event sequence is negative".into()))?,
                 ts,
@@ -1716,7 +1727,8 @@ fn init_schema(conn: &Connection) -> CoreResult<()> {
             original_redaction_applied BOOLEAN,
             timestamp_provenance VARCHAR,
             active_timestamp_basis VARCHAR,
-            unresolved_local_timestamp VARCHAR
+            unresolved_local_timestamp VARCHAR,
+            severity_evidence VARCHAR
         );
         ALTER TABLE events ADD COLUMN IF NOT EXISTS original_redacted VARCHAR;
         ALTER TABLE events ADD COLUMN IF NOT EXISTS original_source_bytes BIGINT;
@@ -1727,6 +1739,7 @@ fn init_schema(conn: &Connection) -> CoreResult<()> {
         ALTER TABLE events ADD COLUMN IF NOT EXISTS timestamp_provenance VARCHAR;
         ALTER TABLE events ADD COLUMN IF NOT EXISTS active_timestamp_basis VARCHAR;
         ALTER TABLE events ADD COLUMN IF NOT EXISTS unresolved_local_timestamp VARCHAR;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS severity_evidence VARCHAR;
         CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
         CREATE INDEX IF NOT EXISTS idx_events_timestamp_provenance ON events(timestamp_provenance);
         CREATE INDEX IF NOT EXISTS idx_events_active_timestamp_basis ON events(active_timestamp_basis);
@@ -2053,6 +2066,38 @@ pub fn dir_size(path: &Path) -> u64 {
 /// Content hash for template embed cache.
 pub fn template_content_hash(pattern: &str) -> String {
     crate::embed::chunk_content_key(pattern)
+}
+
+/// NULL means pre-evidence legacy data. Persisted objects must be complete,
+/// bounded, exact-schema evidence rather than silently defaulting missing keys.
+pub(crate) fn decode_severity_evidence(
+    raw: Option<&str>,
+) -> CoreResult<super::severity::LogSeverityEvidence> {
+    let invalid = || CoreError::Message("invalid stored severity evidence".into());
+    let Some(raw) = raw else {
+        return Ok(Default::default());
+    };
+    if raw.len() > 1024 {
+        return Err(invalid());
+    }
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| invalid())?;
+    let fields = [
+        "severityNumber",
+        "severityText",
+        "sourceSeverity",
+        "severityInferred",
+        "provenance",
+    ];
+    let object = value.as_object().ok_or_else(invalid)?;
+    if object.len() != fields.len() || fields.iter().any(|field| !object.contains_key(*field)) {
+        return Err(invalid());
+    }
+    let evidence: super::severity::LogSeverityEvidence =
+        serde_json::from_value(value).map_err(|_| invalid())?;
+    if !evidence.is_valid() {
+        return Err(invalid());
+    }
+    Ok(evidence)
 }
 
 #[cfg(test)]
@@ -2493,6 +2538,7 @@ mod tests {
         assert!(c.root().join("events.duckdb").exists());
         let id = c.id().to_string();
         c.push_events(&[LogEvent {
+            severity: Default::default(),
             seq: 0,
             ts: 1,
             timestamp_provenance: TimestampProvenance::OrderOnly,
@@ -2595,6 +2641,7 @@ mod tests {
         corpus
             .push_events(&[
                 LogEvent {
+                    severity: Default::default(),
                     seq: 1,
                     ts: 946_684_799,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2610,6 +2657,7 @@ mod tests {
                     source: "old.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 2,
                     ts: 1_000_000_000,
                     timestamp_provenance: TimestampProvenance::UnresolvedLocal,
@@ -2625,6 +2673,7 @@ mod tests {
                     source: "server.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 3,
                     ts: 1_000_000_001,
                     timestamp_provenance: TimestampProvenance::OrderOnly,
@@ -2687,6 +2736,7 @@ mod tests {
         let corpus = LogCorpus::create(dir.path(), "reversible local resolution").unwrap();
         let id = corpus.id().to_string();
         let mut event = LogEvent {
+            severity: Default::default(),
             seq: 42,
             ts: 42,
             timestamp_provenance: TimestampProvenance::UnresolvedLocal,
@@ -2824,6 +2874,7 @@ mod tests {
         corpus
             .push_events(&[
                 LogEvent {
+                    severity: Default::default(),
                     seq: 1,
                     ts: 10,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2839,6 +2890,7 @@ mod tests {
                     source: "a.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 2,
                     ts: 20,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2874,6 +2926,7 @@ mod tests {
             .unwrap();
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 3,
                 ts: 5,
                 timestamp_provenance: TimestampProvenance::OrderOnly,
@@ -2941,6 +2994,7 @@ mod tests {
         let t_ingest = Instant::now();
         for i in 0..n {
             batch.push(LogEvent {
+                severity: Default::default(),
                 seq: i,
                 ts: (i / 10) as i64,
                 timestamp_provenance: TimestampProvenance::OrderOnly,
@@ -3004,6 +3058,7 @@ mod tests {
         let t_ingest = Instant::now();
         for i in 0..n {
             batch.push(LogEvent {
+                severity: Default::default(),
                 seq: i,
                 ts: (i / 100) as i64,
                 timestamp_provenance: TimestampProvenance::OrderOnly,
@@ -3080,5 +3135,96 @@ mod tests {
             freq_dt.as_secs_f64() < 60.0,
             "frequency scan too slow: {freq_dt:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod severity_persistence_tests {
+    use super::*;
+    #[test]
+    fn severity_evidence_survives_reopen_and_legacy_null_is_not_invented() {
+        let temp = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(temp.path(), "severity").unwrap();
+        let id = corpus.id().to_string();
+        let evidence = super::super::severity::LogSeverityEvidence {
+            severity_number: Some(13),
+            severity_text: None,
+            source_severity: Some(serde_json::json!(30)),
+            severity_inferred: false,
+            provenance: "schema_mapped".into(),
+        };
+        corpus
+            .push_events(&[LogEvent {
+                severity: evidence.clone(),
+                seq: 0,
+                ts: 0,
+                timestamp_provenance: TimestampProvenance::OrderOnly,
+                active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                unresolved_local_timestamp: None,
+                level: "warn".into(),
+                service: None,
+                host: None,
+                template_id: 0,
+                params: vec![],
+                trace_id: None,
+                message: "fixture".into(),
+                source: "test.log".into(),
+            }])
+            .unwrap();
+        drop(corpus);
+        let corpus = LogCorpus::open(temp.path(), &id).unwrap();
+        assert_eq!(corpus.load_all_events().unwrap()[0].severity, evidence);
+        let page = super::super::query::query_events(&corpus, &Default::default()).unwrap();
+        assert_eq!(page.events[0].severity, evidence);
+        corpus
+            .with_connection(|conn| {
+                conn.execute("UPDATE events SET severity_evidence = NULL", [])
+                    .map_err(duck_err)?;
+                Ok(())
+            })
+            .unwrap();
+        let page = super::super::query::query_events(&corpus, &Default::default()).unwrap();
+        assert_eq!(page.events[0].severity, Default::default());
+        assert_eq!(page.events[0].level, "warn");
+        corpus
+            .with_connection(|conn| {
+                conn.execute("UPDATE events SET severity_evidence = 'not-json'", [])
+                    .map_err(duck_err)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(super::super::query::query_events(&corpus, &Default::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod severity_validation_tests {
+    use super::*;
+    #[test]
+    fn persisted_severity_rejects_bad_but_valid_json() {
+        let valid =
+            serde_json::to_value(super::super::severity::LogSeverityEvidence::default()).unwrap();
+        assert!(decode_severity_evidence(Some(&valid.to_string())).is_ok());
+        for raw in [
+            "{}".to_owned(),
+            "[]".to_owned(),
+            "null".to_owned(),
+            " ".repeat(1025),
+        ] {
+            assert!(decode_severity_evidence(Some(&raw)).is_err());
+        }
+        for (field, value) in [
+            ("provenance", serde_json::json!("untrusted")),
+            ("severityNumber", serde_json::json!(25)),
+            (
+                "sourceSeverity",
+                serde_json::json!({"secret":"not a scalar"}),
+            ),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut bad = valid.clone();
+            bad[field] = value;
+            assert!(decode_severity_evidence(Some(&bad.to_string())).is_err());
+        }
     }
 }

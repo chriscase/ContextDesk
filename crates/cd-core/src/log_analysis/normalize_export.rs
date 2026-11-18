@@ -30,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Producer identity stamped on every normalize export header.
 pub const NORMALIZE_PRODUCER_NAME: &str = "contextdesk-normalize";
 /// Producer version for this export path.
-pub const NORMALIZE_PRODUCER_VERSION: &str = "1.0.0";
+pub const NORMALIZE_PRODUCER_VERSION: &str = "1.1.0";
 
 /// Typed attribute carried when the rendered message had to be bounded for
 /// the normalized v1 contract. The retained canonical already carries its
@@ -171,84 +171,47 @@ pub fn severity_absent() -> Severity {
 /// Never used with `confidence=low`. Never applied to the stored normalized
 /// `level` column alone as if it were source truth.
 pub fn documented_level_to_otel(token: &str) -> Option<u8> {
-    match token.to_ascii_lowercase().as_str() {
-        "trace" | "debug" | "d" => Some(5),
-        "info" | "information" | "notice" | "i" => Some(9),
-        "warn" | "warning" | "w" => Some(13),
-        "error" | "err" | "e" => Some(17),
-        "fatal" | "critical" | "crit" | "alert" | "emergency" | "f" => Some(21),
-        _ => None,
-    }
+    let band = super::parse::normalize_level(token);
+    super::severity::band_number(&band)
 }
 
-/// Recover severity only from the retained original representation.
-///
-/// - JSON object with a real `severity` / `level` / `lvl` field → raw preserved;
-///   string tokens use [`documented_level_to_otel`] as **schema_mapped** + medium;
-///   numeric 0–24 uses **source_declared** + high when the field is clearly severity.
-/// - Otherwise → [`severity_absent`] (store-only / no invented value).
-///
-/// The stored ingest `level` column is **never** treated as source-declared.
-pub fn severity_from_original(original: Option<&str>) -> Severity {
-    let Some(text) = original.map(str::trim).filter(|s| !s.is_empty()) else {
-        return severity_absent();
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
-        return severity_absent();
-    };
-    let Some(obj) = v.as_object() else {
-        return severity_absent();
-    };
-    let raw_val = obj
-        .get("severity")
-        .or_else(|| obj.get("level"))
-        .or_else(|| obj.get("lvl"))
-        .or_else(|| obj.get("log.level"))
-        .cloned();
-    let Some(raw_val) = raw_val else {
-        return severity_absent();
-    };
-    match &raw_val {
-        serde_json::Value::Number(n) => {
-            if let Some(u) = n.as_u64().filter(|u| *u <= 24) {
-                return Severity {
-                    raw: Some(raw_val),
-                    canonical: Some(u as u8),
-                    confidence: SeverityConfidence::High,
-                    provenance: SeverityProvenance::SourceDeclared,
-                };
-            }
-            severity_absent()
-        }
-        serde_json::Value::String(s) => {
-            if let Some(canonical) = documented_level_to_otel(s) {
-                // Documented vocabulary mapping from an exact recovered token.
-                Severity {
-                    raw: Some(raw_val),
-                    canonical: Some(canonical),
-                    confidence: SeverityConfidence::Medium,
-                    provenance: SeverityProvenance::SchemaMapped,
-                }
-            } else {
-                // Recovered token we cannot map — keep raw only as source_declared
-                // would require a canonical? Source_declared with raw string and
-                // no canonical is allowed by validator if pair is coherent (high).
-                Severity {
-                    raw: Some(raw_val),
-                    canonical: None,
-                    confidence: SeverityConfidence::High,
-                    provenance: SeverityProvenance::SourceDeclared,
-                }
-            }
-        }
-        _ => severity_absent(),
+/// Legacy compatibility helper. Severity is never recovered from retained
+/// originals: typed, validated ingest evidence is the sole authority.
+pub fn severity_from_original(_original: Option<&str>) -> Severity {
+    severity_absent()
+}
+
+/// Map validated typed evidence without promoting a legacy normalized level
+/// or a private original representation to source truth.
+pub fn severity_from_evidence(
+    evidence: &super::severity::LogSeverityEvidence,
+) -> CoreResult<Severity> {
+    if !evidence.is_valid() {
+        return Err(CoreError::Policy("invalid severity evidence".into()));
     }
+    let (provenance, confidence) = match evidence.provenance.as_str() {
+        "legacy_normalized" | "absent" | "invalid" | "ambiguous" => return Ok(severity_absent()),
+        "text_inferred" => (SeverityProvenance::TextInferred, SeverityConfidence::Low),
+        "schema_mapped" => (SeverityProvenance::SchemaMapped, SeverityConfidence::Medium),
+        "source_declared" => (SeverityProvenance::SourceDeclared, SeverityConfidence::High),
+        _ => {
+            return Err(CoreError::Policy(
+                "unsupported severity evidence provenance".into(),
+            ))
+        }
+    };
+    Ok(Severity {
+        raw: evidence.source_severity.clone(),
+        canonical: evidence.severity_number,
+        confidence,
+        provenance,
+    })
 }
 
 /// Store-only severity: always [`severity_absent`] (ignores stored `level`).
 ///
 /// Kept as a named API so callers cannot accidentally treat the ingest `level`
-/// column as source-declared severity. Prefer [`severity_from_original`].
+/// column as source-declared severity. Prefer [`severity_from_evidence`].
 pub fn map_level_severity(_level: &str) -> Severity {
     severity_absent()
 }
@@ -283,8 +246,7 @@ pub fn map_event_to_normalized(
             ))
         })?
         .to_string();
-    // Severity only from original when recoverable; else honest absent.
-    let severity = severity_from_original(Some(canonical.as_str()));
+    let severity = severity_from_evidence(&event.severity)?;
     debug_assert!(
         !(matches!(severity.provenance, SeverityProvenance::Absent)
             && (severity.raw.is_some() || severity.canonical.is_some())),
@@ -297,6 +259,13 @@ pub fn map_event_to_normalized(
     );
     let (message, message_truncated) = bound_normalized_message(&event.message);
     let mut attributes = serde_json::Map::new();
+    // Additive v1 attribute retains source text, typed raw value, exact number
+    // and interpretation even where the compact v1 severity projection cannot.
+    attributes.insert(
+        "contextdesk.severity_evidence".into(),
+        serde_json::to_value(&event.severity)
+            .map_err(|_| CoreError::Policy("invalid severity evidence".into()))?,
+    );
     if message_truncated {
         attributes.insert(
             MESSAGE_TRUNCATED_ATTRIBUTE.to_string(),
@@ -447,6 +416,7 @@ fn try_producer_resolve(
         active_timestamp_basis: event.active_timestamp_basis,
         unresolved_local_timestamp: Some(local_text.to_string()),
         level: event.level.clone(),
+        severity: event.severity.clone(),
         service: event.service.clone(),
         host: event.host.clone(),
         trace_id: event.trace_id.clone(),
@@ -501,6 +471,7 @@ type JoinedEventRow = (
     Option<String>, // original_redacted
     Option<bool>,   // original_truncated
     Option<bool>,   // original_redaction_applied
+    Option<String>, // severity_evidence
 );
 
 /// Decode one joined events-row (shared by first-page and keyset pages).
@@ -522,6 +493,7 @@ fn decode_event_with_original_row(row: JoinedEventRow) -> CoreResult<EventWithOr
         original_redacted,
         original_truncated,
         original_redaction_applied,
+        severity_evidence,
     ) = row;
     let timestamp_provenance = TimestampProvenance::from_storage_str(stored_provenance.as_deref())
         .ok_or_else(|| CoreError::Message("invalid timestamp provenance".into()))?;
@@ -535,6 +507,7 @@ fn decode_event_with_original_row(row: JoinedEventRow) -> CoreResult<EventWithOr
         active_timestamp_basis,
         unresolved_local_timestamp,
         level,
+        severity: super::store::decode_severity_evidence(severity_evidence.as_deref())?,
         service,
         host,
         template_id: u64::try_from(template_id)
@@ -569,13 +542,13 @@ pub fn load_events_with_originals_page(
     corpus.with_connection(|conn| {
         let sql_first = "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
                         timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp, \
-                        original_redacted, original_truncated, original_redaction_applied \
+                        original_redacted, original_truncated, original_redaction_applied, severity_evidence \
                  FROM events \
                  ORDER BY seq \
                  LIMIT ?1";
         let sql_keyset = "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
                         timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp, \
-                        original_redacted, original_truncated, original_redaction_applied \
+                        original_redacted, original_truncated, original_redaction_applied, severity_evidence \
                  FROM events \
                  WHERE seq > ?1 \
                  ORDER BY seq \
@@ -601,6 +574,7 @@ pub fn load_events_with_originals_page(
                 r.get::<_, Option<String>>(13)?,
                 r.get::<_, Option<bool>>(14)?,
                 r.get::<_, Option<bool>>(15)?,
+                r.get::<_, Option<String>>(16)?,
             ))
         };
 
@@ -971,6 +945,7 @@ mod tests {
             active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
             unresolved_local_timestamp: None,
             level: "info".into(),
+            severity: Default::default(),
             service: None,
             host: None,
             template_id: 1,
@@ -1053,13 +1028,205 @@ mod tests {
     }
 
     #[test]
-    fn severity_from_json_original_can_be_schema_mapped_medium() {
-        let orig = r#"{"ts":"2026-01-01T00:00:00Z","level":"ERROR","msg":"x"}"#;
+    fn severity_is_never_recovered_from_original_text() {
+        let orig = r#"{"level":"ERROR","severity":24,"msg":"private source"}"#;
         let s = severity_from_original(Some(orig));
-        assert_eq!(s.provenance, SeverityProvenance::SchemaMapped);
-        assert_eq!(s.confidence, SeverityConfidence::Medium);
-        assert_eq!(s.canonical, Some(17));
-        assert_eq!(s.raw.as_ref().and_then(|v| v.as_str()), Some("ERROR"));
+        assert_eq!(s, severity_absent());
+        let n = map_event_to_normalized(
+            &base_event(),
+            Some(orig),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(n.severity, severity_absent());
+    }
+
+    #[test]
+    fn real_ingest_reopen_and_normalized_export_keep_trace_and_notice_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("levels.jsonl");
+        std::fs::write(&source, concat!(
+            "{\"timestamp\":\"2026-01-01T00:00:00Z\",\"level\":\"TRACE\",\"message\":\"trace fixture\"}\n",
+            "{\"timestamp\":\"2026-01-01T00:00:01Z\",\"level\":\"NOTICE\",\"message\":\"notice fixture\"}\n"
+        )).unwrap();
+        let cache = temp.path().join("cache");
+        let report =
+            super::super::ingest::ingest_path(&cache, &source, "severity export", None, "none")
+                .unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let rows = load_events_with_originals(&corpus).unwrap();
+        assert_eq!(rows.len(), 2);
+        for ((event, original, truncated, _), (token, number)) in
+            rows.iter().zip([("TRACE", 1), ("NOTICE", 10)])
+        {
+            assert_eq!(event.severity.severity_number, Some(number));
+            assert_eq!(event.severity.severity_text.as_deref(), Some(token));
+            assert_eq!(
+                event.severity.source_severity,
+                Some(serde_json::json!(token))
+            );
+            let normalized = map_event_to_normalized(
+                event,
+                original.as_deref(),
+                *truncated,
+                &NormalizeTimezonePolicy::default(),
+            )
+            .unwrap();
+            assert_eq!(normalized.severity.canonical, Some(number));
+            assert_eq!(normalized.severity.raw, Some(serde_json::json!(token)));
+            assert_eq!(
+                normalized.attributes["contextdesk.severity_evidence"]["severityText"],
+                token
+            );
+            let mut diagnostics = Vec::new();
+            crate::normalized_log_events::validate_event(
+                &normalized,
+                event.seq,
+                event.seq + 2,
+                &mut diagnostics,
+            );
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn normalized_export_preserves_typed_evidence_not_conflicting_original() {
+        use super::super::severity::LogSeverityEvidence;
+        let mut e = base_event();
+        e.severity = LogSeverityEvidence {
+            severity_number: Some(17),
+            severity_text: Some("ERROR".into()),
+            source_severity: Some(serde_json::json!("ERROR")),
+            severity_inferred: false,
+            provenance: "schema_mapped".into(),
+        };
+        let n = map_event_to_normalized(
+            &e,
+            Some(r#"{"level":"DEBUG"}"#),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(n.severity.canonical, Some(17));
+        assert_eq!(n.severity.raw, Some(serde_json::json!("ERROR")));
+        assert_eq!(n.severity.confidence, SeverityConfidence::Medium);
+        assert_eq!(
+            n.attributes.get("contextdesk.severity_evidence"),
+            Some(&serde_json::to_value(&e.severity).unwrap())
+        );
+        let mut diagnostics = Vec::new();
+        crate::normalized_log_events::validate_event(&n, 0, 2, &mut diagnostics);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn normalized_export_keeps_numeric_source_type_and_rejects_unsafe_typed_values() {
+        use super::super::severity::LogSeverityEvidence;
+        let mut e = base_event();
+        e.severity = LogSeverityEvidence {
+            severity_number: Some(21),
+            severity_text: None,
+            source_severity: Some(serde_json::json!(60)),
+            severity_inferred: false,
+            provenance: "schema_mapped".into(),
+        };
+        let n = map_event_to_normalized(
+            &e,
+            Some("retained redacted input"),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(n.severity.raw, Some(serde_json::json!(60)));
+        assert_eq!(n.severity.canonical, Some(21));
+        e.severity.source_severity = Some(serde_json::json!({"secret": "not a severity scalar"}));
+        assert!(map_event_to_normalized(
+            &e,
+            Some("safe"),
+            false,
+            &NormalizeTimezonePolicy::default()
+        )
+        .is_err());
+        e.severity.source_severity = Some(serde_json::json!(60));
+        e.severity.severity_number = Some(25);
+        assert!(severity_from_evidence(&e.severity).is_err());
+    }
+
+    #[test]
+    fn inferred_and_ambiguous_severity_never_claim_declared_certainty() {
+        use super::super::severity::LogSeverityEvidence;
+        let inferred = LogSeverityEvidence {
+            severity_number: Some(17),
+            severity_inferred: true,
+            provenance: "text_inferred".into(),
+            ..Default::default()
+        };
+        let mapped = severity_from_evidence(&inferred).unwrap();
+        assert_eq!(mapped.provenance, SeverityProvenance::TextInferred);
+        assert_eq!(mapped.confidence, SeverityConfidence::Low);
+        assert!(mapped.raw.is_none());
+        let mut e = base_event();
+        e.severity = LogSeverityEvidence {
+            severity_text: Some("CUSTOM".into()),
+            source_severity: Some(serde_json::json!("CUSTOM")),
+            provenance: "ambiguous".into(),
+            ..Default::default()
+        };
+        let n =
+            map_event_to_normalized(&e, Some("safe"), false, &NormalizeTimezonePolicy::default())
+                .unwrap();
+        assert_eq!(n.severity, severity_absent());
+        assert_eq!(
+            n.attributes["contextdesk.severity_evidence"]["sourceSeverity"],
+            serde_json::json!("CUSTOM")
+        );
+        assert_eq!(
+            n.attributes["contextdesk.severity_evidence"]["provenance"],
+            "ambiguous"
+        );
+    }
+
+    #[test]
+    fn joined_export_row_loads_typed_severity_and_legacy_stays_unknown() {
+        use super::super::severity::LogSeverityEvidence;
+        let evidence = LogSeverityEvidence {
+            severity_number: Some(5),
+            severity_text: Some("DEBUG".into()),
+            source_severity: Some(serde_json::json!("DEBUG")),
+            severity_inferred: false,
+            provenance: "schema_mapped".into(),
+        };
+        let row = |stored| {
+            (
+                0,
+                0,
+                "debug".into(),
+                None,
+                None,
+                1,
+                vec![],
+                None,
+                "hello".into(),
+                "source".into(),
+                None,
+                None,
+                None,
+                Some("safe original".into()),
+                Some(false),
+                Some(false),
+                stored,
+            )
+        };
+        let (e, _, _, _) =
+            decode_event_with_original_row(row(Some(serde_json::to_string(&evidence).unwrap())))
+                .unwrap();
+        assert_eq!(e.severity, evidence);
+        let (legacy, _, _, _) = decode_event_with_original_row(row(None)).unwrap();
+        assert_eq!(
+            severity_from_evidence(&legacy.severity).unwrap(),
+            severity_absent()
+        );
     }
 
     #[test]

@@ -336,6 +336,7 @@ mod tests {
         // Baseline 0..500: only heartbeats
         for i in 0..50 {
             events.push(LogEvent {
+                severity: Default::default(),
                 seq: i,
                 ts: i as i64 * 10,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -355,6 +356,7 @@ mod tests {
         let mut seq = 100u64;
         for i in 0..10 {
             events.push(LogEvent {
+                severity: Default::default(),
                 seq,
                 ts: 1000 + i * 5,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -371,6 +373,7 @@ mod tests {
             });
             seq += 1;
             events.push(LogEvent {
+                severity: Default::default(),
                 seq,
                 ts: 1000 + i * 5 + 2,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -387,6 +390,7 @@ mod tests {
             });
             seq += 1;
             events.push(LogEvent {
+                severity: Default::default(),
                 seq,
                 ts: 1000 + i * 5 + 3,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
