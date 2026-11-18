@@ -180,3 +180,56 @@ describe("EvidenceSelector keyboard and focus", () => {
     expect(screen.getByText(/8 discovered · 4 selected/)).toBeTruthy();
   });
 });
+
+it("shows supporting evidence as inert text without executing markup", () => {
+  const report = defaultMockPreview();
+  const item = report.items.find((entry) => entry.identity)!;
+  item.status = "supporting";
+  item.selected = false;
+  item.representative = '<img src="https://invalid.example/asset" onerror="alert(1)"> readable evidence';
+  render(<EvidenceSelector report={report} selected={new Set()} dispatch={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: `Inspect readable evidence from ${item.identity}` }));
+  const region = screen.getByRole("region", { name: "Readable evidence preview" });
+  expect(region.textContent).toContain("readable evidence");
+  expect(region.querySelector("img")).toBeNull();
+  expect(region.querySelector("script")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Close evidence preview" }));
+  expect(screen.queryByRole("region", { name: "Readable evidence preview" })).toBeNull();
+});
+
+it("loads bounded evidence on demand and distinguishes unverified stylesheet visibility", async () => {
+  const report = defaultMockPreview();
+  const item = report.items[0];
+  item.status = "supporting"; item.reasons = ["html_event_parsing_unsupported"];
+  render(<EvidenceSelector report={report} selected={new Set()} dispatch={() => {}}
+    onInspect={async (identity) => {
+      expect(identity).toBe(item.identity);
+      return { text: "", truncated: true, reason: "visibility_unverified_stylesheet" };
+    }} />);
+  fireEvent.click(screen.getByRole("button", { name: `Inspect readable evidence from ${item.identity}` }));
+  expect(await screen.findByText(/Readable text unavailable: stylesheet-dependent visibility/)).toBeTruthy();
+  expect(screen.queryByText(/Complete bounded visible text/)).toBeNull();
+});
+
+it("renders host inspected text literally with explicit truncation", async () => {
+  const report = defaultMockPreview();
+  report.items[0].status = "supporting"; report.items[0].reasons = ["html_event_parsing_unsupported"];
+  render(<EvidenceSelector report={report} selected={new Set()} dispatch={() => {}}
+    onInspect={async () => ({ text: "<script>never execute</script> retained text", truncated: true, reason: "ambiguous_structure" })} />);
+  fireEvent.click(screen.getByRole("button", { name: `Inspect readable evidence from ${report.items[0].identity}` }));
+  expect(await screen.findByText(/Truncated at the safe text limit/)).toBeTruthy();
+  const region = screen.getByRole("region", { name: "Readable evidence preview" });
+  expect(region.textContent).toContain("<script>never execute</script>");
+  expect(region.querySelector("script")).toBeNull();
+});
+
+it("uses the representative without calling HTML host inspection for ordinary rows", () => {
+  const report = defaultMockPreview();
+  report.items[0].representative = "ordinary bounded log excerpt";
+  let calls = 0;
+  render(<EvidenceSelector report={report} selected={new Set()} dispatch={() => {}}
+    onInspect={async () => { calls++; throw new Error("must not call"); }} />);
+  fireEvent.click(screen.getByRole("button", { name: `Inspect readable evidence from ${report.items[0].identity}` }));
+  expect(screen.getByText("ordinary bounded log excerpt")).toBeTruthy();
+  expect(calls).toBe(0);
+});

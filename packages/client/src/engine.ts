@@ -308,6 +308,8 @@ export type Unsubscribe = () => void;
 
 /** Import planning and execution. */
 export interface ImportService {
+  /** Passive bounded document inspection, authorized against the reviewed plan. */
+  inspectEvidence?(request: { path: string; planToken: string; planVersion: number; identity: string }): Promise<{ text: string; truncated: boolean; reason: string }>;
   /** Bounded read-only preview bound into a runnable plan. */
   preview(path: string, diagnosticId?: string): Promise<WireImportPreviewPlan>;
   /** Optional desktop-only, bounded memory snapshot capability. */

@@ -1992,6 +1992,77 @@ fn ingest_lines_from_reader(
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
 ) -> CoreResult<IngestSourceDigest> {
+    // HTML is parsed as a bounded container, never as markup-shaped log lines.
+    use super::html_diagnostic::{
+        detect_and_extract, has_html_signature, HtmlDiagnostic, MAX_HTML_BYTES,
+    };
+    // A BufRead implementation may expose only one byte at a time. Read a
+    // fixed signature window, then replay it for either parser without losing
+    // source bytes or reading an unbounded ordinary log into memory.
+    let mut probe = Vec::new();
+    (&mut *reader)
+        .take(2048)
+        .read_to_end(&mut probe)
+        .map_err(|e| CoreError::Message(e.to_string()))?;
+    if cancelled(cancel) {
+        return Err(CoreError::Cancelled);
+    }
+    let is_html = has_html_signature(&probe);
+    let mut replay = BufReader::new(std::io::Cursor::new(probe).chain(reader));
+    let reader: &mut dyn BufRead = &mut replay;
+    if is_html {
+        let mut raw = Vec::new();
+        reader
+            .take((MAX_HTML_BYTES + 1) as u64)
+            .read_to_end(&mut raw)
+            .map_err(|e| CoreError::Message(e.to_string()))?;
+        if cancelled(cancel) {
+            return Err(CoreError::Cancelled);
+        }
+        if raw.len() > MAX_HTML_BYTES || raw.len() as u64 > limits.max_file_bytes {
+            return Err(CoreError::Policy(
+                "HTML diagnostic exceeds bounded extraction limit".into(),
+            ));
+        }
+        let HtmlDiagnostic::Records { records, .. } = detect_and_extract(&raw) else {
+            return Err(CoreError::Policy(
+                "HTML is supporting evidence, not safely bounded events".into(),
+            ));
+        };
+        stats.source_bytes = stats.source_bytes.saturating_add(raw.len() as u64);
+        for record in records {
+            if cancelled(cancel) {
+                return Err(CoreError::Cancelled);
+            }
+            let original = raw
+                .get(record.source_start..record.source_end)
+                .ok_or_else(|| CoreError::Policy("HTML source span is invalid".into()))?;
+            ingest_framed_record(
+                record.text.as_bytes(),
+                source_label,
+                file_hint,
+                corpus,
+                miner,
+                stats,
+                confidence,
+                seq,
+                batch,
+                files_done,
+                file_count,
+                progress,
+                cancel,
+                kind,
+                limits,
+                ops,
+                Some(original),
+            )?;
+        }
+        return Ok(IngestSourceDigest {
+            source: source_label.into(),
+            content_digest: format!("sha256:{:x}", Sha256::digest(&raw)),
+            byte_length: raw.len() as u64,
+        });
+    }
     let mut raw_line = Vec::new();
     let mut source_bytes_read = 0u64;
     let mut source_hasher = Sha256::new();
@@ -2132,6 +2203,7 @@ fn ingest_lines_from_reader(
                 kind,
                 limits,
                 ops,
+                None,
             )?;
         } else {
             // Still accumulating into the open logical record.
@@ -2160,6 +2232,7 @@ fn ingest_lines_from_reader(
             kind,
             limits,
             ops,
+            None,
         )?;
     }
     Ok(IngestSourceDigest {
@@ -2220,6 +2293,7 @@ fn ingest_framed_record(
     kind: ProcessProgressKind,
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+    original_bytes: Option<&[u8]>,
 ) -> CoreResult<()> {
     if logical_bytes.len() > limits.max_line_bytes {
         emit_ingest_evidence(
@@ -2232,9 +2306,35 @@ fn ingest_framed_record(
             limits.max_line_bytes
         )));
     }
-    let prepared_original = time_op_ms(ops, IngestOp::ParseFrame, || {
+    let mut prepared_original = time_op_ms(ops, IngestOp::ParseFrame, || {
         prepare_original_record(logical_bytes)
     });
+    if let Some(original) = original_bytes {
+        let mut stored = prepare_original_record(original).stored;
+        // The raw HTML and decoded logical fields are different redaction
+        // domains. Never persist reversible entities, attribute values,
+        // comments, or markup stripped by the extractor as an "original".
+        let plain_markup = original.split(|b| *b == b'<').skip(1).all(|tail| {
+            [b"tr>".as_slice(), b"/tr>", b"td>", b"/td>"]
+                .iter()
+                .any(|tag| {
+                    tail.get(..tag.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(tag))
+                })
+        });
+        if prepared_original.stored.redaction_applied
+            || stored.redaction_applied
+            || original.contains(&b'&')
+            || !plain_markup
+        {
+            const WITHHELD: &str = "[HTML source record withheld by redaction policy]";
+            stored.text = WITHHELD.into();
+            stored.redacted_char_count = WITHHELD.len() as u64;
+            stored.redaction_applied = true;
+            stored.truncated = false;
+        }
+        prepared_original.stored = stored;
+    }
     let line = prepared_original.parser_text.as_str();
     if line.trim().is_empty() {
         return Ok(());
@@ -2253,11 +2353,15 @@ fn ingest_framed_record(
         .active_timestamp_basis_counts
         .entry(parsed.active_timestamp_basis.as_storage_str().into())
         .or_insert(0) += 1;
-    let fmt_key = match parsed.format {
-        LogFormat::Json => "json",
-        LogFormat::Logfmt => "logfmt",
-        LogFormat::Syslog => "syslog",
-        LogFormat::Plain => "plain",
+    let fmt_key = if original_bytes.is_some() {
+        "html_derived"
+    } else {
+        match parsed.format {
+            LogFormat::Json => "json",
+            LogFormat::Logfmt => "logfmt",
+            LogFormat::Syslog => "syslog",
+            LogFormat::Plain => "plain",
+        }
     };
     *stats.format_counts.entry(fmt_key.into()).or_insert(0) += 1;
     let msg = time_op_ms(ops, IngestOp::ParseFrame, || {
@@ -8306,4 +8410,147 @@ RETURNING id\"
             "no record may glue two physical lines here: {messages:?}"
         );
     }
+}
+
+/// Read only an exact inventory identity through the same hardened opens and
+/// archive preflight used by preview. The caller verifies captured bytes against
+/// the reviewed item's fingerprint before exposing any text.
+pub(super) fn read_import_evidence_bytes(
+    path: &Path,
+    identity: &str,
+    max_bytes: usize,
+) -> CoreResult<Vec<u8>> {
+    let limits = RawIngestLimits::default();
+    let mut budget = RawIngestBudget::default();
+    let cap = max_bytes.min(super::html_diagnostic::MAX_HTML_BYTES);
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| evidence_read_refused())?;
+    if metadata.is_file() && !metadata.file_type().is_symlink() {
+        let mut file = open_selected_regular_file(path)?;
+        if is_zip_file(path) {
+            return read_evidence_zip(&mut file, "", identity, 1, &mut budget, limits, cap);
+        }
+        if path.file_name().map(|n| n.to_string_lossy()).as_deref() != Some(identity) {
+            return Err(evidence_read_refused());
+        }
+        return read_evidence_bounded(&mut file, cap);
+    }
+    let inventory = collect_log_files(path, &mut budget, limits, None)?;
+    for selected in &inventory.files {
+        let file_identity = preview_relative_identity(selected, &inventory.canonical_root);
+        if identity != file_identity && !identity.starts_with(&format!("{file_identity}!/")) {
+            continue;
+        }
+        let mut file = open_inventory_file(&inventory, selected)?;
+        let mut head = [0; 4];
+        let n = file.read(&mut head).map_err(|_| evidence_read_refused())?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| evidence_read_refused())?;
+        if has_zip_extension(selected) || has_zip_signature(&head[..n]) {
+            return read_evidence_zip(
+                &mut file,
+                &file_identity,
+                identity,
+                1,
+                &mut budget,
+                limits,
+                cap,
+            );
+        }
+        if identity == file_identity {
+            return read_evidence_bounded(&mut file, cap);
+        }
+    }
+    Err(evidence_read_refused())
+}
+
+fn evidence_read_refused() -> CoreError {
+    CoreError::Policy("supporting document is unavailable under the import policy".into())
+}
+fn read_evidence_bounded<R: Read>(reader: &mut R, cap: usize) -> CoreResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(cap as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| evidence_read_refused())?;
+    if bytes.len() > cap {
+        return Err(evidence_read_refused());
+    }
+    Ok(bytes)
+}
+fn read_evidence_zip<R: Read + Seek>(
+    file: &mut R,
+    prefix: &str,
+    wanted: &str,
+    depth: u8,
+    budget: &mut RawIngestBudget,
+    limits: RawIngestLimits,
+    cap: usize,
+) -> CoreResult<Vec<u8>> {
+    if depth > limits.max_archive_depth {
+        return Err(evidence_read_refused());
+    }
+    // Validates all central-directory members, including traversal, aliases,
+    // encryption, nonregular files, and aggregate expansion/entry budgets.
+    let plans = preflight_raw_log_zip(file, budget, limits, None)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| evidence_read_refused())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|_| evidence_read_refused())?;
+    for plan in plans {
+        let identity = if prefix.is_empty() {
+            plan.identity.clone()
+        } else {
+            archive_member_identity(prefix, &plan.identity)
+        };
+        if wanted != identity && !wanted.starts_with(&format!("{identity}!/")) {
+            continue;
+        }
+        if !matches!(
+            plan.disposition,
+            ZipEntryDisposition::Import | ZipEntryDisposition::NestedArchive
+        ) || compression_ratio_exceeded(
+            plan.expanded_size,
+            plan.compressed_size,
+            limits.max_compression_ratio,
+        ) {
+            return Err(evidence_read_refused());
+        }
+        let entry = archive
+            .by_name(&plan.identity)
+            .map_err(|_| evidence_read_refused())?;
+        let mut reader = BufReader::with_capacity(8 * 1024, entry);
+        let head = reader.fill_buf().map_err(|_| evidence_read_refused())?;
+        let nested =
+            plan.disposition == ZipEntryDisposition::NestedArchive || has_zip_signature(head);
+        if nested {
+            if wanted == identity
+                || depth >= limits.max_archive_depth
+                || plan.expanded_size > MAX_PREVIEW_NESTED_ARCHIVE_BYTES
+            {
+                return Err(evidence_read_refused());
+            }
+            let bytes =
+                read_evidence_bounded(&mut reader, MAX_PREVIEW_NESTED_ARCHIVE_BYTES as usize)?;
+            if bytes.len() as u64 != plan.expanded_size {
+                return Err(evidence_read_refused());
+            }
+            return read_evidence_zip(
+                &mut std::io::Cursor::new(bytes),
+                &identity,
+                wanted,
+                depth + 1,
+                budget,
+                limits,
+                cap,
+            );
+        }
+        if wanted != identity || plan.expanded_size > cap as u64 {
+            return Err(evidence_read_refused());
+        }
+        let bytes = read_evidence_bounded(&mut reader, cap)?;
+        if bytes.len() as u64 != plan.expanded_size {
+            return Err(evidence_read_refused());
+        }
+        return Ok(bytes);
+    }
+    Err(evidence_read_refused())
 }

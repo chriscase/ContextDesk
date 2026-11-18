@@ -437,6 +437,9 @@ pub(super) struct BoundedSample {
     /// cover the full member; seekable ordinary files cover the bounded
     /// head/interior/tail windows by design.
     content_fingerprint: String,
+    /// Complete bounded bytes for container-aware parsing; never sampled fragments.
+    complete_bytes: Option<Vec<u8>>,
+    html_signature: Option<bool>,
 }
 
 impl BoundedSample {
@@ -518,6 +521,9 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
             continue;
         }
         let bytes = &buf[..read];
+        if offset == 0 {
+            sample.html_signature = Some(super::html_diagnostic::has_html_signature(bytes));
+        }
         content_hasher.update(offset.to_le_bytes());
         content_hasher.update((read as u64).to_le_bytes());
         content_hasher.update(bytes);
@@ -543,6 +549,21 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
             sample.empty = false;
         }
         sample.windows.push(text);
+    }
+    if sample.html_signature == Some(true)
+        && total_bytes <= super::html_diagnostic::MAX_HTML_BYTES as u64
+        && reader.seek(SeekFrom::Start(0)).is_ok()
+    {
+        let mut all = vec![0; total_bytes as usize + 1];
+        if let Ok(n) = read_bounded(reader, &mut all) {
+            if n == total_bytes as usize {
+                all.truncate(n);
+                sample.complete_bytes = Some(all);
+            }
+        }
+    }
+    if let Some(all) = &sample.complete_bytes {
+        content_hasher.update(all);
     }
     sample.content_fingerprint = sha256_digest_hex(content_hasher.finalize());
     sample
@@ -606,6 +627,9 @@ pub(super) fn sample_streaming<R: Read>(
         .into_iter()
         .map(|offset| (offset, Vec::with_capacity(window)))
         .collect();
+    let mut complete_bytes: Option<Vec<u8>> = None;
+    let mut html_signature = None;
+    let mut signature_probe = Vec::new();
     let mut consumed: u64 = 0;
     let mut chunk = vec![0u8; 8 * 1024];
     let mut content_hasher = Sha256::new();
@@ -625,6 +649,28 @@ pub(super) fn sample_streaming<R: Read>(
             Err(_) => return Ok(SampleOutcome::ReadFailed),
         };
         let bytes = &chunk[..read];
+        if html_signature.is_none() {
+            let needed = 2048usize.saturating_sub(signature_probe.len());
+            let prefix = needed.min(bytes.len());
+            signature_probe.extend_from_slice(&bytes[..prefix]);
+            if signature_probe.len() == 2048 || consumed + read as u64 >= total_bytes {
+                let positive = super::html_diagnostic::has_html_signature(&signature_probe);
+                html_signature = Some(positive);
+                if positive && total_bytes <= super::html_diagnostic::MAX_HTML_BYTES as u64 {
+                    let mut all = std::mem::take(&mut signature_probe);
+                    all.extend_from_slice(&bytes[prefix..]);
+                    complete_bytes = Some(all);
+                } else {
+                    signature_probe.clear();
+                }
+            }
+        } else if let Some(all) = &mut complete_bytes {
+            if all.len().saturating_add(read) <= super::html_diagnostic::MAX_HTML_BYTES {
+                all.extend_from_slice(bytes);
+            } else {
+                complete_bytes = None;
+            }
+        }
         content_hasher.update(bytes);
         let chunk_end = consumed.saturating_add(read as u64);
         for (offset, raw) in &mut raw_windows {
@@ -652,6 +698,8 @@ pub(super) fn sample_streaming<R: Read>(
             binary: true,
             empty: false,
             content_fingerprint: sha256_digest_hex(content_hasher.finalize()),
+            complete_bytes: None,
+            html_signature: None,
         }));
     }
 
@@ -678,6 +726,8 @@ pub(super) fn sample_streaming<R: Read>(
         binary: false,
         empty,
         content_fingerprint: sha256_digest_hex(content_hasher.finalize()),
+        complete_bytes: complete_bytes.filter(|all| all.len() as u64 == total_bytes),
+        html_signature,
     }))
 }
 
@@ -990,7 +1040,38 @@ pub(super) fn classify(
     // an unhinted document needs repeated, distinct structured records before
     // it is automatically treated as an event source. Deduplication prevents
     // overlapping head/interior/tail samples from manufacturing repetition.
-    if !name_hints_log(identity) && credible_structured_record_count(sample) < 2 {
+    // A disproven HTML suffix must not veto a genuine structured log record.
+    // This exception requires positive parser evidence, not merely absence of
+    // markup; prose and ambiguous/raw fallback still need the normal evidence
+    // threshold. Snapshot detection above remains authoritative.
+    let leaf = identity
+        .rsplit('/')
+        .next()
+        .unwrap_or(identity)
+        .to_ascii_lowercase();
+    let misleading_html_with_event = sample.html_signature == Some(false)
+        && (leaf.ends_with(".html") || leaf.ends_with(".htm"))
+        && (credible_structured_record_count(sample) >= 1
+            || sample
+                .windows
+                .iter()
+                .flat_map(|window| window.lines())
+                .any(|record| {
+                    let parsed =
+                        super::parse::parse_line_with_fingerprint(record.trim(), None, 0).parsed;
+                    matches!(
+                        parsed.timestamp_provenance,
+                        super::parse::TimestampProvenance::ExplicitWallClock
+                            | super::parse::TimestampProvenance::UnresolvedLocal
+                    ) && matches!(
+                        parsed.level.as_str(),
+                        "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" | "FATAL"
+                    )
+                }));
+    if !name_hints_log(identity)
+        && !misleading_html_with_event
+        && credible_structured_record_count(sample) < 2
+    {
         if fingerprint
             .as_ref()
             .is_none_or(|fp| fp.outcome == FormatFingerprintOutcome::Unknown)
@@ -1235,6 +1316,9 @@ fn is_snapshot_payload(payload: &str) -> bool {
 fn name_or_sample_is_html(identity: &str, sample: &BoundedSample) -> bool {
     let leaf = identity.rsplit('/').next().unwrap_or(identity);
     let lower_leaf = leaf.to_ascii_lowercase();
+    if let Some(is_html) = sample.html_signature {
+        return is_html;
+    }
     if lower_leaf.ends_with(".html") || lower_leaf.ends_with(".htm") {
         return true;
     }
@@ -1665,9 +1749,35 @@ pub(super) fn item_from_sample(
     manifest_role: Option<ImportItemRole>,
     manifest_valid: bool,
 ) -> ImportPreviewItem {
-    let (status, role, reasons, fingerprint) =
+    let (mut status, mut role, mut reasons, fingerprint) =
         classify(identity, sample, manifest_role, manifest_valid);
-    let representative = sample.first_record().and_then(representative_excerpt);
+    let html = sample
+        .complete_bytes
+        .as_deref()
+        .map(super::html_diagnostic::detect_and_extract);
+    let html_kind = match &html {
+        Some(super::html_diagnostic::HtmlDiagnostic::Records { container_kind, .. })
+            if !manifest_valid
+                || manifest_role.is_none()
+                || manifest_role == Some(ImportItemRole::Log) =>
+        {
+            status = ImportItemStatus::Review;
+            role = ImportItemRole::Log;
+            reasons.retain(|r| *r != ImportPreviewReason::HtmlEventParsingUnsupported);
+            reasons.push(ImportPreviewReason::NoStructuredMatch);
+            Some(*container_kind)
+        }
+        _ => None,
+    };
+    let representative = match &html {
+        Some(super::html_diagnostic::HtmlDiagnostic::Document { visible_text, .. }) => {
+            representative_excerpt(visible_text)
+        }
+        Some(super::html_diagnostic::HtmlDiagnostic::Records { records, .. }) => records
+            .first()
+            .and_then(|record| representative_excerpt(&record.text)),
+        _ => sample.first_record().and_then(representative_excerpt),
+    };
     let selected = preselect(status, role);
 
     let (format_id, format_version, outcome, score, runner_up_margin, producer_hint, clues) =
@@ -1694,13 +1804,15 @@ pub(super) fn item_from_sample(
         status,
         role,
         selected,
-        format_id,
-        format_version,
+        format_id: html_kind.map(|kind| format!("html:{kind}")).or(format_id),
+        format_version: html_kind.map(|_| 1).or(format_version),
         outcome,
         score,
         runner_up_margin,
         producer_hint,
-        decisive_clue_codes: clues,
+        decisive_clue_codes: html_kind
+            .map(|kind| vec![format!("html_boundary:{kind}")])
+            .unwrap_or(clues),
         reasons,
         representative,
         group_id: None,
@@ -1955,6 +2067,8 @@ mod tests {
             binary: false,
             empty: lines.iter().all(|l| l.trim().is_empty()),
             content_fingerprint: String::new(),
+            complete_bytes: None,
+            html_signature: None,
         }
     }
 
@@ -1964,6 +2078,8 @@ mod tests {
             binary: false,
             empty: false,
             content_fingerprint: String::new(),
+            complete_bytes: None,
+            html_signature: None,
         }
     }
 
@@ -3049,5 +3165,105 @@ mod tests {
         let encoded = serde_json::to_string(&report).expect("serialize");
         assert!(!encoded.contains("/Users/"));
         assert!(!encoded.contains(secret));
+    }
+    #[test]
+    fn ordinary_seekable_sampling_preserves_window_io_and_fingerprint() {
+        use sha2::{Digest, Sha256};
+        struct Counted {
+            inner: std::io::Cursor<Vec<u8>>,
+            bytes: usize,
+        }
+        impl Read for Counted {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.inner.read(buf)?;
+                self.bytes += n;
+                Ok(n)
+            }
+        }
+        impl Seek for Counted {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.inner.seek(pos)
+            }
+        }
+        let raw = b"2026-01-02T03:04:05Z INFO ordinary log record\n".repeat(4000);
+        let mut expected = Sha256::new();
+        let mut expected_bytes = 0;
+        for offset in sample_offsets(raw.len() as u64) {
+            let end = (offset as usize + IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES).min(raw.len());
+            let bytes = &raw[offset as usize..end];
+            expected.update(offset.to_le_bytes());
+            expected.update((bytes.len() as u64).to_le_bytes());
+            expected.update(bytes);
+            expected_bytes += bytes.len();
+        }
+        let mut reader = Counted {
+            inner: std::io::Cursor::new(raw.clone()),
+            bytes: 0,
+        };
+        let sample = sample_bounded(&mut reader, raw.len() as u64);
+        assert_eq!(reader.bytes, expected_bytes);
+        assert_eq!(
+            sample.content_fingerprint,
+            sha256_digest_hex(expected.finalize())
+        );
+        assert!(sample.complete_bytes.is_none());
+        assert_eq!(sample.html_signature, Some(false));
+        assert!(!name_or_sample_is_html("misleading.html", &sample));
+    }
+
+    #[test]
+    fn streaming_signature_handles_fragmented_bom_comment_without_retaining_plain_files() {
+        struct Fragmented(std::io::Cursor<Vec<u8>>);
+        impl Read for Fragmented {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = buf.len().min(1);
+                self.0.read(&mut buf[..n])
+            }
+        }
+        for (raw, is_html) in [
+            (
+                b"\xef\xbb\xbf<!-- heading --><html><body><pre>INFO one</pre></body></html>"
+                    .to_vec(),
+                true,
+            ),
+            (b"INFO ordinary log\n".to_vec(), false),
+        ] {
+            let mut reader = Fragmented(std::io::Cursor::new(raw.clone()));
+            let SampleOutcome::Sampled(sample) =
+                sample_streaming(&mut reader, raw.len() as u64, None).unwrap()
+            else {
+                panic!("sample failed")
+            };
+            assert_eq!(sample.html_signature, Some(is_html));
+            assert_eq!(
+                sample.complete_bytes.as_deref(),
+                is_html.then_some(raw.as_slice())
+            );
+            assert_eq!(name_or_sample_is_html("misleading.html", &sample), is_html);
+        }
+    }
+    #[test]
+    fn misleading_html_extension_matches_log_for_proven_events_not_prose() {
+        for raw in [
+            b"2026-01-02T03:04:05Z INFO ordinary log despite extension\n".as_slice(),
+            b"{\"timestamp\":\"2026-01-02T03:04:05Z\",\"level\":\"info\",\"message\":\"started\"}\n".as_slice(),
+        ] {
+            let sample = sample_bounded(&mut std::io::Cursor::new(raw), raw.len() as u64);
+            let html = item_from_sample("report.html", raw.len() as u64, &sample, None, false);
+            let log = item_from_sample("report.log", raw.len() as u64, &sample, None, false);
+            assert_eq!(html.status, log.status);
+            assert_eq!(html.role, log.role);
+            assert_eq!(html.selected, log.selected);
+            assert_eq!(html.reasons, log.reasons);
+            assert_eq!(html.format_id, log.format_id);
+        }
+        let raw = b"This is a prose status report, not an event stream.\n";
+        let sample = sample_bounded(&mut std::io::Cursor::new(raw), raw.len() as u64);
+        let prose = item_from_sample("report.html", raw.len() as u64, &sample, None, false);
+        assert_eq!(prose.status, ImportItemStatus::Supporting);
+        assert!(!prose.selected);
+        assert!(!prose
+            .reasons
+            .contains(&ImportPreviewReason::HtmlEventParsingUnsupported));
     }
 }

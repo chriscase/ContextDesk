@@ -20,6 +20,7 @@ pub mod governed_citation;
 pub mod hybrid_retrieval;
 pub mod import_attempt_diagnostic;
 pub mod import_diagnose;
+pub mod import_evidence;
 pub mod import_outcome;
 pub mod import_preview;
 pub mod import_profile;
@@ -279,3 +280,5 @@ pub use why::{
     anomalies, anomalies_with_excluded_templates, correlate, correlate_with_excluded_templates,
     trace, trace_with_excluded_templates, AnomalyHit, CorrelateHit, TraceEvent,
 };
+
+mod html_diagnostic;

@@ -489,3 +489,5 @@
   padding-block: 0.5rem;
   border-bottom: 1px solid var(--border);
 }
+
+.import-flow__evidence-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16rem; overflow: auto; }

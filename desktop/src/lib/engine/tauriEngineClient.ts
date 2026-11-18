@@ -230,6 +230,7 @@ export function createTauriEngineClient(
 ): EngineClient {
   return {
     import: {
+      inspectEvidence: (request) => call(transport, "log_inspect_import_evidence", request),
       beginDiagnostic: () => call<string>(transport, "begin_import_diagnostic"),
       saveDiagnostic: (diagnosticId: string) => call(transport, "save_import_diagnostic", { diagnosticId }),
       preview: (path: string, diagnosticId?: string) =>

@@ -38,6 +38,7 @@ type Props = {
   report: WireImportPreviewReport;
   selected: ReadonlySet<string>;
   dispatch: (event: ImportFlowEvent) => void;
+  onInspect?: (identity: string) => Promise<{ text: string; truncated: boolean; reason: string }>;
 };
 
 function formatBytes(bytes: number): string {
@@ -69,8 +70,27 @@ function reasonText(item: WireImportPreviewItem): string {
     .join(" · ");
 }
 
-export function EvidenceSelector({ report, selected, dispatch }: Props) {
+export function EvidenceSelector({ report, selected, dispatch, onInspect }: Props) {
   const labelId = useId();
+  const [document, setDocument] = useState<{ identity: string; text: string; truncated: boolean; reason: string } | null>(null);
+  const [inspectionError, setInspectionError] = useState(false);
+  const inspectionGeneration = useRef(0);
+  const inspect = async (identity: string) => {
+    const generation = ++inspectionGeneration.current;
+    setInspectedIdentity(identity);
+    setDocument(null);
+    setInspectionError(false);
+    const item = report.items.find((entry) => entry.identity === identity);
+    if (!onInspect || item?.status !== "supporting" || !item.reasons.includes("html_event_parsing_unsupported")) return;
+    try {
+      const result = await onInspect(identity);
+      if (generation === inspectionGeneration.current) setDocument({ identity, ...result });
+    } catch {
+      if (generation === inspectionGeneration.current) setInspectionError(true);
+    }
+  };
+  const [inspectedIdentity, setInspectedIdentity] = useState<string | null>(null);
+  const inspected = report.items.find((item) => item.identity === inspectedIdentity);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [statusFilter, setStatusFilter] = useState<ReadonlySet<string> | null>(null);
   const [query, setQuery] = useState("");
@@ -244,6 +264,7 @@ export function EvidenceSelector({ report, selected, dispatch }: Props) {
           style={{ paddingLeft: row.depth * 16 }}
         >
           <IdentityBreadcrumb identity={item.identity} />
+          {item.representative || onInspect ? <button type="button" onClick={(event) => { event.stopPropagation(); void inspect(item.identity); }} aria-label={`Inspect readable evidence from ${item.identity}`}>Inspect</button> : null}
         </span>
         <span role="gridcell" className="import-selector__cell import-selector__cell--status">
           <span className={`import-selector__chip import-selector__chip--${item.status}`}>
@@ -320,6 +341,18 @@ export function EvidenceSelector({ report, selected, dispatch }: Props) {
           {windowRows.map((row, index) => renderRow(row, index))}
         </div>
       </div>
+      {inspected ? <section aria-label="Readable evidence preview" className="import-flow__evidence-preview">
+        <strong>{inspected.identity}</strong>
+        <p>{reasonText(inspected)}</p>
+        {onInspect && inspected.status === "supporting" && inspected.reasons.includes("html_event_parsing_unsupported") ? (
+          inspectionError ? <p role="alert">Evidence could not be inspected. The source or plan may have changed; preview it again.</p> :
+          document?.identity === inspected.identity ? <>
+            <p>{document.reason === "visibility_unverified_stylesheet" ? "Readable text unavailable: stylesheet-dependent visibility cannot be verified without executing page styling." : document.truncated ? "Truncated at the safe text limit." : "Complete bounded visible text."} Redacted plaintext only; scripts and external assets never run. Original input is unchanged.</p>
+            <p>{document.reason}</p><pre>{document.text}</pre>
+          </> : <p role="status">Inspecting bounded evidence…</p>
+        ) : <><p>Bounded, redacted excerpt only.</p><pre>{inspected.representative}</pre></>}
+        <button type="button" onClick={() => { inspectionGeneration.current += 1; setInspectedIdentity(null); }}>Close evidence preview</button>
+      </section> : null}
       <p className="import-selector__keys">
         Space selects · Shift+arrows extend a range over leaf rows · ⌘A selects visible rows
       </p>
