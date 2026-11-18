@@ -29,7 +29,7 @@ only the Ubuntu aggregate named above.
 | `close-proof discipline (#254)` | Close-comment SHA + proof |
 | `GUI integration contracts (no WebDriver)` | GUI contract suite |
 | `rust (ubuntu-latest)` | Ubuntu fmt, clippy, examples, smoke, **cache warmup** (not the suite) |
-| `rust (macos-latest)` | macOS restore-only preflight: fmt, clippy, examples, smoke; not the suite gate. A separate conditional cache-writer runs `--no-run` only on a miss |
+| `rust (macos-latest)` | Verified output of native macOS preflight: fmt, clippy, examples, smoke; not the suite gate |
 | `rust (windows-latest)` | Windows restore-only preflight: fmt, clippy, examples, smoke; not the suite gate. A separate conditional cache-writer runs `--no-run` only on a miss |
 | `rust tests (ubuntu aggregate)` | Fail-closed Ubuntu workspace test gate |
 | `rust tests (macos-latest aggregate)` | Fail-closed macOS workspace test gate (coverage signal, not in the ruleset) |
@@ -51,8 +51,8 @@ only the Ubuntu aggregate named above.
 - `rust (ubuntu-latest)` is warmup and diagnostics only. It is intentionally
   absent from the Ubuntu suite-gate list above; require exactly
   `rust tests (ubuntu aggregate)` for that gate.
-- **`rust (macos-latest)`** and **`rust (windows-latest)`** are restore-only
-  preflights, not complete workspace-suite gates. Requiring one of them alone
+- **`rust (macos-latest)`** and **`rust (windows-latest)`** are native
+  preflight signals, not complete workspace-suite gates. Requiring one of them alone
   would not protect the corresponding shard aggregate.
 - The macOS/Windows shard indexes are likewise signals. The per-OS aggregate
   is the stable coverage check; the active ruleset still requires only
@@ -65,8 +65,19 @@ Workspace tests are sharded, then fail-closed:
 | OS | Warmup check | Test shards | Aggregate check | Required on `main`? |
 | --- | --- | --- | --- | --- |
 | Ubuntu | `rust (ubuntu-latest)` (`--no-run` only) | 8 | `rust tests (ubuntu aggregate)` | **yes** — this is the only ruleset gate |
-| macOS | `rust (macos-latest)` restore-only preflight | 4 | `rust tests (macos-latest aggregate)` | no |
+| macOS | `rust (macos-latest)` native preflight receipt | 4 | `rust tests (macos-latest aggregate)` | no |
 | Windows | `rust (windows-latest)` restore-only preflight | 4 | `rust tests (windows-latest aggregate)` | no |
+
+The macOS aggregate runs the actual compile, DuckDB guard, preflight and four
+native shards on **one** standard cold Mac. There is no cache restore/save or
+artifact transfer for this lane. The previous probe/warmup/preflight/shard
+check names remain visible: their small Ubuntu jobs validate a receipt emitted
+only by the corresponding successful native step, tied to the exact checkout,
+run ID and attempt. A missing or stale receipt fails. A successful sibling
+shard is not the full aggregate. On timeout or cancellation, the native gate
+does not pass; inspect its logs for per-unit progress. If rerunning only failed
+jobs would mix attempts, requalify the whole workflow rather than accepting
+receipts from an older attempt.
 
 The counts are intentionally different by platform capacity, but their
 definition is not duplicated: `scripts/ci_shard_config.sh` is the canonical

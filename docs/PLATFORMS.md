@@ -31,7 +31,7 @@ Workspace roots are user-chosen paths in Settings; path allowlisting is in `cd_c
 
 | Job | Ubuntu | macOS | Windows |
 |-----|--------|-------|---------|
-| `rust` (fmt, clippy, examples, smoke) | yes (`rust (ubuntu-latest)`; tests compiled with `--no-run` as shard cache warmup) | yes (`rust (macos-latest)`; restore-only preflight) | yes (`rust (windows-latest)`; restore-only preflight) |
+| `rust` (fmt, clippy, examples, smoke) | yes (`rust (ubuntu-latest)`; tests compiled with `--no-run` as shard cache warmup) | yes (`rust (macos-latest)`; native preflight receipt) | yes (`rust (windows-latest)`; restore-only preflight) |
 | `rust tests` (`cargo test --workspace`) | yes — eight deterministic shards + fail-closed `rust tests (ubuntu aggregate)` (#874) | yes — four deterministic shards + fail-closed `rust tests (macos-latest aggregate)` | yes — four deterministic shards + fail-closed `rust tests (windows-latest aggregate)` |
 | `tauri-host` (desktop host compile) | yes | yes | no (see residual) |
 | `desktop` UI (npm) | yes | — | — |
@@ -40,7 +40,7 @@ Workspace roots are user-chosen paths in Settings; path allowlisting is in `cd_c
 ## Known caveats
 
 - **Linux CI** installs `libdbus-1-dev` for keyring compile; runtime Secret Service may be absent — tests must not require it.
-- **Workspace tests** run as eight Ubuntu shards and four macOS/Windows shards, each with a fail-closed aggregate (`docs/DEV.md`, #874). Conditional cache writers compile only on a miss; preflight jobs no longer execute the suite. See `docs/CI_REQUIRED_CHECKS.md` before wiring required checks. Path-aware PR routing can skip the Ubuntu shards for isolated bench/collab surfaces while keeping the same required check name.
+- **Workspace tests** run as eight Ubuntu shards and four macOS/Windows shards, each with a fail-closed aggregate (`docs/DEV.md`, #874). Windows uses a conditional writer; macOS compiles once on one cold runner; preflight jobs no longer execute the suite. See `docs/CI_REQUIRED_CHECKS.md` before wiring required checks. Path-aware PR routing can skip the Ubuntu shards for isolated bench/collab surfaces while keeping the same required check name.
 - **Windows path separators** (`\`) are handled by `std::path`; do not hard-code `/` in allowlist assertions beyond structural checks.
 - **Symlink escape** tests remain `#[cfg(unix)]` (symlink APIs differ on Windows).
 - **Real keychain I/O** is operator-local / `#[ignore]` if added later — never default CI.
