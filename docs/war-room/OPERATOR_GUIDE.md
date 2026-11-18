@@ -63,6 +63,16 @@ filters still apply.
 
 ![Synthetic investigation list with War Room entries](../assets/war-room/war-room-investigations.png)
 
+### Find evidence by its current label
+
+In the evidence review workspace in Investigation First or Keystone, use
+**Browse evidence by label** to choose an exact label and see the matching
+filenames. The count is the number of distinct loaded files in this
+investigation with that visible label, not how often someone applied it.
+Capitalization matters. Labels removed from the current state and labels you
+cannot see do not contribute. The browser waits for current annotation
+history; choosing a label does not change your working set or write anything.
+
 ## Identity and attribution
 
 The account menu shows the signed-in display name, username, and current
