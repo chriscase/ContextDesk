@@ -1,0 +1,90 @@
+name: ContextDesk isolated cold Mac trial 1194
+on:
+  push:
+    branches: ['qualification/mac-cold-1194-20261118-a']
+    paths: ['.github/workflows/oneoff-mac-cold-1194.yml']
+permissions:
+  contents: read
+jobs:
+  rust-macos-local:
+    name: Isolated cold Mac trial (not a PR check)
+    if: github.event.created == true && github.run_attempt == 1
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      CD_SHARD_COUNT: "4"
+      CD_CACHE_STATE: cold
+      RUSTFLAGS: -D warnings
+      RUST_TEST_THREADS: '1'
+      CARGO_BUILD_JOBS: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9d3f848358615db28a247844db623ba612cd3be3
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with: {components: 'rustfmt, clippy'}
+      - name: require canonical four-shard topology and exact plan
+        run: |
+          test "$(git rev-parse HEAD)" = 9d3f848358615db28a247844db623ba612cd3be3
+          test "$(git rev-parse HEAD^{tree})" = 8b39443da2a746254e7444f8cb6d7c428a0c38b2
+          test ! -e target
+          mkdir ci-platform-shards
+          sh scripts/ci_shard_config.sh verify macos "$CD_SHARD_COUNT"
+          test "$CD_SHARD_COUNT" = 4
+          sh scripts/ci_shard_plan.sh verify --os macos --shards "$CD_SHARD_COUNT"
+      - name: compile and validate runner-local exact checkout
+        id: prepared
+        timeout-minutes: 60
+        run: |
+          cargo test --workspace --no-run
+          sh scripts/ci_record_cache.sh --assert-dir target
+          jq -n --arg head "$(git rev-parse HEAD)" --arg restore "$CD_CACHE_STATE" \
+            '{basis:"runner-local-after-no-run",head:$head,initial_cache_state:$restore}' > ci-platform-shards/target-basis.json
+      - name: platform preflight
+        timeout-minutes: 30
+        run: |
+          sh scripts/ci_record_cache.sh --assert-dir target
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo build -p cd-core --examples
+          cargo run -p cd-server -- --print-branding
+      - name: run macOS shard 1
+        if: ${{ !cancelled() && steps.prepared.outcome == 'success' }}
+        timeout-minutes: 50
+        run: |
+          test "$(jq -er 'select(.basis == "runner-local-after-no-run") | .head' ci-platform-shards/target-basis.json)" = "$(git rev-parse HEAD)"
+          sh scripts/ci_record_cache.sh --assert-dir target
+          sh scripts/ci_run_platform_shard.sh --os macos --shard 1 --shards "$CD_SHARD_COUNT" --out ci-platform-shards
+      - name: run macOS shard 2
+        if: ${{ !cancelled() && steps.prepared.outcome == 'success' }}
+        timeout-minutes: 50
+        run: |
+          test "$(jq -er 'select(.basis == "runner-local-after-no-run") | .head' ci-platform-shards/target-basis.json)" = "$(git rev-parse HEAD)"
+          sh scripts/ci_record_cache.sh --assert-dir target
+          sh scripts/ci_run_platform_shard.sh --os macos --shard 2 --shards "$CD_SHARD_COUNT" --out ci-platform-shards
+      - name: run macOS shard 3
+        if: ${{ !cancelled() && steps.prepared.outcome == 'success' }}
+        timeout-minutes: 50
+        run: |
+          test "$(jq -er 'select(.basis == "runner-local-after-no-run") | .head' ci-platform-shards/target-basis.json)" = "$(git rev-parse HEAD)"
+          sh scripts/ci_record_cache.sh --assert-dir target
+          sh scripts/ci_run_platform_shard.sh --os macos --shard 3 --shards "$CD_SHARD_COUNT" --out ci-platform-shards
+      - name: run macOS shard 4
+        if: ${{ !cancelled() && steps.prepared.outcome == 'success' }}
+        timeout-minutes: 50
+        run: |
+          test "$(jq -er 'select(.basis == "runner-local-after-no-run") | .head' ci-platform-shards/target-basis.json)" = "$(git rev-parse HEAD)"
+          sh scripts/ci_record_cache.sh --assert-dir target
+          sh scripts/ci_run_platform_shard.sh --os macos --shard 4 --shards "$CD_SHARD_COUNT" --out ci-platform-shards
+      - name: aggregate all expected manifests
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/ci_aggregate_shards.sh --dir ci-platform-shards --os macos --shards "$CD_SHARD_COUNT" --label "macos-latest workspace test shards"
+      - name: show shard progress and bounded receipts in job log only
+        if: always()
+        run: |
+          sh scripts/ci_run_shard.sh --summary ci-platform-shards || true
+          for file in ci-platform-shards/shard-*/status.json; do
+            if test -s "$file"; then jq -c '{shard,status,units_total,units_finished,tests_failed,seconds}' "$file"; fi
+          done
