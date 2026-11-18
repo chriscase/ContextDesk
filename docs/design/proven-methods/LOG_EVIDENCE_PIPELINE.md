@@ -901,3 +901,25 @@ existing paths. Failures and cancellation retain their own terminal snapshots.
 The offline diagnostic remains a different operation with temporary-corpus
 semantics. Renderer tests are not evidence of packaged-shell/native Save
 acceptance; that proof must be recorded separately before claiming #853 closed.
+
+
+## Passive HTML diagnostic evidence (#750)
+
+Complete bounded HTML with conservative preformatted log lines or diagnostic
+table rows is a Review item, never automatically trusted from its extension.
+Ambiguous reports remain supporting attachments rather than invented events.
+Review selection → Inspect requests host-authorized, plan-bound, redacted visible
+text. The renderer displays plaintext and explicit truncation status; it never
+executes markup or fetches scripts/assets. Changed plans require a new preview.
+
+Bounds: 256 KiB input, 48 nested tags, 8,192 tokens, 1,024 records, 8 KiB per
+record and 8 KiB visible text. Existing archive expansion limits also apply.
+Malformed, oversized, script-generated or layout-dependent reports are not
+promoted to events. Original input remains unchanged; raw hashes and redacted
+original record spans preserve provenance. Shared timestamp parsing never
+invents a timezone for offsetless records. A misleading HTML filename does not
+force HTML parsing. Sample fragments cannot establish whole-document eligibility.
+
+Reports with operative stylesheets cannot establish visible content statically. They remain supporting evidence; the reader reports visibility as unverified rather than presenting an empty report as complete. No stylesheet is fetched or executed.
+
+For HTML-derived events, **Original** may show a withholding notice instead of markup. Records containing character references, attributes, comments, or redacted content are not stored as raw text: decoding or dropping markup could otherwise undo redaction. The source byte count and digest still refer to the original input, which the importer does not modify.

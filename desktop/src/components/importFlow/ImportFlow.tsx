@@ -462,7 +462,8 @@ export function ImportFlow({
 
       {state.stage === "selector" && report ? (
         <>
-          <EvidenceSelector report={report} selected={state.selected} dispatch={dispatch} />
+          <EvidenceSelector key={state.plan?.planToken} report={report} selected={state.selected} dispatch={dispatch}
+            onInspect={engine.import.inspectEvidence && state.path && state.plan ? (identity) => engine.import.inspectEvidence!({ path: state.path!, planToken: state.plan!.planToken, planVersion: state.plan!.planVersion, identity }) : undefined} />
           <div className="import-flow__row">
             <span className="import-flow__spacer" />
             <button type="button" onClick={() => dispatch({ type: "CLOSE_SELECTOR" })}>

@@ -270,3 +270,5 @@ This first version intentionally leaves several chapters for follow-up:
 
 Those gaps do not change the status of the methods documented here. They
 are the next candidates for the template, not behavior to imply in advance.
+
+HTML diagnostic evidence (#750): local integration; see [pipeline chapter](proven-methods/LOG_EVIDENCE_PIPELINE.md#passive-html-diagnostic-evidence-750). Qualification pending.

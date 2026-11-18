@@ -3,6 +3,7 @@
 mod capability_qualification_host;
 mod handbook;
 mod import_attempt_reports;
+mod import_evidence;
 use cd_core::log_analysis::import_attempt_diagnostic::ImportAttemptDiagnostic;
 mod investigation_report_export;
 mod investigation_team_known_answer_host;
@@ -381,6 +382,7 @@ struct AppState {
     /// later ingest starts, explicitly clearable, and absent after restart.
     failed_log_ingest_diagnostic: Mutex<cd_core::log_analysis::FailedIngestDiagnosticStore>,
     import_attempt_reports: Mutex<import_attempt_reports::ImportAttemptReports>,
+    import_evidence_grants: Mutex<import_evidence::EvidencePreviewGrants>,
     /// Serializes the complete demo check/import/marker transaction.
     demo_log_install: tokio::sync::Mutex<()>,
     /// Bounded host-rendered diagnostic previews keyed by opaque, process-local
@@ -12291,6 +12293,7 @@ async fn log_preview_import(
         }
         return Err(error);
     }
+    let selected_path = PathBuf::from(&path);
     let cancellation = cancel.clone();
     let result = tokio::task::spawn_blocking(move || {
         cd_core::log_analysis::import_preview::preview_import_plan(
@@ -12309,6 +12312,11 @@ async fn log_preview_import(
     let result = result.and_then(|result| result);
     let token = match &result {
         Ok(plan) => {
+            state
+                .import_evidence_grants
+                .lock()
+                .map_err(|_| "supporting document inspection unavailable")?
+                .remember(selected_path, plan);
             diagnostic.set_preview(plan);
             Some(plan.plan_token.clone())
         }
@@ -12325,6 +12333,38 @@ async fn log_preview_import(
             .finish(id, diagnostic, token);
     }
     result
+}
+
+/// Passive supporting-document text only; source and plan must be host-authorized.
+#[tauri::command]
+async fn log_inspect_import_evidence(
+    state: State<'_, AppState>,
+    path: String,
+    plan_token: String,
+    plan_version: u32,
+    identity: String,
+) -> Result<cd_core::log_analysis::import_evidence::ImportEvidenceText, String> {
+    let allowed = state
+        .import_evidence_grants
+        .lock()
+        .map_err(|_| "supporting document inspection unavailable")?
+        .permits(std::path::Path::new(&path), &plan_token, plan_version);
+    if !allowed {
+        return Err("supporting document unavailable; preview the selected source again".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::import_evidence::inspect_import_evidence(
+            std::path::Path::new(&path),
+            &plan_token,
+            plan_version,
+            &identity,
+        )
+        .map_err(|_| {
+            "supporting document unavailable; preview the selected source again".to_string()
+        })
+    })
+    .await
+    .map_err(|_| "supporting document inspection unavailable".to_string())?
 }
 
 /// Run a reviewed, plan-bound import (#751).
@@ -15748,6 +15788,7 @@ pub fn run() {
         active_log_corpus: Mutex::new(None),
         log_corpus_handles: Arc::new(LogCorpusHandleCache::default()),
         import_attempt_reports: Mutex::new(import_attempt_reports::ImportAttemptReports::default()),
+        import_evidence_grants: Mutex::new(import_evidence::EvidencePreviewGrants::default()),
         failed_log_ingest_diagnostic: Mutex::new(
             cd_core::log_analysis::FailedIngestDiagnosticStore::default(),
         ),
@@ -15974,6 +16015,7 @@ pub fn run() {
             discard_log_corpus,
             log_load_timezone_state,
             log_preview_import,
+            log_inspect_import_evidence,
             begin_import_diagnostic,
             save_import_diagnostic,
             log_run_import,
