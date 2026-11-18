@@ -1354,6 +1354,9 @@ export function LogExplorer({ corpusId }: Props) {
   const investigationMetadataStartedRef = useRef(false);
   const investigationLoadRequestRef = useRef(0);
   const findRequestRef = useRef(0);
+  // Cancellation intent suppresses navigation immediately, independently of
+  // whether the host acknowledges before or after retiring its request.
+  const findNavigationCancelledRef = useRef<number | null>(null);
   const activeFindRequestRef = useRef<string | null>(null);
   const findActiveRef = useRef(false);
   const autoStatusLockRef = useRef<
@@ -3243,6 +3246,10 @@ export function LogExplorer({ corpusId }: Props) {
       }
       setFindSearching(false);
       setFindCancelling(false);
+      if (findNavigationCancelledRef.current === requestId) {
+        setStatus("Find result ignored after cancellation request · previous visible results preserved");
+        return;
+      }
       if (result.cancelled) {
         setStatus("Find cancelled · previous visible results preserved");
         return;
@@ -3343,6 +3350,7 @@ export function LogExplorer({ corpusId }: Props) {
   const cancelFind = async () => {
     const requestId = activeFindRequestRef.current;
     if (!requestId || findCancelling) return;
+    findNavigationCancelledRef.current = findRequestRef.current;
     setFindCancelling(true);
     setStatus("Find cancellation requested");
     try {

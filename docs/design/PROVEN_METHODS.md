@@ -274,3 +274,5 @@ are the next candidates for the template, not behavior to imply in advance.
 HTML diagnostic evidence (#750): local integration; see [pipeline chapter](proven-methods/LOG_EVIDENCE_PIPELINE.md#passive-html-diagnostic-evidence-750). Qualification pending.
 
 Source severity facet summaries use bounded same-query aggregates and accessible exact-count disclosure; see the Log Evidence Pipeline chapter. Packaged native viewport acceptance remains a separate proof gate.
+
+Find cancellation separates backend acknowledgement from immediate request-local navigation suppression; the Log Evidence Pipeline chapter documents the completion race and truthful locating phase.

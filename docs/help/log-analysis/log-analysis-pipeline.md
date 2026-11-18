@@ -376,3 +376,19 @@ Only the bounded top-source facet response supplies distributions. Opening
 All sources or scrolling a large catalog does not launch per-source queries;
 catalog-only entries do not pretend to have a severity summary. Component and
 web tests are not packaged native narrow/normal/wide acceptance evidence.
+
+## Find completion and cancellation
+
+Find distinguishes a cancellable backend search from locating a returned match
+in its bounded neighborhood. Cancel disappears when the backend request retires;
+“locating match” describes the remaining non-cancellable context lookup. Changing
+the term or mode clears Find-owned work immediately, and obsolete search or
+neighborhood responses cannot move the current view.
+
+Pressing Cancel also withdraws permission for that request to navigate, before
+the host replies. If search completion races the cancellation acknowledgement,
+the late result is ignored and previous visible results remain. This does not
+claim that the backend was stopped: a cancellation that arrives before host
+registration remains retryable. A fresh Find starts an independent request and
+can navigate normally. Cursor-paged Find uses the same lifecycle and preserves
+its bounded result pages and Filter intersection.
