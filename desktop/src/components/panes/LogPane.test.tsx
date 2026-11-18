@@ -3503,6 +3503,40 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     );
   });
 
+  it("does not expose a parent Cancel before diagnostic reservation, then cancels the registered run", async () => {
+    let resolveReservation!: (id: string) => void;
+    engineMocks.client = createMockEngineClient({ manualFlush: true });
+    Object.assign(engineMocks.client.import, {
+      beginDiagnostic: vi.fn().mockResolvedValueOnce("preview-id").mockImplementationOnce(
+        () => new Promise<string>((resolve) => { resolveReservation = resolve; }),
+      ),
+      saveDiagnostic: vi.fn(),
+    });
+    const run = vi.spyOn(engineMocks.client.import, "run");
+    const cancel = vi.spyOn(engineMocks.client.import, "cancel");
+    hostMocks.cancelIngest.mockImplementationOnce(() => engineMocks.client!.import.cancel());
+    render(<LogPane />);
+    fireEvent.click(await screen.findByRole("button", { name: "Import with review…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose folder…" }));
+    await waitFor(() => {
+      engineMocks.client!.flush();
+      expect(screen.queryByRole("region", { name: "Ready to import" })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: /I understand and want to proceed/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await screen.findByText("Preparing import diagnostics…");
+    expect(screen.queryByRole("button", { name: "Cancel ingest" })).toBeNull();
+    expect(run).not.toHaveBeenCalled();
+    expect(hostMocks.cancelIngest).not.toHaveBeenCalled();
+    await act(async () => resolveReservation("run-id"));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel ingest" }));
+    await waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(run).toHaveBeenCalledOnce();
+    await act(async () => engineMocks.client!.flush());
+    await screen.findByText(/Import cancelled\. Nothing was published/i);
+    expect(loadCorpusImportActivity("mock-corpus-0001").events).toEqual([]);
+  });
+
   it("records a real reviewed cancellation without publishing a corpus Activity bridge", async () => {
     const { cancelSpy } = await openReviewedImportToRunning();
     hostMocks.cancelIngest.mockImplementationOnce(() =>

@@ -89,6 +89,7 @@ export function ImportFlow({
   const diagnosticIdRef = useRef<string | null>(null);
   const [diagnosticMessage, setDiagnosticMessage] = useState<string | null>(null);
   const [diagnosticSaving, setDiagnosticSaving] = useState(false);
+  const [diagnosticReserving, setDiagnosticReserving] = useState(false);
   const reserveDiagnostic = async () => {
     diagnosticIdRef.current = null;
     setDiagnosticId(null);
@@ -251,14 +252,21 @@ export function ImportFlow({
         ? "zip"
         : current.report?.sourceKind ?? "unknown";
     dispatch({ type: "RUN_STARTED" });
-    const correlationId = onRunStarted?.(sourceKind) ?? undefined;
     try {
-      const id = await reserveDiagnostic();
+      let id: string | undefined;
+      if (engine.import.beginDiagnostic) {
+        setDiagnosticReserving(true);
+        id = await reserveDiagnostic();
+        if (mountedRef.current) setDiagnosticReserving(false);
+      }
       if (!mountedRef.current || stateRef.current.exitRequested) {
         dispatch({ type: "RUN_CANCELLED" });
         onRunSettled?.({ startedAtMs, endedAtMs: Date.now(), outcome: "cancelled", sourceKind });
         return;
       }
+      // Only expose cancellable parent activity after reservation. There is
+      // no host import to cancel while beginDiagnostic is still pending.
+      const correlationId = onRunStarted?.(sourceKind) ?? undefined;
       const report = await engine.import.run({
         diagnosticId: id,
         path: current.path,
@@ -469,7 +477,9 @@ export function ImportFlow({
 
       {state.stage === "running" ? (
         <>
-          {!hostOwnsProgress ? (
+          {diagnosticReserving ? (
+            <p className="import-flow__status" role="status">Preparing import diagnostics…</p>
+          ) : !hostOwnsProgress ? (
             // A host that owns progress (LogPane) already renders its own
             // ProcessProgressPanel from the same host progress stream, with
             // its own cancel wiring — rendering one here too duplicated the
