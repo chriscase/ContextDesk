@@ -270,6 +270,31 @@ See [Share a log analysis package](help://log-portable-package) for versioned ex
 
 ## Privacy-safe import diagnostic {#import-diagnose}
 
+In the reviewed import flow, use **Export import diagnostic…** after preview,
+a completed import, a failure, or an acknowledged cancellation. It exports that
+actual attempt, without rereading the input or re-running the importer. The
+host keeps up to 16 snapshots in memory; old snapshots expire and all disappear
+when the app closes. A new attempt has a new handle, so a failed attempt never
+silently exports the previous success.
+
+Choose a **new JSON file** in the native Save panel. Existing files are never
+replaced, even if the Save panel offers replacement. Cancel closes the panel
+without writing. The desktop schema `contextdesk.desktop_import_attempt.v1`
+contains aggregate counts, typed outcome/status, bounded format and time-quality
+histograms, and measured ingest timings when available. It excludes paths,
+filenames, archive identities, raw timestamps, log text, credentials, provider
+information, hashes, and diagnostic handles. Custom format names become `other`.
+A missing preview or measured ingest section means that phase was unavailable,
+not that it succeeded with zero records. Preview reports describe the inspected
+inventory; run reports count only host-verified selected sources.
+
+This is separate from the broader case diagnostic/report builder and the
+memory-only failed-ingest banner, whose operator-facing details are not copied
+into this public-safe export. This action covers the reviewed import flow in
+Logs and guided setup, not legacy quick import, package import, or demo install.
+
+### Offline replay alternative
+
 When an import fails or looks wrong, you can generate a **public-safe diagnostic
 report** offline without sharing your logs:
 

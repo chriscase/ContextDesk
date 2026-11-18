@@ -700,3 +700,90 @@ describe("ImportFlow second seal", () => {
     expect(alert.textContent).not.toContain("abcdefghijklmnopqrst");
   });
 });
+
+describe("ImportFlow privacy-safe diagnostic", () => {
+  function diagnosticClient() {
+    const client = createMockEngineClient();
+    return Object.assign(client, { import: Object.assign(client.import, {
+      beginDiagnostic: vi.fn().mockResolvedValueOnce("preview-token").mockResolvedValueOnce("run-token"),
+      saveDiagnostic: vi.fn().mockResolvedValue({ status: "saved" }),
+    }) });
+  }
+  it("exports the exact preview then actual published run by opaque handle only", async () => {
+    const client = diagnosticClient();
+    const preview = vi.spyOn(client.import, "preview");
+    const run = vi.spyOn(client.import, "run");
+    await toPreflight(client);
+    expect(preview).toHaveBeenCalledWith("/incidents/checkout-outage", "preview-token");
+    fireEvent.click(screen.getByRole("button", { name: "Export import diagnostic…" }));
+    await screen.findByText("Import diagnostic saved.");
+    expect(client.import.saveDiagnostic).toHaveBeenLastCalledWith("preview-token");
+    fireEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    expect(screen.queryByRole("button", { name: "Export import diagnostic…" })).toBeNull();
+    await screen.findByRole("region", { name: "Import finished" });
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ diagnosticId: "run-token" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export import diagnostic…" }));
+    await screen.findByText("Import diagnostic saved.");
+    expect(client.import.saveDiagnostic).toHaveBeenLastCalledWith("run-token");
+    fireEvent.click(screen.getByRole("button", { name: "Import more…" }));
+    expect(screen.queryByRole("button", { name: "Export import diagnostic…" })).toBeNull();
+  });
+  it.each(["failed", "cancelled"] as const)("retains the %s attempt handle without falling back to preview", async (code) => {
+    const client = diagnosticClient();
+    vi.spyOn(client.import, "run").mockRejectedValue(new EngineError(code, code));
+    await toPreflight(client);
+    fireEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await screen.findByRole("button", { name: "Back to review" });
+    fireEvent.click(screen.getByRole("button", { name: "Export import diagnostic…" }));
+    await screen.findByText("Import diagnostic saved.");
+    expect(client.import.saveDiagnostic).toHaveBeenCalledWith("run-token");
+  });
+  it("distinguishes cancelled Save and expired reports without claiming a saved file", async () => {
+    const client = diagnosticClient();
+    vi.mocked(client.import.saveDiagnostic!).mockResolvedValueOnce({ status: "cancelled" }).mockRejectedValueOnce(new Error("expired"));
+    await toPreflight(client);
+    fireEvent.click(screen.getByRole("button", { name: "Export import diagnostic…" }));
+    await screen.findByText("Export cancelled. No file was written.");
+    fireEvent.click(screen.getByRole("button", { name: "Export import diagnostic…" }));
+    await screen.findByText(/Could not export this attempt/);
+    expect(screen.queryByText("Import diagnostic saved.")).toBeNull();
+  });
+  it("offers the failed-preview snapshot and does not expose a raw host error", async () => {
+    const client = diagnosticClient();
+    vi.spyOn(client.import, "preview").mockRejectedValue(new EngineError("failed", "preview failed"));
+    render(<ImportFlow engine={client} variant="pane" />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+    await screen.findByText(/Could not read this selection/);
+    fireEvent.click(screen.getByRole("button", { name: "Export import diagnostic…" }));
+    await screen.findByText("Import diagnostic saved.");
+    expect(client.import.saveDiagnostic).toHaveBeenCalledWith("preview-token");
+  });
+});
+
+it.each(["close", "unmount"])("settles cancellation once when %s occurs during diagnostic reservation", async (action) => {
+  const client = createMockEngineClient();
+  let resolveReservation!: (id: string) => void;
+  Object.assign(client.import, {
+    beginDiagnostic: vi.fn().mockResolvedValueOnce("preview-id").mockImplementationOnce(() => new Promise<string>((resolve) => { resolveReservation = resolve; })),
+    saveDiagnostic: vi.fn(),
+  });
+  const run = vi.spyOn(client.import, "run");
+  const onRunSettled = vi.fn();
+  const onExit = vi.fn();
+  const view = await toPreflight(client, onRunSettled);
+  fireEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Import" }));
+  expect(run).not.toHaveBeenCalled();
+  if (action === "close") {
+    view.rerender(<ImportFlow engine={client} variant="pane" exitSignal={1} onExit={onExit} onRunSettled={onRunSettled} />);
+  } else {
+    view.unmount();
+  }
+  resolveReservation("run-id");
+  await waitFor(() => expect(onRunSettled).toHaveBeenCalledOnce());
+  expect(onRunSettled).toHaveBeenCalledWith(expect.objectContaining({ outcome: "cancelled" }));
+  expect(run).not.toHaveBeenCalled();
+  if (action === "close") await waitFor(() => expect(onExit).toHaveBeenCalledOnce());
+});

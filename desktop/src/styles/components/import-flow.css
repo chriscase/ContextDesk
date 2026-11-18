@@ -484,3 +484,8 @@
     width: 100%;
   }
 }
+
+.import-flow__diagnostic {
+  padding-block: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}

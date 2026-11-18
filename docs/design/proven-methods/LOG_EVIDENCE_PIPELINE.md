@@ -886,3 +886,18 @@ to “helpfully” interpret an offsetless production timestamp.
   security and retention design.
 - Large 10–100M-line behavior needs periodic scale proof beyond the deterministic
   100k acceptance fixture.
+
+
+## Actual-attempt import diagnostics (#853)
+
+The desktop reviewed-import surface captures aggregate-only diagnostics at the
+trusted host boundary, rather than serializing a renderer manifest or replaying
+inputs. Preview/run handles are one-shot and bounded to 16 memory-only records.
+Private plan tokens bind preview counts to verified selections but never leave
+in the export. Unknown custom keys collapse into `other`; source locators,
+raw times, provider configuration, and payloads are not fields of the schema.
+Native Save selects a new destination and atomic no-clobber publication refuses
+existing paths. Failures and cancellation retain their own terminal snapshots.
+The offline diagnostic remains a different operation with temporary-corpus
+semantics. Renderer tests are not evidence of packaged-shell/native Save
+acceptance; that proof must be recorded separately before claiming #853 closed.
