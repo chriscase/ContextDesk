@@ -3353,7 +3353,12 @@ export type SharedTimelineSummaryDto = {
   lanes: SharedTimelineLaneSummaryDto[];
 };
 
+export type SourceSeverityCountsDto = {
+  debugTrace: number; info: number; warn: number; errorFatal: number; unknown: number;
+};
+
 export type LogFacetsDto = {
+  sourceSeverityCounts?: Record<string, SourceSeverityCountsDto>;
   sources: Record<string, number>;
   levels: Record<string, number>;
   services: Record<string, number>;

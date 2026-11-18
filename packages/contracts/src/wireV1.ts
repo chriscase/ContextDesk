@@ -245,6 +245,7 @@ export type WireEventCount = { totalMatched: number };
 
 export type WireLogFacets = {
   sources: Record<string, number>;
+  sourceSeverityCounts?: Record<string, { debugTrace: number; info: number; warn: number; errorFatal: number; unknown: number }>;
   levels: Record<string, number>;
   services: Record<string, number>;
   hosts: Record<string, number>;
@@ -789,6 +790,10 @@ const eventRowsPageShape: ObjectShape = (() => {
 
 const logFacetsShape: ObjectShape = {
   sources: f.req(f.map(f.u64)),
+  sourceSeverityCounts: f.opt(f.map(f.obj({
+    debugTrace: f.req(f.u64), info: f.req(f.u64), warn: f.req(f.u64),
+    errorFatal: f.req(f.u64), unknown: f.req(f.u64),
+  }))),
   levels: f.req(f.map(f.u64)),
   services: f.req(f.map(f.u64)),
   hosts: f.req(f.map(f.u64)),

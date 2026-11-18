@@ -2068,6 +2068,23 @@ describe("LogExplorer shell", () => {
     expect(await screen.findByText("current corpus evidence")).toBeTruthy();
   });
 
+  it("clears prior severity aggregates when a filtered facet refresh fails", async () => {
+    vi.mocked(host.hostLogFacets).mockResolvedValue({ sources: { "api.log": 5 },
+      sourceSeverityCounts: { "api.log": { errorFatal: 2, warn: 1, info: 2, debugTrace: 0, unknown: 0 } },
+      levels: {error:2,info:3}, services: {}, hosts: {}, timeQuality: "wall" });
+    render(<LogExplorer corpusId="c1" />);
+    const button = await screen.findByRole("button", { name: "Severity breakdown for api.log" });
+    fireEvent.focus(button);
+    expect(screen.getByTestId("source-severity-tooltip").textContent).toContain("2 · 40.0%");
+    const calls = vi.mocked(host.hostLogFacets).mock.calls.length;
+    vi.mocked(host.hostLogFacets).mockRejectedValue(new Error("fixture facet refresh failure"));
+    const filters = screen.getByTestId("log-explorer-filters");
+    fireEvent.click(within(filters).getByRole("checkbox", {name: /api\.log/}));
+    await waitFor(() => expect(vi.mocked(host.hostLogFacets).mock.calls.length).toBeGreaterThan(calls));
+    await waitFor(() => expect(screen.queryByRole("button", {name:"Severity breakdown for api.log"})).toBeNull());
+    expect(screen.queryByTestId("source-severity-tooltip")).toBeNull();
+  });
+
   it("does not carry a source filter into a replacement corpus", async () => {
     vi.mocked(host.hostLogFacets).mockImplementation(
       async (requestedCorpusId) => {

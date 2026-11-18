@@ -352,3 +352,27 @@ stream, and words such as “no errors detected” do not declare severity. When
 message alone suggests an error or warning, details identify that inference;
 an event without trustworthy evidence stays unknown. Older corpora keep their
 existing filter levels and do not acquire invented source values on reopen.
+
+## Per-source severity distribution
+
+Each top-source row in Explorer's Sources rail has a compact severity glyph.
+Hover it or focus its separate button to see exact counts and one-decimal
+percentages for Error/fatal, Warn, Info, Debug/trace and Unknown/other. The
+source checkbox remains a separate control. Escape, pointer departure, focus
+departure, an outside click, scrolling or resizing dismisses the popover.
+Labels and numbers accompany color in every theme; long source paths wrap and
+the popover is bounded to the viewport.
+
+These counters use the current **facet** query, including its time, source,
+level and noise predicates. Find keywords and individual lane-only restrictions
+are not included; do not read them as either the displayed page size or a
+corpus-wide total. The five counts sum to that source's facet count. Unknown
+is retained, not silently recategorized as Info. A zero total has no defined
+percentage. Missing adapter data, a mismatched total, a failed refresh, or a
+temporary evidence reveal does not imply zero: the breakdown is unavailable
+and prior-query distributions are not shown.
+
+Only the bounded top-source facet response supplies distributions. Opening
+All sources or scrolling a large catalog does not launch per-source queries;
+catalog-only entries do not pretend to have a severity summary. Component and
+web tests are not packaged native narrow/normal/wide acceptance evidence.

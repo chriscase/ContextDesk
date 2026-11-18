@@ -1,3 +1,4 @@
+import { SourceSeverityGlyph } from "./SourceSeverityGlyph";
 /**
  * Multi-window Log Investigation Workspace (#480–#487).
  * Filters | 1–4 evidence lanes | chat rail · bookmarks · log_nav chips.
@@ -2096,6 +2097,7 @@ export function LogExplorer({ corpusId }: Props) {
     const facetFilters =
       filtersCorpusId === corpusId ? filters : emptyFilters();
     setFacetsLoading(true);
+    setFacets((previous) => previous ? { ...previous, sourceSeverityCounts: undefined } : null);
     try {
       const f = await hostLogFacets(
         corpusId,
@@ -2207,6 +2209,7 @@ export function LogExplorer({ corpusId }: Props) {
     }
     setTimelineReady(false);
     setFacetsLoading(true);
+    setFacets((previous) => previous ? { ...previous, sourceSeverityCounts: undefined } : null);
     const visibleLanes = lanes.slice(0, laneCount);
     const unloaded = Object.fromEntries(
       visibleLanes.map((lane) => [
@@ -7280,15 +7283,15 @@ export function LogExplorer({ corpusId }: Props) {
               </div>
               <div className="log-explorer__facet">
                 {topSourceEntries.map(([src, count]) => (
-                  <label key={src} className="log-explorer__facet-row">
-                    <input
-                      type="checkbox"
-                      checked={filters.sources.includes(src)}
-                      onChange={() => toggleSource(src)}
-                    />
-                    <span title={src}>{src}</span>
-                    <span className="count">{count}</span>
-                  </label>
+                  <div key={src} className="source-severity__row">
+                    <label className="log-explorer__facet-row">
+                      <input type="checkbox" checked={filters.sources.includes(src)} onChange={() => toggleSource(src)} />
+                      <span title={src}>{src}</span><span className="count">{count}</span>
+                    </label>
+                    <SourceSeverityGlyph key={`${src}:${facetsLoading}:${!!revealRestore}:${revealSuppressedEvidence}:${JSON.stringify(facets?.sourceSeverityCounts?.[src])}`}
+                      source={src} total={count} counts={facets?.sourceSeverityCounts?.[src]}
+                      unavailableReason={facetsLoading ? "Updating facet scope; prior severity counts are not shown." : revealRestore || revealSuppressedEvidence ? "Severity breakdown unavailable during temporary evidence reveal; restore the prior view to see its scoped counts." : undefined} />
+                  </div>
                 ))}
               </div>
               {allSourcesOpen ? (
