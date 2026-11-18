@@ -3017,6 +3017,11 @@ export async function hostSaveLogDiagnosticReport(
 export type TimeQuality = "wall" | "mixed" | "order_only";
 
 export type ExplorerEventDto = {
+  severityNumber?: number | null;
+  severityText?: string | null;
+  sourceSeverity?: string | number | null;
+  severityInferred?: boolean;
+  provenance?: string;
   seq: number;
   ts: number;
   timeQuality: TimeQuality;

@@ -923,3 +923,14 @@ force HTML parsing. Sample fragments cannot establish whole-document eligibility
 Reports with operative stylesheets cannot establish visible content statically. They remain supporting evidence; the reader reports visibility as unverified rather than presenting an empty report as complete. No stylesheet is fetched or executed.
 
 For HTML-derived events, **Original** may show a withholding notice instead of markup. Records containing character references, attributes, comments, or redacted content are not stored as raw text: decoding or dropping markup could otherwise undo redaction. The source byte count and digest still refer to the original input, which the importer does not modify.
+
+### Preserve severity evidence independently of the query band
+
+An event keeps its existing filter/ranking level, plus bounded source severity
+and its interpretation. Preserve the distinction between an integer on a known
+producer scale, explicit source text, a weak message inference, and no
+declaration. In particular, syslog priority and Windows Event Level run in the
+opposite direction to Pino; arbitrary numeric JSON does not identify a scale.
+Previously stored events retain their known band with legacy provenance and no
+manufactured source values. Verify reopen, package round-trip and normalized
+export against the persisted evidence, not against reparsed original messages.

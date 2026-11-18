@@ -1865,6 +1865,7 @@ fn seed_marker_corpus(
     let corpus_id = corpus.id().to_string();
     let base_ts: i64 = 1_800_000_000;
     let events = vec![LogEvent {
+        severity: Default::default(),
         seq: 1,
         ts: base_ts,
         timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2156,6 +2157,7 @@ fn seed_triage_corpus(
 
     let events = vec![
         LogEvent {
+            severity: Default::default(),
             seq: 1,
             ts: base_ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2171,6 +2173,7 @@ fn seed_triage_corpus(
             source: source.clone(),
         },
         LogEvent {
+            severity: Default::default(),
             seq: 2,
             ts: base_ts + 1,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2186,6 +2189,7 @@ fn seed_triage_corpus(
             source: source.clone(),
         },
         LogEvent {
+            severity: Default::default(),
             seq: 3,
             ts: base_ts + 2,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2201,6 +2205,7 @@ fn seed_triage_corpus(
             source: source.clone(),
         },
         LogEvent {
+            severity: Default::default(),
             seq: 4,
             ts: base_ts + 3,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2216,6 +2221,7 @@ fn seed_triage_corpus(
             source: source.clone(),
         },
         LogEvent {
+            severity: Default::default(),
             seq: 5,
             ts: base_ts + 4,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2231,6 +2237,7 @@ fn seed_triage_corpus(
             source: source.clone(),
         },
         LogEvent {
+            severity: Default::default(),
             seq: 6,
             ts: base_ts + 5,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2246,6 +2253,7 @@ fn seed_triage_corpus(
             source: source.clone(),
         },
         LogEvent {
+            severity: Default::default(),
             seq: 7,
             ts: base_ts + 6,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,

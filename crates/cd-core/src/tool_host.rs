@@ -9897,6 +9897,7 @@ mod tests {
                     ts = seq as i64;
                 }
                 events.push(crate::log_analysis::LogEvent {
+                    severity: Default::default(),
                     seq,
                     ts,
                     timestamp_provenance: match time_quality {
@@ -10169,6 +10170,7 @@ mod tests {
         for (template_id, pattern, count) in added {
             for index in 0..count {
                 events.push(crate::log_analysis::LogEvent {
+                    severity: Default::default(),
                     seq,
                     ts: base + seq as i64,
                     timestamp_provenance:
@@ -10342,6 +10344,7 @@ mod tests {
 
         let event = |seq: u64, ts: i64, template_id: u64, message: String, source: &str| {
             crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq,
                 ts,
                 timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -11047,6 +11050,7 @@ mod tests {
             });
             for offset in 0..count {
                 events.push(crate::log_analysis::LogEvent {
+                    severity: Default::default(),
                     seq,
                     ts: 1_700_000_000 + seq as i64,
                     timestamp_provenance:
@@ -11152,6 +11156,7 @@ mod tests {
             });
             for _ in 0..count {
                 events.push(crate::log_analysis::LogEvent {
+                    severity: Default::default(),
                     seq,
                     ts: 1_700_000_000 + seq as i64,
                     timestamp_provenance:
@@ -11226,6 +11231,7 @@ mod tests {
             .unwrap();
         let events = (0..1_000_u64)
             .map(|index| crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq: index + 1,
                 ts: 1_700_000_000 + index as i64,
                 timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -11368,6 +11374,7 @@ mod tests {
                     .into_iter()
                     .enumerate()
                     .map(|(index, source)| crate::log_analysis::LogEvent {
+                        severity: Default::default(),
                         seq: index as u64 + 1,
                         ts: 1_700_000_000 + index as i64,
                         timestamp_provenance:
@@ -11493,6 +11500,7 @@ mod tests {
                     .into_iter()
                     .enumerate()
                     .map(|(index, source)| crate::log_analysis::LogEvent {
+                        severity: Default::default(),
                         seq: index as u64 + 1,
                         ts: 1_700_000_000 + index as i64,
                         timestamp_provenance:
@@ -11582,6 +11590,7 @@ mod tests {
             .unwrap();
         let mut events = (0..600_u64)
             .map(|index| crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq: index + 2,
                 ts: 1_700_000_000 + (index % 120) as i64,
                 timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -11598,6 +11607,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         events.push(crate::log_analysis::LogEvent {
+            severity: Default::default(),
             seq: 1,
             ts: 1_700_000_060,
             timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -11672,6 +11682,7 @@ mod tests {
             .unwrap();
         let events = (0..40_u64)
             .map(|index| crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq: index + 1,
                 ts: 1_700_000_000 + index as i64,
                 timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -11820,6 +11831,7 @@ mod tests {
         corpus
             .push_events(&[
                 crate::log_analysis::LogEvent {
+                    severity: Default::default(),
                     seq: 1,
                     ts: 1_700_000_000,
                     timestamp_provenance:
@@ -11836,6 +11848,7 @@ mod tests {
                     source: "a.log".into(),
                 },
                 crate::log_analysis::LogEvent {
+                    severity: Default::default(),
                     seq: 2,
                     ts: 1_700_000_001,
                     timestamp_provenance:
@@ -11920,6 +11933,7 @@ mod tests {
         // paused between queries, so the final revision check is exercised.
         corpus
             .push_events(&[crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq: 9_999,
                 ts: 1_700_000_999,
                 timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -12082,6 +12096,7 @@ mod tests {
             ])
             .unwrap();
         let mut events = vec![crate::log_analysis::LogEvent {
+            severity: Default::default(),
             seq: 1,
             ts: seed_ts,
             timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -12098,6 +12113,7 @@ mod tests {
         }];
         for index in 0..9_u64 {
             events.push(crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq: 10 + index,
                 ts: seed_ts - 9 + index as i64,
                 timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -12115,6 +12131,7 @@ mod tests {
         }
         for index in 0..10_u64 {
             events.push(crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq: 30 + index,
                 ts: seed_ts + 1 + index as i64,
                 timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -12229,6 +12246,7 @@ mod tests {
         corpus
             .push_events(&[
                 crate::log_analysis::LogEvent {
+                    severity: Default::default(),
                     seq: 1,
                     ts: 1_700_000_000,
                     timestamp_provenance:
@@ -12245,6 +12263,7 @@ mod tests {
                     source: "z-source".into(),
                 },
                 crate::log_analysis::LogEvent {
+                    severity: Default::default(),
                     seq: 2,
                     ts: 1_700_000_001,
                     timestamp_provenance:
@@ -12844,6 +12863,7 @@ mod tests {
         let mut events = Vec::new();
         for index in 0..12 {
             events.push(crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq: index + 1,
                 ts: 1_700_000_000 + index as i64 * 5,
                 timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -12861,6 +12881,7 @@ mod tests {
         }
         for index in 0..4 {
             events.push(crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq: 100 + index,
                 ts: 1_700_000_002 + index as i64 * 15,
                 timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
@@ -13237,6 +13258,7 @@ mod tests {
         let corpus = LogCorpus::create(&cache, "tool loop").unwrap();
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 10,
                 ts: 1_700_000_010,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -13373,6 +13395,7 @@ mod tests {
         let corpus = LogCorpus::create(&cache, "bind").unwrap();
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 10,
                 ts: 1_700_000_010,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -13507,6 +13530,7 @@ mod tests {
         let corpus = LogCorpus::create(&cache, "report tool loop").unwrap();
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 10,
                 ts: 1_700_000_010,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,

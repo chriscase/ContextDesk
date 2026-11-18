@@ -529,6 +529,9 @@ pub struct SharedTimelineSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplorerEvent {
+    /// Lossless source severity alongside the existing normalized level.
+    #[serde(default, flatten)]
+    pub severity: super::severity::LogSeverityEvidence,
     /// Event sequence.
     pub seq: u64,
     /// Stored ts (wall or order).
@@ -561,6 +564,7 @@ pub struct ExplorerEvent {
 impl From<LogEvent> for ExplorerEvent {
     fn from(e: LogEvent) -> Self {
         Self {
+            severity: e.severity,
             seq: e.seq,
             ts: e.ts,
             timestamp_provenance: e.timestamp_provenance,
@@ -767,6 +771,9 @@ pub struct ChronologyQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChronologyEvent {
+    /// Lossless source severity, separate from the normalized filtering band.
+    #[serde(default, flatten)]
+    pub severity: super::severity::LogSeverityEvidence,
     /// Stable ingest ordinal.
     pub seq: u64,
     /// Stored active timestamp value; its meaning is governed by the basis.
@@ -1641,7 +1648,7 @@ pub fn query_chronology(corpus: &LogCorpus, q: &ChronologyQuery) -> CoreResult<C
     let fetch_limit = limit.saturating_add(1);
     let sql = format!(
         "SELECT seq, ts, level, message, source, timestamp_provenance, \
-                active_timestamp_basis, unresolved_local_timestamp, {wall_group}, {axis_value} \
+                active_timestamp_basis, unresolved_local_timestamp, {wall_group}, {axis_value}, severity_evidence \
          FROM events WHERE {page_where} \
          ORDER BY {wall_group} ASC, {axis_value} ASC, seq ASC LIMIT {fetch_limit}"
     );
@@ -1660,6 +1667,7 @@ pub fn query_chronology(corpus: &LogCorpus, q: &ChronologyQuery) -> CoreResult<C
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, i64>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             })
             .map_err(duck_err)?;
@@ -1676,6 +1684,7 @@ pub fn query_chronology(corpus: &LogCorpus, q: &ChronologyQuery) -> CoreResult<C
                 unresolved_local_timestamp,
                 group,
                 _axis_value,
+                stored_severity,
             ) = row.map_err(duck_err)?;
             let seq = u64::try_from(seq)
                 .map_err(|_| CoreError::Message("chronology event sequence is invalid".into()))?;
@@ -1694,6 +1703,7 @@ pub fn query_chronology(corpus: &LogCorpus, q: &ChronologyQuery) -> CoreResult<C
                 ));
             }
             events.push(ChronologyEvent {
+                severity: super::store::decode_severity_evidence(stored_severity.as_deref())?,
                 seq,
                 ts,
                 timestamp_provenance,
@@ -1895,7 +1905,7 @@ fn query_event_rows_with_additional_keyword(
     let fetch_limit = limit.saturating_add(1);
     let sql = format!(
         "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
-                timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp \
+                timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp, severity_evidence \
          FROM events WHERE {page_where} ORDER BY {order} LIMIT {fetch_limit}"
     );
 
@@ -2938,7 +2948,7 @@ pub(crate) fn fetch_event_by_seq(
     corpus.with_connection(|conn| {
         let sql =
             "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
-                    timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp \
+                    timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp, severity_evidence \
                    FROM events WHERE seq = ? LIMIT 1";
         let mut stmt = conn.prepare(sql).map_err(duck_err)?;
         let binds = [Value::BigInt(seq as i64)];
@@ -2965,7 +2975,7 @@ pub(crate) fn fetch_events_by_seqs(
                 .join(", ");
             let sql = format!(
                 "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
-                        timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp \
+                        timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp, severity_evidence \
                  FROM events WHERE seq IN ({placeholders})"
             );
             let mut stmt = conn.prepare(&sql).map_err(duck_err)?;
@@ -3247,6 +3257,7 @@ fn bind_and_map_events(
                 r.get::<_, Option<String>>(10)?,
                 r.get::<_, Option<String>>(11)?,
                 r.get::<_, Option<String>>(12)?,
+                r.get::<_, Option<String>>(13)?,
             ))
         })
         .map_err(duck_err)?;
@@ -3266,6 +3277,7 @@ fn bind_and_map_events(
             stored_provenance,
             stored_active_basis,
             unresolved_local_timestamp,
+            stored_severity,
         ) = row.map_err(duck_err)?;
         let timestamp_provenance = TimestampProvenance::from_storage_str(
             stored_provenance.as_deref(),
@@ -3276,6 +3288,7 @@ fn bind_and_map_events(
         )
         .ok_or_else(|| CoreError::Message("event has invalid active timestamp basis".into()))?;
         let event = LogEvent {
+            severity: super::store::decode_severity_evidence(stored_severity.as_deref())?,
             seq: u64::try_from(seq)
                 .map_err(|_| CoreError::Message("event sequence is negative".into()))?,
             ts,
@@ -4569,6 +4582,7 @@ mod tests {
 
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 90,
                 ts: 1_700_000_500,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -4650,6 +4664,7 @@ mod tests {
         let snapshot = query_event_count_with_post_scan(&corpus, &filter, None, || {
             corpus
                 .push_events(&[LogEvent {
+                    severity: Default::default(),
                     seq: 90,
                     ts: 1_700_000_500,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -5511,6 +5526,7 @@ mod tests {
         corpus
             .push_events(&[
                 LogEvent {
+                    severity: Default::default(),
                     seq: 1,
                     ts: 946_684_799,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -5526,6 +5542,7 @@ mod tests {
                     source: "old.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 2,
                     ts: 1_000_000_000,
                     timestamp_provenance: TimestampProvenance::OrderOnly,

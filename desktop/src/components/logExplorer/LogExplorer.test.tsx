@@ -3263,6 +3263,21 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("shows typed source severity and mapping provenance without replacing the level", async () => {
+    const page = defaultEventPage();
+    page.events[0] = { ...page.events[0]!, sourceSeverity: 30, severityNumber: 13,
+      severityText: null, severityInferred: false, provenance: "schema_mapped" };
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue(page);
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText(/auth failure/));
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    expect(within(inspector).getByText("Source severity")).toBeTruthy();
+    expect(within(inspector).getByText("30")).toBeTruthy();
+    expect(within(inspector).getByText(/OTel 13.*No source label/)).toBeTruthy();
+    expect(within(inspector).getByText("schema_mapped")).toBeTruthy();
+    expect(host.hostLogQueryEventOriginal).not.toHaveBeenCalled();
+  });
+
   it("lazily reveals and copies the authoritative redacted original with fidelity notices", async () => {
     const load = deferred<host.EventOriginalRepresentationDto>();
     vi.mocked(host.hostLogQueryEventOriginal).mockReturnValue(load.promise);

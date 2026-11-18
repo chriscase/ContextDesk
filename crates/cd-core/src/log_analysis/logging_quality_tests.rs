@@ -89,6 +89,7 @@ fn timezone_resolution_changes_assessment_state_without_erasing_local_evidence()
     corpus
         .push_events(&[
             LogEvent {
+                severity: Default::default(),
                 seq: 0,
                 ts: 0,
                 timestamp_provenance: TimestampProvenance::UnresolvedLocal,
@@ -104,6 +105,7 @@ fn timezone_resolution_changes_assessment_state_without_erasing_local_evidence()
                 source: source.into(),
             },
             LogEvent {
+                severity: Default::default(),
                 seq: 1,
                 ts: 1,
                 timestamp_provenance: TimestampProvenance::UnresolvedLocal,

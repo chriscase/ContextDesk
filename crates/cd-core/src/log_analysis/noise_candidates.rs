@@ -1697,6 +1697,7 @@ mod tests {
         source: &str,
     ) -> LogEvent {
         LogEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,

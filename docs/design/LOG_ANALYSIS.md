@@ -402,3 +402,18 @@ invents a timezone for offsetless records. A misleading HTML filename does not
 force HTML parsing. Sample fragments cannot establish whole-document eligibility.
 
 Reports with operative stylesheets cannot establish visible content statically. They remain supporting evidence; the reader reports visibility as unverified rather than presenting an empty report as complete. No stylesheet is fetched or executed.
+
+### Event severity evidence (#790)
+
+Keep the established level column/index for filtering and ranking. Persist a
+separate bounded evidence object on each new event, including typed source
+scalar, source text if any, optional OpenTelemetry severity number, and explicit
+provenance. NULL evidence in an older corpus denotes legacy normalization;
+never reconstruct a source claim by parsing stored or redacted originals.
+The shared [OTel severity bands](https://opentelemetry.io/docs/specs/otel/logs/data-model/#severity-fields)
+are for comparison, not a replacement for producer vocabulary. Numeric producer
+scales require structural evidence. Opposite scale directions (syslog/Windows
+versus CEF/Pino), inner/outer conflicts, and message inference must stay
+distinguishable. Source facility, status, stream and outcome are not severities.
+Details and portable exports consume persisted evidence, not independent
+renderer heuristics.

@@ -8169,6 +8169,18 @@ export function LogExplorer({ corpusId }: Props) {
                       </dd>
                     </div>
                     <div>
+                      <dt>Source severity</dt>
+                      <dd>{detail.sourceSeverity == null ? "Not recorded" : JSON.stringify(detail.sourceSeverity)}</dd>
+                    </div>
+                    <div>
+                      <dt>Severity mapping</dt>
+                      <dd>{detail.severityNumber == null ? "No numeric mapping" : `OTel ${detail.severityNumber}`} · {detail.severityText ?? "No source label"}{detail.severityInferred ? " · inferred" : ""}</dd>
+                    </div>
+                    <div>
+                      <dt>Severity provenance</dt>
+                      <dd>{detail.provenance ?? "legacy_unknown"}</dd>
+                    </div>
+                    <div>
                       <dt>Service</dt>
                       <dd>{detail.service ?? "—"}</dd>
                     </div>

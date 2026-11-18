@@ -121,6 +121,7 @@ fn metadata_with_declarations(
 
 fn parsed_record(record: &StoredTimestampRecord) -> ParsedLine {
     ParsedLine {
+        severity: Default::default(),
         ts: Some(record.ts),
         timestamp_provenance: record.timestamp_provenance,
         active_timestamp_basis: record.active_timestamp_basis,
@@ -657,6 +658,7 @@ mod tests {
         corpus
             .push_events(&[
                 LogEvent {
+                    severity: Default::default(),
                     seq: 0,
                     ts: 0,
                     timestamp_provenance: TimestampProvenance::UnresolvedLocal,
@@ -672,6 +674,7 @@ mod tests {
                     source: "server/server.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 1,
                     ts: 1_614_912_833,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -698,6 +701,7 @@ mod tests {
         let cache = tempfile::tempdir().expect("cache");
         let corpus = LogCorpus::create(cache.path(), "timezone multi apply").unwrap();
         let local = |seq: u64, source: &str, stamp: &str| LogEvent {
+            severity: Default::default(),
             seq,
             ts: seq as i64,
             timestamp_provenance: TimestampProvenance::UnresolvedLocal,
