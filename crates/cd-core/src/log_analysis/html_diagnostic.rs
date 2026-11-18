@@ -516,11 +516,13 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].text, "INFO α & β");
         assert_eq!(
-            &raw[rows[0].source_start..rows[0].source_end],
+            raw.get(rows[0].source_start..rows[0].source_end)
+                .expect("valid source span"),
             "INFO α &amp; β"
         );
         assert_eq!(
-            &raw[rows[1].source_start..rows[1].source_end],
+            raw.get(rows[1].source_start..rows[1].source_end)
+                .expect("valid source span"),
             "ERROR second"
         );
     }
@@ -533,7 +535,11 @@ mod tests {
         let (rows, k) = records(&raw);
         assert_eq!(k, "diagnostic_table_rows");
         assert_eq!(rows.len(), 2);
-        assert_eq!(&raw[rows[0].source_start..rows[0].source_end], first);
+        assert_eq!(
+            raw.get(rows[0].source_start..rows[0].source_end)
+                .expect("valid source span"),
+            first
+        );
         assert_eq!(rows[0].text, "2025-01-12 12:30:00 WARN part & status");
         assert_eq!(rows[1].text, "INFO offline");
     }

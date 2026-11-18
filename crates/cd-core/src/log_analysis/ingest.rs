@@ -4540,6 +4540,149 @@ fn preview_zip_members<R: Read + Seek>(
     Ok(())
 }
 
+/// Read only an exact inventory identity through the same hardened opens and
+/// archive preflight used by preview. The caller verifies captured bytes against
+/// the reviewed item's fingerprint before exposing any text.
+pub(super) fn read_import_evidence_bytes(
+    path: &Path,
+    identity: &str,
+    max_bytes: usize,
+) -> CoreResult<Vec<u8>> {
+    let limits = RawIngestLimits::default();
+    let mut budget = RawIngestBudget::default();
+    let cap = max_bytes.min(super::html_diagnostic::MAX_HTML_BYTES);
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| evidence_read_refused())?;
+    if metadata.is_file() && !metadata.file_type().is_symlink() {
+        let mut file = open_selected_regular_file(path)?;
+        if is_zip_file(path) {
+            return read_evidence_zip(&mut file, "", identity, 1, &mut budget, limits, cap);
+        }
+        if path.file_name().map(|n| n.to_string_lossy()).as_deref() != Some(identity) {
+            return Err(evidence_read_refused());
+        }
+        return read_evidence_bounded(&mut file, cap);
+    }
+    let inventory = collect_log_files(path, &mut budget, limits, None)?;
+    for selected in &inventory.files {
+        let file_identity = preview_relative_identity(selected, &inventory.canonical_root);
+        if identity != file_identity && !identity.starts_with(&format!("{file_identity}!/")) {
+            continue;
+        }
+        let mut file = open_inventory_file(&inventory, selected)?;
+        let mut head = [0; 4];
+        let n = file.read(&mut head).map_err(|_| evidence_read_refused())?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| evidence_read_refused())?;
+        if has_zip_extension(selected) || has_zip_signature(&head[..n]) {
+            return read_evidence_zip(
+                &mut file,
+                &file_identity,
+                identity,
+                1,
+                &mut budget,
+                limits,
+                cap,
+            );
+        }
+        if identity == file_identity {
+            return read_evidence_bounded(&mut file, cap);
+        }
+    }
+    Err(evidence_read_refused())
+}
+
+fn evidence_read_refused() -> CoreError {
+    CoreError::Policy("supporting document is unavailable under the import policy".into())
+}
+fn read_evidence_bounded<R: Read>(reader: &mut R, cap: usize) -> CoreResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(cap as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| evidence_read_refused())?;
+    if bytes.len() > cap {
+        return Err(evidence_read_refused());
+    }
+    Ok(bytes)
+}
+fn read_evidence_zip<R: Read + Seek>(
+    file: &mut R,
+    prefix: &str,
+    wanted: &str,
+    depth: u8,
+    budget: &mut RawIngestBudget,
+    limits: RawIngestLimits,
+    cap: usize,
+) -> CoreResult<Vec<u8>> {
+    if depth > limits.max_archive_depth {
+        return Err(evidence_read_refused());
+    }
+    // Validates all central-directory members, including traversal, aliases,
+    // encryption, nonregular files, and aggregate expansion/entry budgets.
+    let plans = preflight_raw_log_zip(file, budget, limits, None)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| evidence_read_refused())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|_| evidence_read_refused())?;
+    for plan in plans {
+        let identity = if prefix.is_empty() {
+            plan.identity.clone()
+        } else {
+            archive_member_identity(prefix, &plan.identity)
+        };
+        if wanted != identity && !wanted.starts_with(&format!("{identity}!/")) {
+            continue;
+        }
+        if !matches!(
+            plan.disposition,
+            ZipEntryDisposition::Import | ZipEntryDisposition::NestedArchive
+        ) || compression_ratio_exceeded(
+            plan.expanded_size,
+            plan.compressed_size,
+            limits.max_compression_ratio,
+        ) {
+            return Err(evidence_read_refused());
+        }
+        let entry = archive
+            .by_name(&plan.identity)
+            .map_err(|_| evidence_read_refused())?;
+        let mut reader = BufReader::with_capacity(8 * 1024, entry);
+        let head = reader.fill_buf().map_err(|_| evidence_read_refused())?;
+        let nested =
+            plan.disposition == ZipEntryDisposition::NestedArchive || has_zip_signature(head);
+        if nested {
+            if wanted == identity
+                || depth >= limits.max_archive_depth
+                || plan.expanded_size > MAX_PREVIEW_NESTED_ARCHIVE_BYTES
+            {
+                return Err(evidence_read_refused());
+            }
+            let bytes =
+                read_evidence_bounded(&mut reader, MAX_PREVIEW_NESTED_ARCHIVE_BYTES as usize)?;
+            if bytes.len() as u64 != plan.expanded_size {
+                return Err(evidence_read_refused());
+            }
+            return read_evidence_zip(
+                &mut std::io::Cursor::new(bytes),
+                &identity,
+                wanted,
+                depth + 1,
+                budget,
+                limits,
+                cap,
+            );
+        }
+        if wanted != identity || plan.expanded_size > cap as u64 {
+            return Err(evidence_read_refused());
+        }
+        let bytes = read_evidence_bounded(&mut reader, cap)?;
+        if bytes.len() as u64 != plan.expanded_size {
+            return Err(evidence_read_refused());
+        }
+        return Ok(bytes);
+    }
+    Err(evidence_read_refused())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8410,147 +8553,4 @@ RETURNING id\"
             "no record may glue two physical lines here: {messages:?}"
         );
     }
-}
-
-/// Read only an exact inventory identity through the same hardened opens and
-/// archive preflight used by preview. The caller verifies captured bytes against
-/// the reviewed item's fingerprint before exposing any text.
-pub(super) fn read_import_evidence_bytes(
-    path: &Path,
-    identity: &str,
-    max_bytes: usize,
-) -> CoreResult<Vec<u8>> {
-    let limits = RawIngestLimits::default();
-    let mut budget = RawIngestBudget::default();
-    let cap = max_bytes.min(super::html_diagnostic::MAX_HTML_BYTES);
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| evidence_read_refused())?;
-    if metadata.is_file() && !metadata.file_type().is_symlink() {
-        let mut file = open_selected_regular_file(path)?;
-        if is_zip_file(path) {
-            return read_evidence_zip(&mut file, "", identity, 1, &mut budget, limits, cap);
-        }
-        if path.file_name().map(|n| n.to_string_lossy()).as_deref() != Some(identity) {
-            return Err(evidence_read_refused());
-        }
-        return read_evidence_bounded(&mut file, cap);
-    }
-    let inventory = collect_log_files(path, &mut budget, limits, None)?;
-    for selected in &inventory.files {
-        let file_identity = preview_relative_identity(selected, &inventory.canonical_root);
-        if identity != file_identity && !identity.starts_with(&format!("{file_identity}!/")) {
-            continue;
-        }
-        let mut file = open_inventory_file(&inventory, selected)?;
-        let mut head = [0; 4];
-        let n = file.read(&mut head).map_err(|_| evidence_read_refused())?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|_| evidence_read_refused())?;
-        if has_zip_extension(selected) || has_zip_signature(&head[..n]) {
-            return read_evidence_zip(
-                &mut file,
-                &file_identity,
-                identity,
-                1,
-                &mut budget,
-                limits,
-                cap,
-            );
-        }
-        if identity == file_identity {
-            return read_evidence_bounded(&mut file, cap);
-        }
-    }
-    Err(evidence_read_refused())
-}
-
-fn evidence_read_refused() -> CoreError {
-    CoreError::Policy("supporting document is unavailable under the import policy".into())
-}
-fn read_evidence_bounded<R: Read>(reader: &mut R, cap: usize) -> CoreResult<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader
-        .take(cap as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| evidence_read_refused())?;
-    if bytes.len() > cap {
-        return Err(evidence_read_refused());
-    }
-    Ok(bytes)
-}
-fn read_evidence_zip<R: Read + Seek>(
-    file: &mut R,
-    prefix: &str,
-    wanted: &str,
-    depth: u8,
-    budget: &mut RawIngestBudget,
-    limits: RawIngestLimits,
-    cap: usize,
-) -> CoreResult<Vec<u8>> {
-    if depth > limits.max_archive_depth {
-        return Err(evidence_read_refused());
-    }
-    // Validates all central-directory members, including traversal, aliases,
-    // encryption, nonregular files, and aggregate expansion/entry budgets.
-    let plans = preflight_raw_log_zip(file, budget, limits, None)?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| evidence_read_refused())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|_| evidence_read_refused())?;
-    for plan in plans {
-        let identity = if prefix.is_empty() {
-            plan.identity.clone()
-        } else {
-            archive_member_identity(prefix, &plan.identity)
-        };
-        if wanted != identity && !wanted.starts_with(&format!("{identity}!/")) {
-            continue;
-        }
-        if !matches!(
-            plan.disposition,
-            ZipEntryDisposition::Import | ZipEntryDisposition::NestedArchive
-        ) || compression_ratio_exceeded(
-            plan.expanded_size,
-            plan.compressed_size,
-            limits.max_compression_ratio,
-        ) {
-            return Err(evidence_read_refused());
-        }
-        let entry = archive
-            .by_name(&plan.identity)
-            .map_err(|_| evidence_read_refused())?;
-        let mut reader = BufReader::with_capacity(8 * 1024, entry);
-        let head = reader.fill_buf().map_err(|_| evidence_read_refused())?;
-        let nested =
-            plan.disposition == ZipEntryDisposition::NestedArchive || has_zip_signature(head);
-        if nested {
-            if wanted == identity
-                || depth >= limits.max_archive_depth
-                || plan.expanded_size > MAX_PREVIEW_NESTED_ARCHIVE_BYTES
-            {
-                return Err(evidence_read_refused());
-            }
-            let bytes =
-                read_evidence_bounded(&mut reader, MAX_PREVIEW_NESTED_ARCHIVE_BYTES as usize)?;
-            if bytes.len() as u64 != plan.expanded_size {
-                return Err(evidence_read_refused());
-            }
-            return read_evidence_zip(
-                &mut std::io::Cursor::new(bytes),
-                &identity,
-                wanted,
-                depth + 1,
-                budget,
-                limits,
-                cap,
-            );
-        }
-        if wanted != identity || plan.expanded_size > cap as u64 {
-            return Err(evidence_read_refused());
-        }
-        let bytes = read_evidence_bounded(&mut reader, cap)?;
-        if bytes.len() as u64 != plan.expanded_size {
-            return Err(evidence_read_refused());
-        }
-        return Ok(bytes);
-    }
-    Err(evidence_read_refused())
 }
