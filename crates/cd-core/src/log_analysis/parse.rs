@@ -1935,6 +1935,27 @@ fn parse_wildfly(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
     })
 }
 
+// Level is the existing application filter band. For syslog carrying a
+// structured application record, retain the payload band but do not overwrite
+// the independently typed wire PRI evidence. Unstructured words cannot win.
+fn syslog_severity(raw: &str, message: &str) -> (String, LogSeverityEvidence) {
+    let wire = super::severity_wire::wire(raw, message);
+    let payload = inner_evidence(message, raw);
+    match (wire, payload) {
+        (Some((band, source)), Some((app, detail))) if raw.trim_start().starts_with('<') => {
+            if source.provenance == "schema_mapped" && detail.severity_number.is_some_and(|n| n > 0)
+            {
+                (app, source)
+            } else {
+                (band, source)
+            }
+        }
+        (Some(wire), _) => wire,
+        (None, Some(app)) => app,
+        _ => inferred(message),
+    }
+}
+
 fn parse_syslog(raw: &str, ingest_seq: u64) -> ParsedLine {
     let mut rest = raw.trim();
     if rest.starts_with('<') {
@@ -1974,8 +1995,7 @@ fn parse_syslog(raw: &str, ingest_seq: u64) -> ParsedLine {
         _ => (None, body),
     };
     let message = body.to_owned();
-    let (level, severity) =
-        super::severity_wire::wire(raw, &message).unwrap_or_else(|| inferred(&message));
+    let (level, severity) = syslog_severity(raw, &message);
     ParsedLine {
         ts: Some(ingest_seq as i64),
         timestamp_provenance: TimestampProvenance::OrderOnly,
@@ -2030,9 +2050,7 @@ fn parse_rfc5424_body(rest: &str, ingest_seq: u64, raw: &str) -> Option<ParsedLi
     // documented 0–10 severity. Reading it is strictly better than the
     // substring scan below, which would call this record `info` because it
     // contains neither "error" nor "warn". Malformed CEF falls back.
-    let (level, severity) = super::severity_wire::wire(raw, &message)
-        .or_else(|| inner_evidence(&message, raw))
-        .unwrap_or_else(|| inferred(&message));
+    let (level, severity) = syslog_severity(raw, &message);
     let host = if host_tok == "-" {
         None
     } else {
@@ -2514,6 +2532,42 @@ mod tests {
         ] {
             assert!(parse_line(&row, None, 0).severity.source_severity.is_none());
         }
+    }
+
+    #[test]
+    fn syslog_application_band_preserves_independent_pri_source_evidence() {
+        for raw in [
+            "<134>1 2025-06-15T16:20:00Z host app 1 ID - CEF:0|v|p|1|id|blocked|5|",
+            "<38>Jun 15 16:20:01 host app[42]: level=warn msg=hold",
+        ] {
+            let parsed = parse_line(raw, None, 0);
+            assert_eq!(parsed.level, "warn");
+            assert_eq!(parsed.severity.source_severity, Some(serde_json::json!(6)));
+            assert_eq!(parsed.severity.severity_number, Some(9));
+        }
+        let p = parse_line("<38>Jun 15 16:20:01 host app: error during job", None, 0);
+        assert_eq!(p.level, "info");
+        // A generic numeric field, even beside timestamp/message, cannot prove Pino.
+        let unspecified = parse_line(
+            r#"<14>1 2025-06-15T16:20:00Z host app - - - {"severityNumber":0}"#,
+            None,
+            0,
+        );
+        assert_eq!(unspecified.level, "info");
+        assert_eq!(
+            unspecified.severity.source_severity,
+            Some(serde_json::json!(6))
+        );
+        let old_shape = r#"{"id":"event","ts":"2025-06-15T12:40:04Z","level":50,"message":"pino numeric level"}"#;
+        let p = parse_line(old_shape, None, 0);
+        assert_eq!(p.level, "unknown");
+        assert_eq!(p.severity.provenance, "ambiguous");
+        let p = parse_line(
+            r#"{"log":"{\"level\":50,\"time\":1750003200000,\"msg\":\"inner pino record\"}"}"#,
+            None,
+            0,
+        );
+        assert_eq!(p.level, "unknown");
     }
 
     #[test]

@@ -347,7 +347,7 @@ whereas a bare JSON `"level": 2` is not enough to identify a scale. A mapped
 OpenTelemetry number is an interpretation, not a new statement by the producer.
 
 A valid syslog priority supplies severity independently of its facility. An
-explicit envelope level takes precedence over payload text. HTTP status, process
+explicit envelope level takes precedence over unstructured payload text. For syslog transporting a structured CEF or logfmt application event, the Level filter keeps the application band while source severity and the OTel mapping describe the envelope’s PRI. For example, a warning forwarded with an informational PRI still appears under WARN. HTTP status, process
 stream, and words such as “no errors detected” do not declare severity. When a
 message alone suggests an error or warning, details identify that inference;
 an event without trustworthy evidence stays unknown. Older corpora keep their
