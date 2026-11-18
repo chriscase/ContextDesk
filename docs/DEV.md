@@ -192,23 +192,22 @@ Properties worth knowing:
   including `RUST` (so `RUSTFLAGS` is already in the key). Workspace writers
   set `cache-on-failure: false` so a failed compile or DuckDB assert cannot
   publish. Shared keys stay per-OS (`ubuntu-workspace-tests`,
-  `macos-latest-workspace-tests-v2`, `windows-latest-workspace-tests-v2`) so
+  `windows-latest-workspace-tests-v2`) so
   a Linux DuckDB build cannot be restored on macOS or Windows. macOS jobs
   never wait on Windows warmup (or the reverse).
 - **Nothing about the suite is relaxed.** Shards keep `RUST_TEST_THREADS=1`.
   macOS and Windows use the same planner and aggregate the complete unit set.
-  Their `rust (macos-latest)` / `rust (windows-latest)` jobs are restore-only
-  preflight signals; a separate conditional cache writer compiles the workspace
-  only when the exact OS cache key is absent.
+  Windows restores the warmed target; macOS keeps its single cold build on the same runner.
+  Each native step must produce current receipts; a preflight is not the complete suite.
 
 ### macOS / Windows four-way lanes
 
 The warm hosted study found the Windows monolith was the wall-clock bottleneck
 (`cargo test --workspace` ≈ 35 minutes), with macOS at ≈ 24 minutes. A first
 two-way split proved complete coverage but regressed critical-path time because
-the warmup was serialized. Current `main` probes the exact per-OS cache key,
-conditionally runs one `--no-run` writer on a miss, and uses four restore-only
-shards per OS. macOS probe → warmup → preflight/shards → aggregate is
+the warmup was serialized. Windows still probes the exact cache key and distributes the four shards.
+macOS uses a single cold runner, with separate native shard, preflight and aggregate
+results and no target handoff. The macOS lane is
 independent of the Windows chain. It deliberately does not copy Ubuntu's
 eight-way leftover-heavy split. The aggregates are named
 `rust tests (macos-latest aggregate)` and
