@@ -3741,3 +3741,26 @@
     padding: 16px;
   }
 }
+
+/* Bounded source distribution: geometry variables only are measured at runtime. */
+.source-severity__row { display: flex; align-items: center; gap: .25rem; min-width: 0; }
+.source-severity__row > label { flex: 1; min-width: 0; }
+.source-severity__row label > span[title] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-severity__row label > input, .source-severity__row label > .count { flex: 0 0 auto; }
+.source-severity { flex: 0 0 auto; }
+.source-severity__trigger { display: flex; align-items: center; justify-content: center; width: 3.5rem; min-height: 1.65rem; padding: .2rem; border: 1px solid var(--border); border-radius: .25rem; background: var(--bg-elevated, var(--bg)); color: var(--fg-muted); cursor: help; }
+.source-severity__trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.source-severity__popover { position: fixed; z-index: 1200; left: var(--severity-left, 8px); top: var(--severity-top, 8px); width: min(288px, calc(100vw - 16px)); max-height: min(22rem, var(--severity-height, calc(100vh - 16px))); overflow: auto; box-sizing: border-box; padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--bg-elevated, var(--bg)); color: var(--fg); box-shadow: 0 .3rem 1rem #0003; overflow-wrap: anywhere; font-size: .75rem; }
+.source-severity__popover--above { transform: translateY(-100%); }
+.source-severity__popover p { margin: .5rem 0 0; }
+.source-severity__popover dl { margin: .5rem 0; }
+.source-severity__popover dl > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .25rem; }
+.source-severity__popover dt { display: flex; align-items: center; gap: .3rem; }
+.source-severity__popover dd { margin: 0; font-variant-numeric: tabular-nums; }
+.source-severity__swatch { display: inline-block; width: .5rem; height: .5rem; background: currentColor; }
+.source-severity__band--errorFatal { fill: var(--danger, #dc5963); color: var(--danger, #dc5963); }
+.source-severity__band--warn { fill: var(--warning, #b58115); color: var(--warning, #b58115); }
+.source-severity__band--info { fill: var(--accent, #4589bf); color: var(--accent, #4589bf); }
+.source-severity__band--debugTrace { fill: var(--fg-muted, #87909a); color: var(--fg-muted, #87909a); }
+.source-severity__band--unknown { fill: var(--fg-faint, #a1a6ad); color: var(--fg-faint, #a1a6ad); }
+.source-severity__mark { font-size: .85rem; line-height: 1; margin-right: .15rem; color: var(--fg); }

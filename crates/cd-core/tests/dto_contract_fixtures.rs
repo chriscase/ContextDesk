@@ -893,6 +893,28 @@ fn contract_fixtures() -> Vec<(&'static str, Value)> {
 
     let facets = LogFacets {
         sources: BTreeMap::from([("api.log".to_string(), 300_u64), ("worker.log".into(), 171)]),
+        source_severity_counts: BTreeMap::from([
+            (
+                "api.log".into(),
+                cd_core::log_analysis::query::SourceSeverityCounts {
+                    debug_trace: 0,
+                    info: 200,
+                    warn: 60,
+                    error_fatal: 30,
+                    unknown: 10,
+                },
+            ),
+            (
+                "worker.log".into(),
+                cd_core::log_analysis::query::SourceSeverityCounts {
+                    debug_trace: 20,
+                    info: 120,
+                    warn: 0,
+                    error_fatal: 0,
+                    unknown: 31,
+                },
+            ),
+        ]),
         levels: BTreeMap::from([("ERROR".to_string(), 471_u64), ("INFO".into(), 24_529)]),
         services: BTreeMap::from([("".to_string(), 171_u64), ("checkout".into(), 300)]),
         hosts: BTreeMap::from([("api-7".to_string(), 300_u64)]),

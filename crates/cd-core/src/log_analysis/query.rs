@@ -865,12 +865,33 @@ pub struct EventCount {
     pub total_matched: u64,
 }
 
-/// Facet counts under the same filters (except the faceted dimension itself).
+/// Mutually exclusive source severity bands under the active event filter.
+/// Unrecognized or missing levels are unknown, never informational.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSeverityCounts {
+    /// DEBUG and TRACE events.
+    pub debug_trace: u64,
+    /// INFO, NOTICE, and LOG events.
+    pub info: u64,
+    /// WARN events.
+    pub warn: u64,
+    /// ERROR, CRITICAL, ALERT, FATAL, and EMERGENCY events.
+    pub error_fatal: u64,
+    /// Missing or unrecognized levels.
+    pub unknown: u64,
+}
+
+/// Bounded facet counts under the same active filters, including their own dimension.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogFacets {
     /// Source → count.
     pub sources: BTreeMap<String, u64>,
+    /// Fixed severity buckets for exactly the same bounded source set/counts.
+    /// Absent on legacy producers; absence is not a measured zero.
+    #[serde(default)]
+    pub source_severity_counts: BTreeMap<String, SourceSeverityCounts>,
     /// Level → count.
     pub levels: BTreeMap<String, u64>,
     /// Service → count (empty key = unset).
@@ -2121,8 +2142,33 @@ pub fn query_facets(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<LogFacets>
         facets.wall_event_count = wall.max(0) as u64;
         facets.order_only_event_count = all.saturating_sub(wall).max(0) as u64;
 
+        // One fixed-width GROUP BY replaces the old source-count query. There
+        // is no per-source query or unbounded source×raw-level result fanout.
+        let source_sql = format!(
+            "SELECT source, COUNT(*) AS c, \
+             COUNT(*) FILTER (WHERE lower(trim(level)) IN ('debug', 'trace')), \
+             COUNT(*) FILTER (WHERE lower(trim(level)) IN ('info', 'notice', 'log')), \
+             COUNT(*) FILTER (WHERE lower(trim(level)) = 'warn'), \
+             COUNT(*) FILTER (WHERE lower(trim(level)) IN ('error', 'critical', 'alert', 'fatal', 'emergency')) \
+             FROM events WHERE {where_sql} GROUP BY source ORDER BY c DESC, source ASC LIMIT 200"
+        );
+        let mut source_stmt = conn.prepare(&source_sql).map_err(duck_err)?;
+        let mut rows = source_stmt.query(params_ref(&binds).as_slice()).map_err(duck_err)?;
+        while let Some(row) = rows.next().map_err(duck_err)? {
+            let source: String = row.get(0).map_err(duck_err)?;
+            let total = row.get::<_, i64>(1).map_err(duck_err)?.max(0) as u64;
+            let debug_trace = row.get::<_, i64>(2).map_err(duck_err)?.max(0) as u64;
+            let info = row.get::<_, i64>(3).map_err(duck_err)?.max(0) as u64;
+            let warn = row.get::<_, i64>(4).map_err(duck_err)?.max(0) as u64;
+            let error_fatal = row.get::<_, i64>(5).map_err(duck_err)?.max(0) as u64;
+            let unknown = total.saturating_sub(debug_trace + info + warn + error_fatal);
+            facets.sources.insert(source.clone(), total);
+            facets.source_severity_counts.insert(source, SourceSeverityCounts {
+                debug_trace, info, warn, error_fatal, unknown,
+            });
+        }
+
         for (col, map) in [
-            ("source", &mut facets.sources),
             ("level", &mut facets.levels),
             ("COALESCE(service, '')", &mut facets.services),
             ("COALESCE(host, '')", &mut facets.hosts),
@@ -5085,6 +5131,185 @@ mod tests {
     }
 
     #[test]
+    fn source_severity_counts_cover_bands_and_every_event_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "severity facets").unwrap();
+        let levels = [
+            "debug",
+            "trace",
+            "info",
+            "notice",
+            "log",
+            "warn",
+            "error",
+            "fatal",
+            "critical",
+            "alert",
+            "emergency",
+            "unknown",
+            "audit",
+            "",
+        ];
+        let records: Vec<_> = levels
+            .iter()
+            .enumerate()
+            .map(|(i, level)| LogEvent {
+                severity: Default::default(),
+                seq: i as u64,
+                ts: 1_700_000_000 + i as i64,
+                timestamp_provenance: if i % 3 == 0 {
+                    TimestampProvenance::OrderOnly
+                } else {
+                    TimestampProvenance::ExplicitWallClock
+                },
+                active_timestamp_basis: if i % 3 == 0 {
+                    ActiveTimestampBasis::OrderOnly
+                } else {
+                    ActiveTimestampBasis::ExplicitWall
+                },
+                unresolved_local_timestamp: None,
+                level: (*level).into(),
+                service: Some(format!("service{}", i % 2)),
+                host: Some(format!("host{}", i % 2)),
+                template_id: (i % 3) as u64,
+                params: vec![],
+                trace_id: Some(format!("trace{}", i % 2)),
+                message: if i % 2 == 0 {
+                    "even sample".into()
+                } else {
+                    "odd sample".into()
+                },
+                source: if i % 2 == 0 {
+                    "a.log".into()
+                } else {
+                    "b.log".into()
+                },
+            })
+            .collect();
+        corpus.push_events(&records).unwrap();
+        let baseline = query_facets(&corpus, &EventQuery::default()).unwrap();
+        let mut total = SourceSeverityCounts::default();
+        for counts in baseline.source_severity_counts.values() {
+            total.debug_trace += counts.debug_trace;
+            total.info += counts.info;
+            total.warn += counts.warn;
+            total.error_fatal += counts.error_fatal;
+            total.unknown += counts.unknown;
+        }
+        assert_eq!(
+            total,
+            SourceSeverityCounts {
+                debug_trace: 2,
+                info: 3,
+                warn: 1,
+                error_fatal: 5,
+                unknown: 3
+            }
+        );
+        let queries = [
+            EventQuery::default(),
+            EventQuery {
+                time_from: Some(1_700_000_003),
+                time_to: Some(1_700_000_010),
+                ..Default::default()
+            },
+            // Bookmark reveal uses the same sequence range shape.
+            EventQuery {
+                seq_from: Some(3),
+                seq_to: Some(7),
+                ..Default::default()
+            },
+            EventQuery {
+                sources: vec!["a.log".into()],
+                ..Default::default()
+            },
+            EventQuery {
+                levels: vec!["error".into(), "trace".into()],
+                ..Default::default()
+            },
+            EventQuery {
+                services: vec!["service1".into()],
+                ..Default::default()
+            },
+            EventQuery {
+                hosts: vec!["host0".into()],
+                ..Default::default()
+            },
+            EventQuery {
+                trace_id: Some("trace1".into()),
+                ..Default::default()
+            },
+            EventQuery {
+                template_id: Some(1),
+                ..Default::default()
+            },
+            EventQuery {
+                template_ids: vec![0, 2],
+                ..Default::default()
+            },
+            EventQuery {
+                excluded_template_ids: vec![1, 2],
+                ..Default::default()
+            },
+            EventQuery {
+                keyword: Some("even".into()),
+                ..Default::default()
+            },
+            EventQuery {
+                wall_time_only: true,
+                ..Default::default()
+            },
+            EventQuery {
+                sources: vec!["a.log".into()],
+                keyword: Some("even".into()),
+                excluded_template_ids: vec![1],
+                wall_time_only: true,
+                ..Default::default()
+            },
+            EventQuery {
+                keyword: Some("absent".into()),
+                ..Default::default()
+            },
+        ];
+        for query in queries {
+            let actual = query_facets(&corpus, &query).unwrap();
+            let page = query_event_rows(
+                &corpus,
+                &EventQuery {
+                    limit: 100,
+                    ..query
+                },
+            )
+            .unwrap();
+            let mut expected = BTreeMap::<String, SourceSeverityCounts>::new();
+            for event in page.events {
+                let counts = expected.entry(event.source).or_default();
+                match event.level.as_str() {
+                    "debug" | "trace" => counts.debug_trace += 1,
+                    "info" | "notice" | "log" => counts.info += 1,
+                    "warn" => counts.warn += 1,
+                    "error" | "fatal" | "critical" | "alert" | "emergency" => {
+                        counts.error_fatal += 1
+                    }
+                    _ => counts.unknown += 1,
+                }
+            }
+            assert_eq!(actual.source_severity_counts, expected);
+            assert_eq!(actual.sources.len(), expected.len());
+            for (source, counts) in expected {
+                assert_eq!(
+                    actual.sources[&source],
+                    counts.debug_trace
+                        + counts.info
+                        + counts.warn
+                        + counts.error_fatal
+                        + counts.unknown
+                );
+            }
+        }
+    }
+
+    #[test]
     fn facets_list_sources_and_levels() {
         let (dir, id) = multi_source_fixture();
         let cache = dir.path().join("cache");
@@ -5388,6 +5613,21 @@ mod tests {
 
         let facets = query_facets(&corpus, &EventQuery::default()).unwrap();
         assert_eq!(facets.sources.len(), 200, "facets remain a bounded summary");
+        assert_eq!(facets.source_severity_counts.len(), 200);
+        for (source, count) in &facets.sources {
+            // Every source has one INFO row; source 001 also has the
+            // fixture's ERROR row, which makes it the deterministic leader.
+            let error_fatal = u64::from(source == "services/service-001/application.log");
+            assert_eq!(*count, 1 + error_fatal);
+            assert_eq!(
+                facets.source_severity_counts[source],
+                SourceSeverityCounts {
+                    info: 1,
+                    error_fatal,
+                    ..Default::default()
+                }
+            );
+        }
         assert!(facets
             .sources
             .contains_key("services/service-001/application.log"));
