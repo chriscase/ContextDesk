@@ -70,3 +70,21 @@ every conversation.
 > Note:
 > Citations make provenance inspectable. They do not replace judgment: open
 > the source, compare the claim, and treat uncertainty as uncertainty.
+
+## Moving an ordinary chat to Trash
+
+The sidebar's Move to Trash action is recoverable and requires confirmation.
+The conversation disappears locally only after the host confirms the move. If
+that confirmation fails, one error explains that the local chat was kept; refresh
+Archive to check the saved state before retrying. Repeated clicks while the same
+move is pending do not start another confirmation or mutation.
+
+If you switch conversations while a move finishes, your newer selection stays
+selected. Otherwise, moving the active chat selects the first remaining open
+chat, or a new empty chat when none remain. Restore remains available from
+Archive's Trash tab. Archive/reopen are separate from Trash. This does not add
+Trash management to the linked Log Explorer chat rail.
+
+UI-only unsaved chats have no recoverable host record. Move to Trash leaves
+them and their drafts intact and explains that they are not saved; it does not
+promise Archive recovery or silently discard draft text.
