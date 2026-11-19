@@ -2805,6 +2805,7 @@ mod tests {
         let total = MAX_REPORT_TIMELINE_ENTRIES + 1;
         let events: Vec<LogEvent> = (1..=total as u64)
             .map(|seq| LogEvent {
+                severity: Default::default(),
                 seq,
                 ts: 1_700_000_000 + seq as i64,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,

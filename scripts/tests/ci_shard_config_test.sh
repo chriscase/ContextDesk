@@ -94,7 +94,7 @@ if not publish or "ci_shard_config.sh github-output" not in (publish.get("run") 
 
 contracts = {
     "ubuntu": ("rust-ubuntu-shard", "rust-ubuntu-tests"),
-    "macos": ("rust-macos-shard", "rust-macos-tests"),
+    # macOS is independently validated against its runner-local contract below.
     "windows": ("rust-windows-shard", "rust-windows-tests"),
 }
 
@@ -153,5 +153,7 @@ for job_name, expected in expected_names.items():
 
 print("workflow topology contracts ok")
 PY
+
+python3 "$ROOT/scripts/tests/ci_macos_local_test.py" || fail "macOS runner-local contract"
 
 echo "ci_shard_config_test: OK"

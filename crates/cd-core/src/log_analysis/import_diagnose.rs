@@ -707,7 +707,7 @@ fn elapsed_ms(wall: Instant) -> u64 {
     wall.elapsed().as_millis() as u64
 }
 
-fn status_key(s: ImportItemStatus) -> &'static str {
+pub(super) fn status_key(s: ImportItemStatus) -> &'static str {
     match s {
         ImportItemStatus::Ready => "ready",
         ImportItemStatus::Review => "review",
@@ -719,7 +719,7 @@ fn status_key(s: ImportItemStatus) -> &'static str {
     }
 }
 
-fn role_key(r: ImportItemRole) -> &'static str {
+pub(super) fn role_key(r: ImportItemRole) -> &'static str {
     match r {
         ImportItemRole::Log => "log",
         ImportItemRole::OperationalMetrics => "operational_metrics",
@@ -729,7 +729,7 @@ fn role_key(r: ImportItemRole) -> &'static str {
     }
 }
 
-fn reason_key(r: ImportPreviewReason) -> &'static str {
+pub(super) fn reason_key(r: ImportPreviewReason) -> &'static str {
     match r {
         ImportPreviewReason::ManifestDeclared => "manifest_declared",
         ImportPreviewReason::StrongFormatMatch => "strong_format_match",
@@ -759,7 +759,7 @@ fn reason_key(r: ImportPreviewReason) -> &'static str {
     }
 }
 
-fn unresolved_key(r: UnresolvedTimeReason) -> &'static str {
+pub(super) fn unresolved_key(r: UnresolvedTimeReason) -> &'static str {
     match r {
         UnresolvedTimeReason::NoTimezone => "no_timezone",
         UnresolvedTimeReason::ZoneAbbreviationNotResolved => "zone_abbreviation_not_resolved",

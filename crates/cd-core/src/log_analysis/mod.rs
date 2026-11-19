@@ -18,7 +18,9 @@ pub mod format_profile;
 pub mod frame;
 pub mod governed_citation;
 pub mod hybrid_retrieval;
+pub mod import_attempt_diagnostic;
 pub mod import_diagnose;
+pub mod import_evidence;
 pub mod import_outcome;
 pub mod import_preview;
 pub mod import_profile;
@@ -33,6 +35,10 @@ pub mod normalize_export;
 pub mod operational_metrics;
 pub mod package;
 pub mod parse;
+mod severity;
+mod severity_json;
+mod severity_wire;
+pub use severity::LogSeverityEvidence;
 pub mod query;
 pub mod reanalysis_plan;
 pub mod reanalyze;
@@ -278,3 +284,5 @@ pub use why::{
     anomalies, anomalies_with_excluded_templates, correlate, correlate_with_excluded_templates,
     trace, trace_with_excluded_templates, AnomalyHit, CorrelateHit, TraceEvent,
 };
+
+mod html_diagnostic;

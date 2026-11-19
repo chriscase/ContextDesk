@@ -358,3 +358,25 @@ describe("tauri engine adapter mapping", () => {
     expect(declaration.declaredAt).toBe(1_782_864_000);
   });
 });
+
+it("uses host-issued opaque handles for diagnostic capture/export, never renderer content or paths", async () => {
+  const invocations: [string, Record<string, unknown> | undefined][] = [];
+  const transport: TauriTransport = {
+    invoke: async <T>(command: string, args?: Record<string, unknown>) => {
+      invocations.push([command, args]);
+      if (command === "begin_import_diagnostic") return "opaque-attempt" as T;
+      if (command === "save_import_diagnostic") return { status: "cancelled" } as T;
+      return { report: defaultMockPreview(), planToken: "t", planVersion: 1 } as T;
+    },
+    listen: async () => () => {},
+  };
+  const client = createTauriEngineClient(transport);
+  const id = await client.import.beginDiagnostic!();
+  await client.import.preview("/input", id);
+  expect(await client.import.saveDiagnostic!(id)).toEqual({ status: "cancelled" });
+  expect(invocations).toEqual([
+    ["begin_import_diagnostic", undefined],
+    ["log_preview_import", { path: "/input", diagnosticId: "opaque-attempt" }],
+    ["save_import_diagnostic", { diagnosticId: "opaque-attempt" }],
+  ]);
+});

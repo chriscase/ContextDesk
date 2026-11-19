@@ -136,11 +136,16 @@ investigation-team save-status synchronization shipped through merged PR #1182.
 Activity Center first-frame scope safety shipped through #1183. S3 recovery
 shipped through #1184. Unmerged historical branches remain source material.
 Goal 10 shipped through merged [PR #1189](https://github.com/chriscase/ContextDesk/pull/1189): [structured evidence labels and shared
-review workspace](../goals/10-STRUCTURED-EVIDENCE-LABELS.md) on
-`integrate/evidence-label-workspace-v1`. It extends the shipped annotation table,
+review workspace](../goals/10-STRUCTURED-EVIDENCE-LABELS.md). It extends the shipped annotation table,
 bulk note transaction, Runtime seam and workspace with exact add/remove labels,
 privacy-aware current projection and durable history, and Keystone adoption.
 Bulk notes and Investigation First selection are already shipped foundations.
+
+Merged [PR #1194](https://github.com/chriscase/ContextDesk/pull/1194) adds
+read-only, exact and case-sensitive label browsing within one investigation
+in Investigation First and Keystone. It uses the existing label projection
+and visible inventory, preserves selection, and does not write labels or add
+cross-investigation search or indexing.
 
 Saved-view browser qualification from #1158 shipped through merged
 [PR #1191](https://github.com/chriscase/ContextDesk/pull/1191), including explicit
@@ -154,10 +159,12 @@ dispositions authorizes deleting retained branches or starting a successor.
 
 The following successors remain deferred; no new product slice is selected:
 
-1. **Investigation label search and facets.** Consume Goal 10's canonical exact,
-   case-sensitive label contract now on main. Do not create duplicate
-   label truth. Recorded status/entity/software impact/contributor/date filters
-   already shipped through #1181.
+1. **Cross-investigation label search and facets.** The within-investigation
+   browser is already on main through #1194. Any broader search or facets
+   must reuse Goal 10's canonical exact, case-sensitive label contract and
+   preserve visibility rules. Do not create duplicate label truth. Recorded
+   status/entity/software impact/contributor/date filters already shipped
+   through #1181.
 2. **Portable label round-trip.** A separately versioned portable contract and
    qualification are required. Goal 10 refuses exact operations that would lose
    label history; it does not version the archive.

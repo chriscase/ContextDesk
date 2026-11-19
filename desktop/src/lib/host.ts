@@ -3017,6 +3017,11 @@ export async function hostSaveLogDiagnosticReport(
 export type TimeQuality = "wall" | "mixed" | "order_only";
 
 export type ExplorerEventDto = {
+  severityNumber?: number | null;
+  severityText?: string | null;
+  sourceSeverity?: string | number | null;
+  severityInferred?: boolean;
+  provenance?: string;
   seq: number;
   ts: number;
   timeQuality: TimeQuality;
@@ -3348,7 +3353,12 @@ export type SharedTimelineSummaryDto = {
   lanes: SharedTimelineLaneSummaryDto[];
 };
 
+export type SourceSeverityCountsDto = {
+  debugTrace: number; info: number; warn: number; errorFatal: number; unknown: number;
+};
+
 export type LogFacetsDto = {
+  sourceSeverityCounts?: Record<string, SourceSeverityCountsDto>;
   sources: Record<string, number>;
   levels: Record<string, number>;
   services: Record<string, number>;

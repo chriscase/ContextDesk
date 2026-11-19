@@ -354,6 +354,7 @@ mod tests {
     fn synthetic_ambiguous_line(seq: u64) -> FingerprintedParsedLine {
         FingerprintedParsedLine {
             parsed: ParsedLine {
+                severity: Default::default(),
                 ts: Some(seq as i64),
                 timestamp_provenance: TimestampProvenance::OrderOnly,
                 active_timestamp_basis: ActiveTimestampBasis::OrderOnly,

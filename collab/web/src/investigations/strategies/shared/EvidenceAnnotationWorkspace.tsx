@@ -1,3 +1,4 @@
+import { EvidenceLabelBrowser } from "./EvidenceLabelBrowser.js";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { StrategyActionRow, StrategyBadge, StrategyStateNotice } from "./presentation.js";
 
@@ -8,6 +9,7 @@ const MAX_BULK_IDS = 64;
 
 interface EvidenceItem {
   readonly id: string;
+  readonly privacyClass?: "owner_only" | "share_safe";
   readonly filename: string | null;
   readonly uri: string | null;
 }
@@ -57,6 +59,7 @@ export interface EvidenceAnnotationWorkspaceProps {
   readonly scopeKey: string;
   readonly readCompletion?: {readonly requested: number; readonly succeeded: number; readonly failed: number} | undefined;
   readonly evidence: readonly EvidenceItem[];
+  readonly inventoryCurrent?: boolean;
   readonly selectedArtifactIds: readonly string[];
   readonly annotations: AnnotationView;
   readonly canAnnotate: boolean;
@@ -109,6 +112,7 @@ function resultTone(outcome: BulkResultItem["outcome"]): "success" | "warning" |
 export function EvidenceAnnotationWorkspace({
   labelModel,
   scopeKey,
+  inventoryCurrent,
   readCompletion,
   evidence,
   selectedArtifactIds,
@@ -337,6 +341,11 @@ export function EvidenceAnnotationWorkspace({
         </>
       )}
       <div className="strategy-kit__label-review" aria-label="Structured evidence labels">
+        {inventoryCurrent && labels.available ? <EvidenceLabelBrowser
+          key={JSON.stringify([scopeKey, canReadPrivate, canAnnotate, readOnly])}
+          files={evidence.filter(item => canReadPrivate || item.privacyClass === "share_safe").map(item => ({id: item.id, name: item.filename?.trim() || "Unnamed evidence"}))}
+          labels={labels.current}
+        /> : null}
         <h4>Current labels and durable history</h4>
         <p>Exact, case-sensitive labels. Add and remove affect the selected privacy class; remove preserves history.</p>
         {labels.available ? selectedEvidence.map(item => <div key={item.id}>

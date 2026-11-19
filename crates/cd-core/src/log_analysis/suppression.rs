@@ -1966,6 +1966,7 @@ mod tests {
         let corpus = LogCorpus::create(cache.path(), "suppression tests").unwrap();
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 1,
                 ts: 1_700_000_000,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2061,6 +2062,7 @@ mod tests {
         corpus
             .push_events(&[
                 LogEvent {
+                    severity: Default::default(),
                     seq: 2,
                     ts: 1_700_000_005,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2076,6 +2078,7 @@ mod tests {
                     source: "api/app.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 3,
                     ts: 1_700_000_006,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2316,6 +2319,7 @@ mod tests {
 
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 2,
                 ts: 1_700_000_001,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -2793,6 +2797,7 @@ mod tests {
         let corpus = corpus(&cache);
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 2,
                 ts: 1_700_000_001,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,

@@ -209,6 +209,11 @@ export type WireEvent = { kind: string; payload: unknown };
 
 /** `cd_core::log_analysis::ExplorerEvent` (camelCase). */
 export type WireExplorerEvent = {
+  severityNumber?: number | null;
+  severityText?: string | null;
+  sourceSeverity?: string | number | null;
+  severityInferred?: boolean;
+  provenance?: string;
   seq: number;
   ts: number;
   timestampProvenance: TimestampProvenance;
@@ -240,6 +245,7 @@ export type WireEventCount = { totalMatched: number };
 
 export type WireLogFacets = {
   sources: Record<string, number>;
+  sourceSeverityCounts?: Record<string, { debugTrace: number; info: number; warn: number; errorFatal: number; unknown: number }>;
   levels: Record<string, number>;
   services: Record<string, number>;
   hosts: Record<string, number>;
@@ -725,6 +731,11 @@ export type WireProcessProgress = {
 const timeQuality = f.en(...TIME_QUALITY);
 
 const explorerEventShape: ObjectShape = {
+  severityNumber: f.nul(f.pred("OTel severity 0–24", (value) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 24)),
+  severityText: f.nul(f.str),
+  sourceSeverity: f.nul(f.pred("source severity scalar", (value) => typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value)))),
+  severityInferred: f.req(f.bool),
+  provenance: f.req(f.str),
   seq: f.req(f.u64),
   ts: f.req(f.i64),
   timestampProvenance: f.req(f.en(...TIMESTAMP_PROVENANCE)),
@@ -740,8 +751,26 @@ const explorerEventShape: ObjectShape = {
   source: f.req(f.str),
 };
 
+const severityEvidenceKeys = [
+  "severityNumber", "severityText", "sourceSeverity", "severityInferred", "provenance",
+] as const;
+const legacyExplorerEventShape: ObjectShape = Object.fromEntries(
+  Object.entries(explorerEventShape).filter(([key]) => !severityEvidenceKeys.some((field) => field === key)),
+);
+
+/** V1 readers accept an entirely absent additive group, never a partial one. */
+function checkExplorerEvent(root: string, value: unknown): void {
+  const hasEvidence = typeof value === "object" && value !== null
+    && severityEvidenceKeys.some((key) => Object.prototype.hasOwnProperty.call(value, key));
+  checkObject(root, hasEvidence ? explorerEventShape : legacyExplorerEventShape, value);
+}
+const explorerEventField = f.pred("complete current or legacy explorer event", (value) => {
+  checkExplorerEvent("explorerEvent", value);
+  return true;
+});
+
 const eventPageShape: ObjectShape = {
-  events: f.req(f.arr(f.obj(explorerEventShape))),
+  events: f.req(f.arr(explorerEventField)),
   nextCursor: f.nul(f.u64),
   nextTs: f.opt(f.i64),
   prevCursor: f.opt(f.u64),
@@ -761,6 +790,10 @@ const eventRowsPageShape: ObjectShape = (() => {
 
 const logFacetsShape: ObjectShape = {
   sources: f.req(f.map(f.u64)),
+  sourceSeverityCounts: f.opt(f.map(f.obj({
+    debugTrace: f.req(f.u64), info: f.req(f.u64), warn: f.req(f.u64),
+    errorFatal: f.req(f.u64), unknown: f.req(f.u64),
+  }))),
   levels: f.req(f.map(f.u64)),
   services: f.req(f.map(f.u64)),
   hosts: f.req(f.map(f.u64)),
@@ -1309,10 +1342,10 @@ function listParserFor<T>(root: string, shape: ObjectShape) {
 }
 
 export const parseEventStream = listParserFor<WireEvent>("event", eventShape);
-export const parseExplorerEvent = parserFor<WireExplorerEvent>(
-  "explorerEvent",
-  explorerEventShape,
-);
+export function parseExplorerEvent(value: unknown): WireExplorerEvent {
+  checkExplorerEvent("explorerEvent", value);
+  return value as WireExplorerEvent;
+}
 export const parseEventPage = parserFor<WireEventPage>(
   "eventPage",
   eventPageShape,

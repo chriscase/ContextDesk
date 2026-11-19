@@ -23,6 +23,9 @@ const MUTATIONS: Record<string, Mutation[]> = {
     { label: "missing payload", apply: (r) => delete r[0].payload },
   ],
   "explorer_event.v1.json": [
+    { label: "structured source severity rejected", apply: (r) => { r.sourceSeverity = { level: 30 }; } },
+    { label: "severity out of range", apply: (r) => { r.severityNumber = 25; } },
+    { label: "inference is boolean", apply: (r) => { r.severityInferred = "false"; } },
     { label: "delete seq", apply: (r) => delete r.seq },
     { label: "rename seq", apply: (r) => { r.sequence = r.seq; delete r.seq; } },
     { label: "extra field", apply: (r) => { r.unexpected = true; } },

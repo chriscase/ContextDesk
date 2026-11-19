@@ -1,6 +1,8 @@
 //! Format detection + line parse (#355). LOG_ANALYSIS.md §3.
 
 use super::format_profile::{fingerprint_format, BuiltInGrammar, FormatFingerprint};
+use super::severity::{band_number, missing, text_level};
+use super::LogSeverityEvidence;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -136,6 +138,9 @@ pub struct ParsedLine {
     pub unresolved_local_timestamp: Option<String>,
     /// Normalized level: debug/info/warn/error/fatal/unknown.
     pub level: String,
+    /// Typed source severity and explicit interpretation provenance.
+    #[serde(default)]
+    pub severity: LogSeverityEvidence,
     /// Optional service / app name.
     pub service: Option<String>,
     /// Optional host.
@@ -464,30 +469,6 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
         }
         None
     };
-    let get_level = || -> Option<String> {
-        let o = obj?;
-        // PostgreSQL jsonlog documents `error_severity` (#789 / #790).
-        if let Some(s) = o
-            .get("error_severity")
-            .and_then(|x| x.as_str())
-            .map(normalize_level)
-        {
-            return Some(s);
-        }
-        for k in ["level", "severity", "lvl"] {
-            if let Some(s) = o.get(k).and_then(|x| x.as_str()) {
-                return Some(normalize_level(s));
-            }
-            // Pino and friends encode severity as a number (#790).
-            if let Some(n) = o.get(k).and_then(|x| x.as_i64()) {
-                return Some(normalize_numeric_level(n));
-            }
-            if let Some(n) = o.get(k).and_then(|x| x.as_u64()) {
-                return Some(normalize_numeric_level(n as i64));
-            }
-        }
-        None
-    };
     let timestamp = obj
         .and_then(|o| {
             o.get("ts")
@@ -511,12 +492,10 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
     // so nothing the payload says can overwrite envelope metadata. Timestamp,
     // host, service and stream above are already fixed from the outer object
     // and are not revisited.
-    let level = get_level()
-        .or_else(|| {
-            let payload = obj.and_then(|o| o.get("log")).and_then(|v| v.as_str())?;
-            inner_payload_severity(payload, raw)
-        })
-        .unwrap_or_else(|| "unknown".into());
+    let (level, severity) = obj
+        .and_then(super::severity_json::json_evidence)
+        .or_else(|| inner_evidence(obj?.get("log")?.as_str()?, raw))
+        .unwrap_or_else(|| missing("absent"));
     let message = get_str(&["message", "msg", "log", "text"]).unwrap_or_else(|| raw.to_string());
     // #789: only true trace identifiers — never span_id or request_id.
     let trace_id = get_str(&["trace_id", "traceId", "trace"]);
@@ -525,6 +504,7 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
         timestamp_provenance,
         active_timestamp_basis,
         unresolved_local_timestamp,
+        severity,
         level,
         service: get_str(&["service", "app", "component"]),
         host: get_str(&["host", "hostname", "node"]),
@@ -590,18 +570,6 @@ fn first_json_ts_field(raw: &str, keys: &[&str]) -> Option<ParsedTimestamp> {
     None
 }
 
-fn normalize_numeric_level(n: i64) -> String {
-    // Pino / bunyan-style bands (common open convention).
-    match n {
-        ..=10 => "trace".into(),
-        11..=20 => "debug".into(),
-        21..=30 => "info".into(),
-        31..=40 => "warn".into(),
-        41..=50 => "error".into(),
-        51.. => "fatal".into(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Bounded envelope payload interpretation (#791)
 // ---------------------------------------------------------------------------
@@ -626,48 +594,26 @@ const MAX_INNER_PAYLOAD_BYTES: usize = 64 * 1024;
 /// rather than failing the record. Exactly one layer is decoded; the result is
 /// a severity string and never a new record, so there is no recursion to bound
 /// beyond this call.
-fn inner_payload_severity(payload: &str, envelope: &str) -> Option<String> {
+fn inner_evidence(payload: &str, envelope: &str) -> Option<(String, LogSeverityEvidence)> {
     let payload = payload.trim();
-    if payload.is_empty() || payload.len() > MAX_INNER_PAYLOAD_BYTES {
+    if payload.is_empty() || payload.len() > MAX_INNER_PAYLOAD_BYTES || payload == envelope.trim() {
         return None;
     }
-    // Self-referential payload: an envelope whose `log` field is the envelope
-    // again must not be walked.
-    if payload == envelope.trim() {
-        return None;
+    if payload.starts_with('{') {
+        let inner: serde_json::Value = serde_json::from_str(payload).ok()?;
+        return super::severity_json::json_evidence(inner.as_object()?);
     }
-
-    if let Ok(serde_json::Value::Object(inner)) = serde_json::from_str::<serde_json::Value>(payload)
-    {
-        for key in ["level", "severity", "lvl", "error_severity"] {
-            match inner.get(key) {
-                Some(serde_json::Value::String(s)) => return Some(normalize_level(s)),
-                Some(serde_json::Value::Number(n)) => {
-                    if let Some(i) = n.as_i64() {
-                        return Some(normalize_numeric_level(i));
-                    }
-                }
-                _ => {}
-            }
-        }
-        return None;
+    if payload.starts_with("CEF:") {
+        return super::severity_wire::wire(payload, payload);
     }
-
-    if let Some(level) = cef_severity_level(payload) {
-        return Some(level);
-    }
-
-    // logfmt payload: `level=warn msg="…"`.
     if looks_like_logfmt(payload) {
-        for token in split_logfmt_tokens(payload) {
-            if let Some((key, value)) = token.split_once('=') {
-                if matches!(key, "level" | "severity" | "lvl") {
-                    return Some(normalize_level(value.trim_matches('"')));
-                }
-            }
-        }
+        return logfmt_severity(&split_logfmt_tokens(payload));
     }
     None
+}
+#[cfg(test)]
+fn inner_payload_severity(payload: &str, envelope: &str) -> Option<String> {
+    inner_evidence(payload, envelope).map(|(band, _)| band)
 }
 
 /// Map a CEF `CEF:0|…|Severity|…` header onto a normalized level.
@@ -676,49 +622,10 @@ fn inner_payload_severity(payload: &str, envelope: &str) -> Option<String> {
 /// High (7–8) and Very-High (9–10); the named forms are accepted too. Anything
 /// shorter than the seven mandatory header fields, or with a severity outside
 /// the scale, is not CEF we understand and yields `None`.
+#[cfg(test)]
 fn cef_severity_level(payload: &str) -> Option<String> {
-    let rest = payload.trim().strip_prefix("CEF:")?;
-    // Split on unescaped pipes: `\|` is a literal pipe inside a header field.
-    let mut fields: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut escaped = false;
-    for ch in rest.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '|' {
-            fields.push(std::mem::take(&mut current));
-            if fields.len() > 8 {
-                break;
-            }
-        } else {
-            current.push(ch);
-        }
-    }
-    fields.push(current);
-    // version | vendor | product | dev-version | signature | name | severity
-    if fields.len() < 7 {
-        return None;
-    }
-    let severity = fields[6].trim();
-    if let Ok(value) = severity.parse::<u8>() {
-        return match value {
-            0..=3 => Some("info".into()),
-            4..=6 => Some("warn".into()),
-            7..=8 => Some("error".into()),
-            9..=10 => Some("fatal".into()),
-            _ => None,
-        };
-    }
-    match severity.to_ascii_lowercase().as_str() {
-        "low" | "unknown" => Some("info".into()),
-        "medium" => Some("warn".into()),
-        "high" => Some("error".into()),
-        "very-high" | "very high" => Some("fatal".into()),
-        _ => None,
-    }
+    super::severity_wire::wire(payload, payload)
+        .and_then(|(band, _)| (band != "unknown").then_some(band))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1071,10 +978,32 @@ fn parse_numeric_epoch_str(s: &str) -> Option<i64> {
     decode_unix_epoch_to_secs_i64(n)
 }
 
+fn logfmt_severity(tokens: &[String]) -> Option<(String, LogSeverityEvidence)> {
+    let mut declared_token = None;
+    for token in tokens {
+        let Some((k, v)) = token.split_once('=') else {
+            continue;
+        };
+        if matches!(k, "level" | "severity" | "lvl") {
+            let v = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(v);
+            if declared_token.is_some_and(|prior| prior != v) {
+                return Some(missing("ambiguous"));
+            }
+            declared_token = Some(v);
+        }
+    }
+    declared_token.map(text_level)
+}
+
 fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
     // First-wins map: a trailing duplicate key must not silently move time (#789).
     let mut map = std::collections::HashMap::new();
-    for tok in split_logfmt_tokens(raw) {
+    let tokens = split_logfmt_tokens(raw);
+    let (level, severity) = logfmt_severity(&tokens).unwrap_or_else(|| missing("absent"));
+    for tok in tokens {
         if let Some((k, v)) = tok.split_once('=') {
             let v = v
                 .strip_prefix('"')
@@ -1085,11 +1014,6 @@ fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
             map.entry(k.to_string()).or_insert(v);
         }
     }
-    let level = map
-        .get("level")
-        .or_else(|| map.get("lvl"))
-        .map(|s| normalize_level(s))
-        .unwrap_or_else(|| "unknown".into());
     let message = map
         .get("msg")
         .or_else(|| map.get("message"))
@@ -1111,6 +1035,7 @@ fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
         timestamp_provenance,
         active_timestamp_basis,
         unresolved_local_timestamp,
+        severity,
         level,
         service: map.get("service").or_else(|| map.get("app")).cloned(),
         host: map.get("host").cloned(),
@@ -1234,6 +1159,7 @@ fn parse_zone_abbreviated_incomplete_time(raw: &str, ingest_seq: u64) -> Option<
         timestamp_provenance: TimestampProvenance::UnresolvedLocal,
         active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
         unresolved_local_timestamp: Some(parts.source_timestamp.to_string()),
+        severity: text_level(parts.level).1,
         level: normalize_level(parts.level),
         service: None,
         host: None,
@@ -1377,6 +1303,7 @@ fn parse_elasticsearch(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
         timestamp_provenance,
         active_timestamp_basis,
         unresolved_local_timestamp,
+        severity: text_level(parts.level).1,
         level: normalize_level(parts.level),
         service: Some(parts.component.to_string()),
         host: parts.node.map(str::to_string),
@@ -1809,6 +1736,7 @@ fn parse_zone_abbreviated_datetime(raw: &str, ingest_seq: u64) -> Option<ParsedL
         timestamp_provenance: TimestampProvenance::UnresolvedLocal,
         active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
         unresolved_local_timestamp: Some(parts.source_timestamp.to_string()),
+        severity: text_level(parts.level).1,
         level: normalize_level(parts.level),
         service: None,
         host: None,
@@ -1933,11 +1861,11 @@ fn strip_standalone_dash_delimiter(payload: &str) -> &str {
 
 fn parse_datetime_message(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
     let parts = parse_datetime_message_parts(raw.trim())?;
-    let level = parts
+    let (level, severity) = parts
         .level
-        .or_else(|| extract_level_token(parts.payload))
-        .map(normalize_level)
-        .unwrap_or_else(|| "unknown".into());
+        .map(text_level)
+        .or_else(|| coded_message_level(parts.payload))
+        .unwrap_or_else(|| inferred(parts.payload));
     let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
         match parts.timestamp {
             WildflyTimestamp::Wall(ts) => (
@@ -1958,6 +1886,7 @@ fn parse_datetime_message(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
         timestamp_provenance,
         active_timestamp_basis,
         unresolved_local_timestamp,
+        severity,
         level,
         service: None,
         host: None,
@@ -1995,6 +1924,7 @@ fn parse_wildfly(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
         timestamp_provenance,
         active_timestamp_basis,
         unresolved_local_timestamp,
+        severity: text_level(parts.level).1,
         level: normalize_level(parts.level),
         service: None,
         host: None,
@@ -2003,6 +1933,27 @@ fn parse_wildfly(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
         raw: raw.to_string(),
         format: LogFormat::Syslog,
     })
+}
+
+// Level is the existing application filter band. For syslog carrying a
+// structured application record, retain the payload band but do not overwrite
+// the independently typed wire PRI evidence. Unstructured words cannot win.
+fn syslog_severity(raw: &str, message: &str) -> (String, LogSeverityEvidence) {
+    let wire = super::severity_wire::wire(raw, message);
+    let payload = inner_evidence(message, raw);
+    match (wire, payload) {
+        (Some((band, source)), Some((app, detail))) if raw.trim_start().starts_with('<') => {
+            if source.provenance == "schema_mapped" && detail.severity_number.is_some_and(|n| n > 0)
+            {
+                (app, source)
+            } else {
+                (band, source)
+            }
+        }
+        (Some(wire), _) => wire,
+        (None, Some(app)) => app,
+        _ => inferred(message),
+    }
 }
 
 fn parse_syslog(raw: &str, ingest_seq: u64) -> ParsedLine {
@@ -2029,23 +1980,30 @@ fn parse_syslog(raw: &str, ingest_seq: u64) -> ParsedLine {
     }
 
     // Classic / yearless path: do not invent year or timezone; order-only via ingest_seq.
-    let parts: Vec<&str> = rest.splitn(4, char::is_whitespace).collect();
-    let (host, message) = if parts.len() >= 3 {
-        (
-            Some(parts[1].to_string()),
-            parts[parts.len() - 1].to_string(),
-        )
-    } else {
-        (None, rest.to_string())
+    let header = take_token(rest)
+        .and_then(|(_, r)| take_token(r))
+        .and_then(|(_, r)| take_token(r))
+        .and_then(|(_, r)| take_token(r));
+    let (hostname, body) = header.unwrap_or(("", rest));
+    let host = (!hostname.is_empty()).then(|| hostname.to_owned());
+    let (service, body) = match take_token(body) {
+        Some((tag, payload))
+            if tag.len() <= 64 && tag.ends_with(':') && !tag.starts_with("CEF:") =>
+        {
+            (Some(tag.trim_end_matches(':').to_owned()), payload)
+        }
+        _ => (None, body),
     };
-    let level = level_from_message_text(&message);
+    let message = body.to_owned();
+    let (level, severity) = syslog_severity(raw, &message);
     ParsedLine {
         ts: Some(ingest_seq as i64),
         timestamp_provenance: TimestampProvenance::OrderOnly,
         active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
         unresolved_local_timestamp: None,
+        severity,
         level,
-        service: None,
+        service,
         host,
         trace_id: None,
         message,
@@ -2092,8 +2050,7 @@ fn parse_rfc5424_body(rest: &str, ingest_seq: u64, raw: &str) -> Option<ParsedLi
     // documented 0–10 severity. Reading it is strictly better than the
     // substring scan below, which would call this record `info` because it
     // contains neither "error" nor "warn". Malformed CEF falls back.
-    let level =
-        inner_payload_severity(&message, raw).unwrap_or_else(|| level_from_message_text(&message));
+    let (level, severity) = syslog_severity(raw, &message);
     let host = if host_tok == "-" {
         None
     } else {
@@ -2109,6 +2066,7 @@ fn parse_rfc5424_body(rest: &str, ingest_seq: u64, raw: &str) -> Option<ParsedLi
         timestamp_provenance,
         active_timestamp_basis,
         unresolved_local_timestamp,
+        severity,
         level,
         service,
         host,
@@ -2163,15 +2121,117 @@ fn rfc5424_message(rest: &str) -> String {
     rest.to_string()
 }
 
-fn level_from_message_text(message: &str) -> String {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("error") {
-        "error".into()
-    } else if lower.contains("warn") {
-        "warn".into()
-    } else {
-        "info".into()
+// Nginx error log: YYYY/MM/DD HH:MM:SS [level] pid#tid: message.
+// Anchored punctuation and numeric process shape prevent arbitrary brackets
+// or an access-log HTTP status from becoming declared severity.
+fn nginx_level(raw: &str) -> Option<&str> {
+    let mut fields = raw.split_whitespace();
+    let date = fields.next()?.as_bytes();
+    let clock = fields.next()?.as_bytes();
+    if date.len() != 10
+        || clock.len() != 8
+        || !date.iter().enumerate().all(|(i, c)| {
+            if matches!(i, 4 | 7) {
+                *c == b'/'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+        || !clock.iter().enumerate().all(|(i, c)| {
+            if matches!(i, 2 | 5) {
+                *c == b':'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+    {
+        return None;
     }
+    let token = fields.next()?.strip_prefix('[')?.strip_suffix(']')?;
+    let (pid, tid) = fields.next()?.trim_end_matches(':').split_once('#')?;
+    if pid.is_empty()
+        || tid.is_empty()
+        || !pid.bytes().chain(tid.bytes()).all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    band_number(&normalize_level(token))?;
+    Some(token)
+}
+
+fn coded_message_level(message: &str) -> Option<(String, LogSeverityEvidence)> {
+    // Producer-neutral leading code PREFIX_LEVEL-digits: is itself structural;
+    // do not search arbitrary identifiers later in the message.
+    let token = message.split_ascii_whitespace().next()?.strip_suffix(':')?;
+    if token.len() > 40 {
+        return None;
+    }
+    let (name, seq) = token.rsplit_once('-')?;
+    let (prefix, level) = name.rsplit_once('_')?;
+    if prefix.is_empty()
+        || !prefix.bytes().all(|b| b.is_ascii_uppercase())
+        || seq.is_empty()
+        || !seq.bytes().all(|b| b.is_ascii_digit())
+        || !level.bytes().all(|b| b.is_ascii_uppercase())
+    {
+        return None;
+    }
+    band_number(&normalize_level(level))?;
+    Some(text_level(level))
+}
+fn inferred(message: &str) -> (String, LogSeverityEvidence) {
+    let band = level_from_message_text(message);
+    let Some(number) = band_number(&band) else {
+        return missing("absent");
+    };
+    (
+        band,
+        LogSeverityEvidence {
+            severity_number: Some(number),
+            severity_inferred: true,
+            provenance: "text_inferred".into(),
+            ..Default::default()
+        },
+    )
+}
+
+fn level_from_message_text(message: &str) -> String {
+    // Weak message evidence must be a whole token, not part of an identifier
+    // or a negated observation. Never infer INFO from the absence of a signal.
+    let mut negated = 0usize;
+    let mut warning = false;
+    for token in message
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| !t.is_empty())
+        .take(128)
+    {
+        if ["no", "not", "without", "zero", "0"]
+            .iter()
+            .any(|n| token.eq_ignore_ascii_case(n))
+        {
+            negated = 3;
+            continue;
+        }
+        if ["but", "however"]
+            .iter()
+            .any(|n| token.eq_ignore_ascii_case(n))
+        {
+            negated = 0;
+        }
+        if negated == 0 {
+            if ["error", "errors"]
+                .iter()
+                .any(|v| token.eq_ignore_ascii_case(v))
+            {
+                return "error".into();
+            }
+            warning |= ["warn", "warning", "warnings"]
+                .iter()
+                .any(|v| token.eq_ignore_ascii_case(v));
+        }
+        negated = negated.saturating_sub(1);
+    }
+    (if warning { "warn" } else { "unknown" }).into()
 }
 
 fn parse_plain(raw: &str, ingest_seq: u64) -> ParsedLine {
@@ -2184,16 +2244,31 @@ fn parse_plain(raw: &str, ingest_seq: u64) -> ParsedLine {
     if let Some(parsed) = parse_postgres_csvlog(raw, ingest_seq) {
         return parsed;
     }
-    let level = if let Some(l) = extract_level_token(raw) {
-        normalize_level(l)
-    } else {
-        "unknown".into()
-    };
+    let (level, severity) = super::severity_wire::wire(raw, raw)
+        .or_else(|| nginx_level(raw).map(text_level))
+        .or_else(|| {
+            let field = raw.split_whitespace().next()?;
+            let token = field
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .or_else(|| field.strip_suffix(':'))
+                .or_else(|| {
+                    field
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase())
+                        .then_some(field)
+                })?;
+
+            band_number(&normalize_level(token))?;
+            Some(text_level(token))
+        })
+        .unwrap_or_else(|| inferred(raw));
     ParsedLine {
         ts: Some(ingest_seq as i64),
         timestamp_provenance: TimestampProvenance::OrderOnly,
         active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
         unresolved_local_timestamp: None,
+        severity,
         level,
         service: None,
         host: None,
@@ -2239,6 +2314,7 @@ fn parse_postgres_stderr(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
         timestamp_provenance,
         active_timestamp_basis,
         unresolved_local_timestamp,
+        severity: text_level(sev).1,
         level: normalize_level(sev),
         service: None,
         host: None,
@@ -2280,20 +2356,46 @@ fn parse_postgres_csvlog(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
         return None;
     }
     let fields = parse_csv_fields(raw.lines().next()?)?;
-    // Documented csvlog has many columns; error_severity is typically near the
-    // middle. Accept a field that is an exact PG severity token.
-    let level = fields
-        .iter()
-        .find(|f| is_pg_severity_token(f) && f.len() <= 12)
-        .map(|s| normalize_level(s))
-        .unwrap_or_else(|| "unknown".into());
-    // Message is usually the first long free-text field after severity.
+    // Full PostgreSQL csvlog uses field 12. The existing compact diagnostic
+    // shape is timestamp, app, severity, message, optional detail fields.
+    // Bind only those positions and require a real timestamp for compact rows;
+    // a level-shaped token in an unrelated CSV cell declares nothing.
+    let valid_time = fields
+        .first()
+        .is_some_and(|t| !matches!(parse_timestamp_text(t), ParsedTimestamp::Unusable));
+    let compact = valid_time
+        && (4..12).contains(&fields.len())
+        && fields.get(1).is_some_and(|app| !app.is_empty());
+    let full = valid_time
+        && fields.len() >= 14
+        && fields.get(3).is_some_and(|pid| pid.parse::<u32>().is_ok())
+        && fields
+            .get(6)
+            .is_some_and(|line| line.parse::<u64>().is_ok())
+        && fields.get(12).is_some_and(|code| {
+            code.len() == 5
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
+        });
+    if !compact && !full {
+        return None;
+    }
+    let field = if compact {
+        fields.get(2)
+    } else {
+        fields.get(11)
+    };
+    let (level, severity) = field
+        .filter(|v| is_pg_severity_token(v))
+        .map(|v| text_level(v))
+        .unwrap_or_else(|| missing("absent"));
     let message = if raw.contains('\n') {
         raw.to_string()
     } else {
         fields
-            .iter()
-            .find(|f| f.len() > 12 && !is_pg_severity_token(f))
+            .get(if compact { 3 } else { 13 })
+            .filter(|v| !v.is_empty())
             .cloned()
             .unwrap_or_else(|| raw.to_string())
     };
@@ -2302,6 +2404,7 @@ fn parse_postgres_csvlog(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
         timestamp_provenance: TimestampProvenance::OrderOnly,
         active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
         unresolved_local_timestamp: None,
+        severity,
         level,
         service: None,
         host: None,
@@ -2344,32 +2447,6 @@ fn parse_csv_fields(line: &str) -> Option<Vec<String>> {
     Some(fields)
 }
 
-fn extract_level_token(s: &str) -> Option<&str> {
-    for tok in s.split(|c: char| !c.is_alphanumeric()) {
-        let u = tok.to_ascii_uppercase();
-        if matches!(
-            u.as_str(),
-            "DEBUG"
-                | "INFO"
-                | "WARN"
-                | "WARNING"
-                | "ERROR"
-                | "FATAL"
-                | "TRACE"
-                | "LOG"
-                | "NOTICE"
-                | "CRITICAL"
-                | "ALERT"
-                | "EMERG"
-                | "EMERGENCY"
-                | "PANIC"
-        ) {
-            return Some(tok);
-        }
-    }
-    None
-}
-
 /// Normalize free-form level strings.
 ///
 /// Distinct vocabulary is preserved when the oracle and product need it:
@@ -2409,6 +2486,142 @@ pub fn level_severity(level: &str) -> u8 {
 mod tests {
     use super::*;
     use crate::log_analysis::FormatFingerprintOutcome;
+
+    #[test]
+    fn source_severity_is_separate_from_inference_and_protocol_fields() {
+        let p = |s: &str| parse_line(s, None, 0);
+        let nginx = p("2025/02/10 14:22:10 [crit] 21#45: upstream unavailable");
+        assert_eq!(nginx.level, "critical");
+        assert_eq!(nginx.severity.severity_text.as_deref(), Some("crit"));
+        for raw in [
+            r#"{"status":500,"msg":"error","stream":"stderr"}"#,
+            "no errors detected",
+            "terror and warning_count",
+        ] {
+            let event = p(raw);
+            assert_eq!(event.level, "unknown", "{raw}");
+            assert_eq!(event.severity.provenance, "absent", "{raw}");
+        }
+        let lower = p("error during request");
+        assert!(lower.severity.severity_inferred);
+        let weak = p("connection error during request");
+        assert!(weak.severity.severity_inferred);
+        assert!(weak.severity.source_severity.is_none());
+        let emitted = p("INFO user wrote error");
+        assert_eq!(emitted.level, "info");
+        assert_eq!(
+            emitted.severity.source_severity,
+            Some(serde_json::json!("INFO"))
+        );
+    }
+
+    #[test]
+    fn full_csv_requires_postgres_structure_before_authorizing_severity() {
+        let generic =
+            r#""customer","name","x","x","x","x","x","x","x","x","x","ERROR","x","status note""#;
+        let p = parse_line(generic, None, 0);
+        assert!(p.severity.source_severity.is_none());
+        let full = r#""2025-06-15 12:10:00.100 UTC","user","db","42","localhost","6868.1","2","SELECT","2025-06-15 12:00:00 UTC","3/7","0","ERROR","22000","status note""#;
+        let p = parse_line(full, None, 0);
+        assert_eq!(p.level, "error");
+        assert_eq!(p.message, "status note");
+        assert_eq!(p.severity.severity_text.as_deref(), Some("ERROR"));
+        for row in [
+            full.replace("22000", "bad"),
+            full.replace("\"42\"", "\"pid\""),
+        ] {
+            assert!(parse_line(&row, None, 0).severity.source_severity.is_none());
+        }
+    }
+
+    #[test]
+    fn syslog_application_band_preserves_independent_pri_source_evidence() {
+        for raw in [
+            "<134>1 2025-06-15T16:20:00Z host app 1 ID - CEF:0|v|p|1|id|blocked|5|",
+            "<38>Jun 15 16:20:01 host app[42]: level=warn msg=hold",
+        ] {
+            let parsed = parse_line(raw, None, 0);
+            assert_eq!(parsed.level, "warn");
+            assert_eq!(parsed.severity.source_severity, Some(serde_json::json!(6)));
+            assert_eq!(parsed.severity.severity_number, Some(9));
+        }
+        let p = parse_line("<38>Jun 15 16:20:01 host app: error during job", None, 0);
+        assert_eq!(p.level, "info");
+        // A generic numeric field, even beside timestamp/message, cannot prove Pino.
+        let unspecified = parse_line(
+            r#"<14>1 2025-06-15T16:20:00Z host app - - - {"severityNumber":0}"#,
+            None,
+            0,
+        );
+        assert_eq!(unspecified.level, "info");
+        assert_eq!(
+            unspecified.severity.source_severity,
+            Some(serde_json::json!(6))
+        );
+        let old_shape = r#"{"id":"event","ts":"2025-06-15T12:40:04Z","level":50,"message":"pino numeric level"}"#;
+        let p = parse_line(old_shape, None, 0);
+        assert_eq!(p.level, "unknown");
+        assert_eq!(p.severity.provenance, "ambiguous");
+        let p = parse_line(
+            r#"{"log":"{\"level\":50,\"time\":1750003200000,\"msg\":\"inner pino record\"}"}"#,
+            None,
+            0,
+        );
+        assert_eq!(p.level, "unknown");
+    }
+
+    #[test]
+    fn classic_envelope_without_pri_reads_only_structural_cef_header() {
+        for day in ["2", " 2"] {
+            let p = parse_line(
+                &format!("Jan {day} 12:30:00 host app: CEF:0|v|p|1|id|name|High|"),
+                None,
+                0,
+            );
+            assert_eq!(p.host.as_deref(), Some("host"));
+            assert_eq!(p.level, "error");
+            assert_eq!(p.severity.severity_text.as_deref(), Some("High"));
+        }
+    }
+    #[test]
+    fn logfmt_aliases_and_conflicts_are_equal_in_inner_and_outer_records() {
+        for (raw, band, provenance) in [
+            ("severity=ERROR msg=failed", "error", "source_declared"),
+            ("level=INFO lvl=ERROR msg=failed", "unknown", "ambiguous"),
+            ("level=INFO level=ERROR msg=failed", "unknown", "ambiguous"),
+        ] {
+            let parsed = parse_line(raw, Some(LogFormat::Logfmt), 0);
+            let inner = inner_evidence(raw, "outer").expect("detected");
+            assert_eq!(
+                (parsed.level.as_str(), parsed.severity.provenance.as_str()),
+                (band, provenance)
+            );
+            assert_eq!((parsed.level, parsed.severity), inner);
+        }
+    }
+
+    #[test]
+    fn inferred_message_levels_require_bounded_unnegated_tokens() {
+        for text in [
+            "no errors detected",
+            "without any warnings",
+            "terror",
+            "error_count",
+            "not an error",
+            "all good",
+        ] {
+            assert_eq!(level_from_message_text(text), "unknown", "{text}");
+        }
+        assert_eq!(level_from_message_text("no errors but WARNING now"), "warn");
+        assert_eq!(
+            level_from_message_text("warning followed by ERROR"),
+            "error"
+        );
+        assert_eq!(
+            level_from_message_text(&format!("{}error", "ok ".repeat(128))),
+            "unknown"
+        );
+    }
 
     #[test]
     fn detect_and_parse_json() {
@@ -3773,7 +3986,7 @@ mod tests {
     fn envelope_timestamp_survives_inner_payload_interpretation() {
         // The inner record carries its own, different time. Container time is
         // authoritative and must not move.
-        let line = r#"{"log":"{\"level\":50,\"time\":1000000000,\"msg\":\"inner\"}","stream":"stdout","time":"2025-06-15T16:00:00Z"}"#;
+        let line = r#"{"log":"{\"level\":50,\"time\":1000000000,\"pid\":1,\"hostname\":\"fixture\",\"msg\":\"inner\"}","stream":"stdout","time":"2025-06-15T16:00:00Z"}"#;
         let parsed = parse_line(line, None, 0);
         assert_eq!(parsed.level, "error", "inner severity should fill the gap");
         assert_eq!(
@@ -3805,7 +4018,7 @@ mod tests {
             Some("fatal".to_string())
         );
         // Repeated identical payloads are still each read once, cheaply.
-        let payload = r#"{"level":40,"msg":"repeat"}"#;
+        let payload = r#"{"level":40,"msg":"repeat","pid":12,"hostname":"fixture","time":1}"#;
         for _ in 0..1000 {
             assert_eq!(
                 inner_payload_severity(payload, "outer"),
@@ -3830,7 +4043,7 @@ mod tests {
     #[test]
     fn cef_severity_bands_and_malformed_headers() {
         let cef = |sev: &str| format!("CEF:0|Example|Gateway|1.0|100|blocked|{sev}|src=192.0.2.9");
-        assert_eq!(cef_severity_level(&cef("0")).as_deref(), Some("info"));
+        assert_eq!(cef_severity_level(&cef("0")), None);
         assert_eq!(cef_severity_level(&cef("3")).as_deref(), Some("info"));
         assert_eq!(cef_severity_level(&cef("4")).as_deref(), Some("warn"));
         assert_eq!(cef_severity_level(&cef("5")).as_deref(), Some("warn"));

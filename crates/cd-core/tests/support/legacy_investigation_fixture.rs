@@ -141,6 +141,7 @@ pub fn legacy_fixture_corpus(cache_root: &Path) -> CoreResult<LogCorpus> {
     let corpus = LogCorpus::create(cache_root, format!("{FIXTURE_LABEL} legacy investigation"))?;
     corpus.push_events(&[
         LogEvent {
+            severity: Default::default(),
             seq: API_SEQ,
             ts: API_TS,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -156,6 +157,7 @@ pub fn legacy_fixture_corpus(cache_root: &Path) -> CoreResult<LogCorpus> {
             source: API_SOURCE.into(),
         },
         LogEvent {
+            severity: Default::default(),
             seq: WORKER_SEQ,
             ts: WORKER_TS,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,

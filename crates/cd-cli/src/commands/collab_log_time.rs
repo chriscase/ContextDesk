@@ -1076,6 +1076,7 @@ fn chronology_order_only_reason(
     let resolver = SourceTimezoneResolver::new(declaration.clone())
         .map_err(|error| CliError::internal(error.to_string()))?;
     let parsed = ParsedLine {
+        severity: Default::default(),
         ts: Some(event.ts),
         timestamp_provenance: event.timestamp_provenance,
         active_timestamp_basis: event.active_timestamp_basis,

@@ -108,6 +108,7 @@ fn template(template_id: u64, pattern: &str, content_hash: &str) -> TemplateRow 
 
 fn fixture_event(template_id: u64) -> LogEvent {
     LogEvent {
+        severity: Default::default(),
         seq: 1,
         ts: FIXED_TS,
         timestamp_provenance: TimestampProvenance::ExplicitWallClock,

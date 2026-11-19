@@ -846,6 +846,7 @@ fn seed_synthetic_events(corpus: &LogCorpus) -> cd_core::error::CoreResult<()> {
     let base_ts: i64 = 1_800_000_000;
     let events = vec![
         LogEvent {
+            severity: Default::default(),
             seq: 1,
             ts: base_ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -863,6 +864,7 @@ fn seed_synthetic_events(corpus: &LogCorpus) -> cd_core::error::CoreResult<()> {
             source: "synthetic/doctor-readiness-check.log".into(),
         },
         LogEvent {
+            severity: Default::default(),
             seq: 2,
             ts: base_ts + 1,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,

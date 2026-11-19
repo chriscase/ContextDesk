@@ -270,6 +270,31 @@ See [Share a log analysis package](help://log-portable-package) for versioned ex
 
 ## Privacy-safe import diagnostic {#import-diagnose}
 
+In the reviewed import flow, use **Export import diagnostic…** after preview,
+a completed import, a failure, or an acknowledged cancellation. It exports that
+actual attempt, without rereading the input or re-running the importer. The
+host keeps up to 16 snapshots in memory; old snapshots expire and all disappear
+when the app closes. A new attempt has a new handle, so a failed attempt never
+silently exports the previous success.
+
+Choose a **new JSON file** in the native Save panel. Existing files are never
+replaced, even if the Save panel offers replacement. Cancel closes the panel
+without writing. The desktop schema `contextdesk.desktop_import_attempt.v1`
+contains aggregate counts, typed outcome/status, bounded format and time-quality
+histograms, and measured ingest timings when available. It excludes paths,
+filenames, archive identities, raw timestamps, log text, credentials, provider
+information, hashes, and diagnostic handles. Custom format names become `other`.
+A missing preview or measured ingest section means that phase was unavailable,
+not that it succeeded with zero records. Preview reports describe the inspected
+inventory; run reports count only host-verified selected sources.
+
+This is separate from the broader case diagnostic/report builder and the
+memory-only failed-ingest banner, whose operator-facing details are not copied
+into this public-safe export. This action covers the reviewed import flow in
+Logs and guided setup, not legacy quick import, package import, or demo install.
+
+### Offline replay alternative
+
 When an import fails or looks wrong, you can generate a **public-safe diagnostic
 report** offline without sharing your logs:
 
@@ -289,3 +314,81 @@ log input or an earlier report.
 
 Use the JSON as an attachment on a bug report so maintainers can see import
 shape and failure class without receiving your production logs.
+
+
+## Passive HTML diagnostic evidence (#750)
+
+Complete bounded HTML with conservative preformatted log lines or diagnostic
+table rows is a Review item, never automatically trusted from its extension.
+Ambiguous reports remain supporting attachments rather than invented events.
+Review selection → Inspect requests host-authorized, plan-bound, redacted visible
+text. The renderer displays plaintext and explicit truncation status; it never
+executes markup or fetches scripts/assets. Changed plans require a new preview.
+
+Bounds: 256 KiB input, 48 nested tags, 8,192 tokens, 1,024 records, 8 KiB per
+record and 8 KiB visible text. Existing archive expansion limits also apply.
+Malformed, oversized, script-generated or layout-dependent reports are not
+promoted to events. Original input remains unchanged; raw hashes and redacted
+original record spans preserve provenance. Shared timestamp parsing never
+invents a timezone for offsetless records. A misleading HTML filename does not
+force HTML parsing. Sample fragments cannot establish whole-document eligibility.
+
+Reports with operative stylesheets cannot establish visible content statically. They remain supporting evidence; the reader reports visibility as unverified rather than presenting an empty report as complete. No stylesheet is fetched or executed.
+
+For HTML-derived events, **Original** may show a withholding notice instead of markup. Records containing character references, attributes, comments, or redacted content are not stored as raw text: decoding or dropping markup could otherwise undo redaction. The source byte count and digest still refer to the original input, which the importer does not modify.
+
+## Reading severity in an event
+
+The Explorer's **Level** is the band used for filtering and template ranking.
+Open the event details to distinguish that band from what the producer actually
+recorded. The source may say `DEBUG5`, for example, while the filter shows
+`debug`. Numeric source values stay numeric: Windows Event Level 2 is an error,
+whereas a bare JSON `"level": 2` is not enough to identify a scale. A mapped
+OpenTelemetry number is an interpretation, not a new statement by the producer.
+
+A valid syslog priority supplies severity independently of its facility. An
+explicit envelope level takes precedence over unstructured payload text. For syslog transporting a structured CEF or logfmt application event, the Level filter keeps the application band while source severity and the OTel mapping describe the envelope’s PRI. For example, a warning forwarded with an informational PRI still appears under WARN. HTTP status, process
+stream, and words such as “no errors detected” do not declare severity. When a
+message alone suggests an error or warning, details identify that inference;
+an event without trustworthy evidence stays unknown. Older corpora keep their
+existing filter levels and do not acquire invented source values on reopen.
+
+## Per-source severity distribution
+
+Each top-source row in Explorer's Sources rail has a compact severity glyph.
+Hover it or focus its separate button to see exact counts and one-decimal
+percentages for Error/fatal, Warn, Info, Debug/trace and Unknown/other. The
+source checkbox remains a separate control. Escape, pointer departure, focus
+departure, an outside click, scrolling or resizing dismisses the popover.
+Labels and numbers accompany color in every theme; long source paths wrap and
+the popover is bounded to the viewport.
+
+These counters use the current **facet** query, including its time, source,
+level and noise predicates. Find keywords and individual lane-only restrictions
+are not included; do not read them as either the displayed page size or a
+corpus-wide total. The five counts sum to that source's facet count. Unknown
+is retained, not silently recategorized as Info. A zero total has no defined
+percentage. Missing adapter data, a mismatched total, a failed refresh, or a
+temporary evidence reveal does not imply zero: the breakdown is unavailable
+and prior-query distributions are not shown.
+
+Only the bounded top-source facet response supplies distributions. Opening
+All sources or scrolling a large catalog does not launch per-source queries;
+catalog-only entries do not pretend to have a severity summary. Component and
+web tests are not packaged native narrow/normal/wide acceptance evidence.
+
+## Find completion and cancellation
+
+Find distinguishes a cancellable backend search from locating a returned match
+in its bounded neighborhood. Cancel disappears when the backend request retires;
+“locating match” describes the remaining non-cancellable context lookup. Changing
+the term or mode clears Find-owned work immediately, and obsolete search or
+neighborhood responses cannot move the current view.
+
+Pressing Cancel also withdraws permission for that request to navigate, before
+the host replies. If search completion races the cancellation acknowledgement,
+the late result is ignored and previous visible results remain. This does not
+claim that the backend was stopped: a cancellation that arrives before host
+registration remains retryable. A fresh Find starts an independent request and
+can navigate normally. Cursor-paged Find uses the same lifecycle and preserves
+its bounded result pages and Filter intersection.

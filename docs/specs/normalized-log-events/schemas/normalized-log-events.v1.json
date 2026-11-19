@@ -465,7 +465,19 @@
           "propertyNames": {
             "minLength": 1,
             "maxLength": 128
-          }
+          },
+          "description": "Generic additive attributes remain unrestricted for v1 compatibility. ContextDesk normalize emits contextdesk.severity_evidence from validated typed stored evidence (severityNumber, severityText, sourceSeverity, severityInferred, provenance), never from reparsed canonical originals. See NORMALIZED_LOG_EVENTS_V1.md for projection semantics.",
+          "examples": [
+            {
+              "contextdesk.severity_evidence": {
+                "severityNumber": 17,
+                "severityText": "ERROR",
+                "sourceSeverity": "ERROR",
+                "severityInferred": false,
+                "provenance": "schema_mapped"
+              }
+            }
+          ]
         },
         "logger": {
           "type": "string",

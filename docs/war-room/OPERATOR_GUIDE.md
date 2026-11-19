@@ -51,7 +51,27 @@ investigation and stage, and more specific links can preserve a comparison,
 focused lane, section, or evidence target. A recipient must still sign in and
 have permission to read that investigation.
 
+In the War Room inventory and server-backed Operations queue, combine clues
+from the same investigation: `alice checkout "storefront operators"` matches
+a participant named Alice, “checkout” in the title, and “storefront operators”
+in the affected parties. Each unquoted term must occur somewhere on that
+record; matches ignore case and can be parts of words. Double quotes keep a
+phrase together within one field, even while you are typing the closing quote.
+This searches investigation details and linked entity names, not evidence
+contents or evidence labels. Your access, archive visibility, and other
+filters still apply.
+
 ![Synthetic investigation list with War Room entries](../assets/war-room/war-room-investigations.png)
+
+### Find evidence by its current label
+
+In the evidence review workspace in Investigation First or Keystone, use
+**Browse evidence by label** to choose an exact label and see the matching
+filenames. The count is the number of distinct loaded files in this
+investigation with that visible label, not how often someone applied it.
+Capitalization matters. Labels removed from the current state and labels you
+cannot see do not contribute. The browser waits for current annotation
+history; choosing a label does not change your working set or write anything.
 
 ## Identity and attribution
 

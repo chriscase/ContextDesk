@@ -1474,6 +1474,7 @@ mod tests {
         corpus
             .push_events(&[
                 LogEvent {
+                    severity: Default::default(),
                     seq: 0,
                     ts: 1_700_000_000,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1489,6 +1490,7 @@ mod tests {
                     source: "api/app.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 1,
                     ts: 1_700_000_010,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1504,6 +1506,7 @@ mod tests {
                     source: "api/app.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 2,
                     ts: 1_700_000_020,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1519,6 +1522,7 @@ mod tests {
                     source: "worker/worker.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 3,
                     ts: 1_700_000_030,
                     timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1880,6 +1884,7 @@ mod tests {
         let corpus = LogCorpus::create(cache.path(), "unresolved local revision").unwrap();
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 0,
                 ts: 0,
                 timestamp_provenance: TimestampProvenance::UnresolvedLocal,
@@ -1907,6 +1912,7 @@ mod tests {
         let corpus = LogCorpus::create(cache.path(), "order-only revision").unwrap();
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 0,
                 ts: 0,
                 timestamp_provenance: TimestampProvenance::OrderOnly,

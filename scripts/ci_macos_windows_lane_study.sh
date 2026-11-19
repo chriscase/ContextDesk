@@ -159,7 +159,7 @@ Why not 8 Windows/macOS shards:
   shard when that was missed. Leftover-heavy cd-core/lib slices timeout
   when isolated (#898 / #893).
 
-Staged workflow shape (draft follow-up; no merge or ruleset change here):
+Historical distributed workflow shape measured by this study (the current macOS lane instead uses one cold runner, see the linked lane guide):
   1. An exact-key lookup-only probe runs per OS. A cache miss conditionally
      starts one writer with cargo test --workspace --no-run; a hit skips it.
   2. rust (macos-latest) / rust (windows-latest) restore the real cache and run

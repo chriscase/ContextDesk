@@ -36,7 +36,9 @@ async function driveToRunning(client: ReturnType<typeof createMockEngineClient>)
   });
   fireEvent.click(screen.getByRole("checkbox", { name: /I understand and want to proceed/ }));
   fireEvent.click(screen.getByRole("button", { name: "Import" }));
-  await screen.findByRole("button", { name: "Cancel ingest" });
+  // Publication can start before the next render and is not cancellable.
+  // Wait for the live progress surface, not a transient Cancel button.
+  await screen.findByRole("progressbar", { name: "Process progress" });
   return { onCancel, onComplete };
 }
 

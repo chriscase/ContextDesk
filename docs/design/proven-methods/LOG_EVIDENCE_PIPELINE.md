@@ -886,3 +886,91 @@ to “helpfully” interpret an offsetless production timestamp.
   security and retention design.
 - Large 10–100M-line behavior needs periodic scale proof beyond the deterministic
   100k acceptance fixture.
+
+
+## Actual-attempt import diagnostics (#853)
+
+The desktop reviewed-import surface captures aggregate-only diagnostics at the
+trusted host boundary, rather than serializing a renderer manifest or replaying
+inputs. Preview/run handles are one-shot and bounded to 16 memory-only records.
+Private plan tokens bind preview counts to verified selections but never leave
+in the export. Unknown custom keys collapse into `other`; source locators,
+raw times, provider configuration, and payloads are not fields of the schema.
+Native Save selects a new destination and atomic no-clobber publication refuses
+existing paths. Failures and cancellation retain their own terminal snapshots.
+The offline diagnostic remains a different operation with temporary-corpus
+semantics. Renderer tests are not evidence of packaged-shell/native Save
+acceptance; that proof must be recorded separately before claiming #853 closed.
+
+
+## Passive HTML diagnostic evidence (#750)
+
+Complete bounded HTML with conservative preformatted log lines or diagnostic
+table rows is a Review item, never automatically trusted from its extension.
+Ambiguous reports remain supporting attachments rather than invented events.
+Review selection → Inspect requests host-authorized, plan-bound, redacted visible
+text. The renderer displays plaintext and explicit truncation status; it never
+executes markup or fetches scripts/assets. Changed plans require a new preview.
+
+Bounds: 256 KiB input, 48 nested tags, 8,192 tokens, 1,024 records, 8 KiB per
+record and 8 KiB visible text. Existing archive expansion limits also apply.
+Malformed, oversized, script-generated or layout-dependent reports are not
+promoted to events. Original input remains unchanged; raw hashes and redacted
+original record spans preserve provenance. Shared timestamp parsing never
+invents a timezone for offsetless records. A misleading HTML filename does not
+force HTML parsing. Sample fragments cannot establish whole-document eligibility.
+
+Reports with operative stylesheets cannot establish visible content statically. They remain supporting evidence; the reader reports visibility as unverified rather than presenting an empty report as complete. No stylesheet is fetched or executed.
+
+For HTML-derived events, **Original** may show a withholding notice instead of markup. Records containing character references, attributes, comments, or redacted content are not stored as raw text: decoding or dropping markup could otherwise undo redaction. The source byte count and digest still refer to the original input, which the importer does not modify.
+
+### Preserve severity evidence independently of the query band
+
+An event keeps its existing filter/ranking level, plus bounded source severity
+and its interpretation. Preserve the distinction between an integer on a known
+producer scale, explicit source text, a weak message inference, and no
+declaration. In particular, syslog priority and Windows Event Level run in the
+opposite direction to Pino; arbitrary numeric JSON does not identify a scale.
+Previously stored events retain their known band with legacy provenance and no
+manufactured source values. Verify reopen, package round-trip and normalized
+export against the persisted evidence, not against reparsed original messages.
+
+## Per-source severity distribution
+
+Each top-source row in Explorer's Sources rail has a compact severity glyph.
+Hover it or focus its separate button to see exact counts and one-decimal
+percentages for Error/fatal, Warn, Info, Debug/trace and Unknown/other. The
+source checkbox remains a separate control. Escape, pointer departure, focus
+departure, an outside click, scrolling or resizing dismisses the popover.
+Labels and numbers accompany color in every theme; long source paths wrap and
+the popover is bounded to the viewport.
+
+These counters use the current **facet** query, including its time, source,
+level and noise predicates. Find keywords and individual lane-only restrictions
+are not included; do not read them as either the displayed page size or a
+corpus-wide total. The five counts sum to that source's facet count. Unknown
+is retained, not silently recategorized as Info. A zero total has no defined
+percentage. Missing adapter data, a mismatched total, a failed refresh, or a
+temporary evidence reveal does not imply zero: the breakdown is unavailable
+and prior-query distributions are not shown.
+
+Only the bounded top-source facet response supplies distributions. Opening
+All sources or scrolling a large catalog does not launch per-source queries;
+catalog-only entries do not pretend to have a severity summary. Component and
+web tests are not packaged native narrow/normal/wide acceptance evidence.
+
+## Find completion and cancellation
+
+Find distinguishes a cancellable backend search from locating a returned match
+in its bounded neighborhood. Cancel disappears when the backend request retires;
+“locating match” describes the remaining non-cancellable context lookup. Changing
+the term or mode clears Find-owned work immediately, and obsolete search or
+neighborhood responses cannot move the current view.
+
+Pressing Cancel also withdraws permission for that request to navigate, before
+the host replies. If search completion races the cancellation acknowledgement,
+the late result is ignored and previous visible results remain. This does not
+claim that the backend was stopped: a cancellation that arrives before host
+registration remains retryable. A fresh Find starts an independent request and
+can navigate normally. Cursor-paged Find uses the same lifecycle and preserves
+its bounded result pages and Filter intersection.

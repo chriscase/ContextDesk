@@ -224,6 +224,8 @@ export function hostImportFailure(error: unknown): {
 
 /** Request for a reviewed, plan-bound import run. */
 export type ImportRunRequest = {
+  /** Optional opaque host diagnostic reservation. Never report content. */
+  diagnosticId?: string;
   /** Renderer correlation echoed by the host on every progress update. */
   correlationId?: string;
   /** Root path exactly as previewed. */
@@ -306,8 +308,14 @@ export type Unsubscribe = () => void;
 
 /** Import planning and execution. */
 export interface ImportService {
+  /** Passive bounded document inspection, authorized against the reviewed plan. */
+  inspectEvidence?(request: { path: string; planToken: string; planVersion: number; identity: string }): Promise<{ text: string; truncated: boolean; reason: string }>;
   /** Bounded read-only preview bound into a runnable plan. */
-  preview(path: string): Promise<WireImportPreviewPlan>;
+  preview(path: string, diagnosticId?: string): Promise<WireImportPreviewPlan>;
+  /** Optional desktop-only, bounded memory snapshot capability. */
+  beginDiagnostic?(): Promise<string>;
+  /** Native Save panel; the host owns content and destination. */
+  saveDiagnostic?(diagnosticId: string): Promise<{ status: "saved" | "cancelled" }>;
   /**
    * Run a reviewed import. The engine re-enumerates and fails closed
    * (`invalid`) on a stale plan, drifted content, non-event selections, or

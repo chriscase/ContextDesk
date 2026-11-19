@@ -926,3 +926,23 @@ unmerged recovery goal does not reopen it.
 - Append-only privacy purge and retention need explicit treatment.
 - Multi-device synchronization/conflict policy is not part of the current local
   investigation store.
+
+## Ordinary chat trash settlement
+
+The ordinary sidebar removes a conversation only after the host acknowledges
+that exact session as trashed. Failed or unconfirmed mutations retain the local
+conversation and show one error; Archive refresh is needed to reconcile an
+uncertain host outcome. Repeated requests for the same session coalesce while
+confirmation or mutation is pending. Successful retirement chooses the first
+open sibling (or a new empty chat) only if the retired session is still selected;
+a newer selection is preserved across the asynchronous operation.
+
+Synthetic hook tests cover failure, missing acknowledgement, cancellation,
+repeated requests, late settlement, sibling selection, and the last-chat fallback.
+Archive/reopen remain separate existing flows. This does not implement the
+linked Log Explorer rail's outstanding recoverable-trash lifecycle (#680), nor
+claim packaged native acceptance.
+
+UI-only unsaved chats have no recoverable host record. Move to Trash leaves
+them and their drafts intact and explains that they are not saved; it does not
+promise Archive recovery or silently discard draft text.

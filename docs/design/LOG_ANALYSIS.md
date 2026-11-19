@@ -355,9 +355,19 @@ Enforcement is automated (`import_diagnose` denylist tests), not review-only.
 
 ### Transport-neutral API
 
-Hosts that want a future “Export import diagnostic” button should call
-`cd_core::log_analysis::diagnose_log_import` and
-`write_import_diagnostic_report` — no renderer UI is required by this module.
+Offline hosts call `cd_core::log_analysis::diagnose_log_import` and
+`write_import_diagnostic_report`. The desktop reviewed import flow instead uses
+`import_attempt_diagnostic::ImportAttemptDiagnostic` to capture the **actual**
+preview, verified selection, ingest result, or terminal failure. It never runs
+an offline replay while claiming to describe the user’s completed attempt.
+
+The desktop host retains 16 process-local one-shot handles. The renderer may
+request a reservation and ask the native host to export one handle; it cannot
+supply report content, output path, overwrite permission, or preview aggregates.
+Only a matching host-held plan token can carry preview aggregates into a run.
+Every export serializes an allowlisted projection and atomically publishes via
+`persist_noclobber`; expired, pending, and unknown handles fail closed, with no
+fallback to the latest report. No capability/CSP/plugin changes are needed.
 The writer refuses an existing output path; choose a new path or remove a
 previously reviewed report before rerunning it.
 
@@ -372,3 +382,38 @@ user regex and no way to express a guessed instant.
 
 See [`REVIEWED_FORMAT_PROFILES.md`](REVIEWED_FORMAT_PROFILES.md). The trusted
 core is implemented; **no UI is wired and ingest does not consult it yet.**
+
+
+## Passive HTML diagnostic evidence (#750)
+
+Complete bounded HTML with conservative preformatted log lines or diagnostic
+table rows is a Review item, never automatically trusted from its extension.
+Ambiguous reports remain supporting attachments rather than invented events.
+Review selection → Inspect requests host-authorized, plan-bound, redacted visible
+text. The renderer displays plaintext and explicit truncation status; it never
+executes markup or fetches scripts/assets. Changed plans require a new preview.
+
+Bounds: 256 KiB input, 48 nested tags, 8,192 tokens, 1,024 records, 8 KiB per
+record and 8 KiB visible text. Existing archive expansion limits also apply.
+Malformed, oversized, script-generated or layout-dependent reports are not
+promoted to events. Original input remains unchanged; raw hashes and redacted
+original record spans preserve provenance. Shared timestamp parsing never
+invents a timezone for offsetless records. A misleading HTML filename does not
+force HTML parsing. Sample fragments cannot establish whole-document eligibility.
+
+Reports with operative stylesheets cannot establish visible content statically. They remain supporting evidence; the reader reports visibility as unverified rather than presenting an empty report as complete. No stylesheet is fetched or executed.
+
+### Event severity evidence (#790)
+
+Keep the established level column/index for filtering and ranking. Persist a
+separate bounded evidence object on each new event, including typed source
+scalar, source text if any, optional OpenTelemetry severity number, and explicit
+provenance. NULL evidence in an older corpus denotes legacy normalization;
+never reconstruct a source claim by parsing stored or redacted originals.
+The shared [OTel severity bands](https://opentelemetry.io/docs/specs/otel/logs/data-model/#severity-fields)
+are for comparison, not a replacement for producer vocabulary. Numeric producer
+scales require structural evidence. Opposite scale directions (syslog/Windows
+versus CEF/Pino), inner/outer conflicts, and message inference must stay
+distinguishable. Source facility, status, stream and outcome are not severities.
+Details and portable exports consume persisted evidence, not independent
+renderer heuristics.

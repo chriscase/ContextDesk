@@ -138,6 +138,10 @@ describe("War Room collection discovery", () => {
 
     fireEvent.change(screen.getByLabelText("Filter investigations by contributor"), { target: { value: "" } });
     const next = onQueryChange.mock.calls[0]?.[0] as CollectionQueryLocation;
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: 'alice "checkout timeout"' } });
+    expect(onQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      q: 'alice "checkout timeout"',
+    }));
     expect(next.contributorId).toBeNull();
     expect(next).not.toHaveProperty("cursor");
     expect(next).not.toHaveProperty("limit");

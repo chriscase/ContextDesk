@@ -57,6 +57,13 @@ fn fixtures_dir() -> PathBuf {
 
 fn explorer_event_full() -> ExplorerEvent {
     ExplorerEvent {
+        severity: cd_core::log_analysis::LogSeverityEvidence {
+            severity_number: Some(17),
+            severity_text: None,
+            source_severity: Some(serde_json::json!(50)),
+            severity_inferred: false,
+            provenance: "schema_mapped".into(),
+        },
         seq: 42,
         ts: 1_735_991_449,
         timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -75,6 +82,7 @@ fn explorer_event_full() -> ExplorerEvent {
 
 fn explorer_event_sparse() -> ExplorerEvent {
     ExplorerEvent {
+        severity: Default::default(),
         seq: 43,
         ts: 17_123,
         timestamp_provenance: TimestampProvenance::OrderOnly,
@@ -885,6 +893,28 @@ fn contract_fixtures() -> Vec<(&'static str, Value)> {
 
     let facets = LogFacets {
         sources: BTreeMap::from([("api.log".to_string(), 300_u64), ("worker.log".into(), 171)]),
+        source_severity_counts: BTreeMap::from([
+            (
+                "api.log".into(),
+                cd_core::log_analysis::query::SourceSeverityCounts {
+                    debug_trace: 0,
+                    info: 200,
+                    warn: 60,
+                    error_fatal: 30,
+                    unknown: 10,
+                },
+            ),
+            (
+                "worker.log".into(),
+                cd_core::log_analysis::query::SourceSeverityCounts {
+                    debug_trace: 20,
+                    info: 120,
+                    warn: 0,
+                    error_fatal: 0,
+                    unknown: 31,
+                },
+            ),
+        ]),
         levels: BTreeMap::from([("ERROR".to_string(), 471_u64), ("INFO".into(), 24_529)]),
         services: BTreeMap::from([("".to_string(), 171_u64), ("checkout".into(), 300)]),
         hosts: BTreeMap::from([("api-7".to_string(), 300_u64)]),

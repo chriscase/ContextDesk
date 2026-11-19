@@ -230,8 +230,11 @@ export function createTauriEngineClient(
 ): EngineClient {
   return {
     import: {
-      preview: (path: string) =>
-        call<WireImportPreviewPlan>(transport, "log_preview_import", { path }),
+      inspectEvidence: (request) => call(transport, "log_inspect_import_evidence", request),
+      beginDiagnostic: () => call<string>(transport, "begin_import_diagnostic"),
+      saveDiagnostic: (diagnosticId: string) => call(transport, "save_import_diagnostic", { diagnosticId }),
+      preview: (path: string, diagnosticId?: string) =>
+        call<WireImportPreviewPlan>(transport, "log_preview_import", { path, ...(diagnosticId ? { diagnosticId } : {}) }),
       run: async (request: ImportRunRequest): Promise<ImportRunReport> => {
         const report = await call<HostIngestReport>(transport, "log_run_import", {
           path: request.path,
@@ -240,6 +243,7 @@ export function createTauriEngineClient(
           planVersion: request.planVersion,
           selected: request.selected,
           correlationId: request.correlationId ?? null,
+          ...(request.diagnosticId ? { diagnosticId: request.diagnosticId } : {}),
         });
         return report;
       },

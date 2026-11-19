@@ -2,6 +2,9 @@
 
 mod capability_qualification_host;
 mod handbook;
+mod import_attempt_reports;
+mod import_evidence;
+use cd_core::log_analysis::import_attempt_diagnostic::ImportAttemptDiagnostic;
 mod investigation_report_export;
 mod investigation_team_known_answer_host;
 mod investigation_team_qualification_host;
@@ -378,6 +381,8 @@ struct AppState {
     /// One payload-free failed-ingest diagnostic. Memory-only: replaced when a
     /// later ingest starts, explicitly clearable, and absent after restart.
     failed_log_ingest_diagnostic: Mutex<cd_core::log_analysis::FailedIngestDiagnosticStore>,
+    import_attempt_reports: Mutex<import_attempt_reports::ImportAttemptReports>,
+    import_evidence_grants: Mutex<import_evidence::EvidencePreviewGrants>,
     /// Serializes the complete demo check/import/marker transaction.
     demo_log_install: tokio::sync::Mutex<()>,
     /// Bounded host-rendered diagnostic previews keyed by opaque, process-local
@@ -10573,6 +10578,57 @@ async fn save_log_diagnostic_report(
     complete_log_diagnostic_export_content(&request.format, &content, selected)
 }
 
+/// Reserve a process-local, single-use diagnostic handle. No source data accepted.
+#[tauri::command]
+fn begin_import_diagnostic(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state
+        .import_attempt_reports
+        .lock()
+        .map_err(|_| "import diagnostics unavailable")?
+        .reserve())
+}
+
+/// Export exactly the trusted snapshot of this attempt, never renderer content.
+#[tauri::command]
+async fn save_import_diagnostic(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    diagnostic_id: String,
+) -> Result<LogDiagnosticSaveStatus, String> {
+    let report = state
+        .import_attempt_reports
+        .lock()
+        .map_err(|_| "import diagnostics unavailable")?
+        .snapshot(&diagnostic_id)?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Export privacy-safe import diagnostic")
+        .set_file_name("contextdesk-import-diagnostic.json")
+        .add_filter("JSON", &["json"])
+        .save_file(move |selected| {
+            let _ = sender.send(selected);
+        });
+    let selected = receiver
+        .await
+        .map_err(|_| "import diagnostic Save dialog ended unexpectedly")?;
+    let Some(selected) = selected else {
+        return Ok(LogDiagnosticSaveStatus::Cancelled);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|_| "invalid diagnostic destination")?;
+    tokio::task::spawn_blocking(move || report.write_new(&path))
+        .await
+        .map_err(|_| "import diagnostic export worker failed")?
+        .map_err(|_| {
+            "Could not save diagnostic. Choose a new file; existing files are never replaced."
+        })?;
+    Ok(LogDiagnosticSaveStatus::Saved)
+}
+
 /// Read the one memory-only failed-ingest diagnostic, if the latest trial failed.
 #[tauri::command]
 fn get_failed_log_ingest_diagnostic(
@@ -11023,6 +11079,7 @@ async fn run_log_ingest(
     managed_identity: Option<String>,
     selection: Option<cd_core::log_analysis::IngestSelection>,
     cancel: cd_core::process_progress::CancelFlag,
+    mut attempt_report: Option<&mut ImportAttemptDiagnostic>,
 ) -> Result<LogIngestReportDto, LogIngestRunError> {
     let selected_path = path;
     let source_kind = cd_core::log_analysis::FailedIngestSourceKind::from_path(&selected_path);
@@ -11039,6 +11096,9 @@ async fn run_log_ingest(
         Ok(cache) => cache,
         Err(error) => {
             let diagnostic = recorder.finish(&error, source_kind, cd_core::embed::now_unix_secs());
+            if let Some(report) = attempt_report.as_deref_mut() {
+                report.finish_failure(diagnostic.cancelled, diagnostic.progress.clone());
+            }
             state
                 .failed_log_ingest_diagnostic
                 .lock()
@@ -11092,6 +11152,16 @@ async fn run_log_ingest(
                 source_kind,
                 cd_core::embed::now_unix_secs(),
             );
+            if let Some(report) = attempt_report.as_deref_mut() {
+                if let LogIngestRunError::Rejected { outcome, .. } = &error {
+                    report.finish_rejection(outcome, diagnostic.progress.clone());
+                } else {
+                    report.finish_failure(
+                        matches!(error, LogIngestRunError::Cancelled),
+                        diagnostic.progress.clone(),
+                    );
+                }
+            }
             state
                 .failed_log_ingest_diagnostic
                 .lock()
@@ -11106,6 +11176,9 @@ async fn run_log_ingest(
                 source_kind,
                 cd_core::embed::now_unix_secs(),
             );
+            if let Some(report) = attempt_report.as_deref_mut() {
+                report.finish_failure(diagnostic.cancelled, diagnostic.progress.clone());
+            }
             state
                 .failed_log_ingest_diagnostic
                 .lock()
@@ -11114,6 +11187,9 @@ async fn run_log_ingest(
             return Err(error);
         }
     };
+    if let Some(attempt) = attempt_report {
+        attempt.finish_ingest(&report, &classified);
+    }
     // Wizard/UI ingest: default subsequent log tools to this corpus without requiring
     // the model (or user) to re-type the id.
     set_active_log_corpus_state_nonblocking(state, Some(report.corpus_id.clone()));
@@ -11186,6 +11262,7 @@ async fn ingest_log_path(
         None,
         None,
         cancel,
+        None,
     )
     .await;
     remove_cancel_if_owned(
@@ -11303,6 +11380,7 @@ impl DemoLogInstallBackend for TauriDemoLogInstallBackend<'_> {
             Some(DEMO_LOG_IDENTITY.into()),
             None,
             cancel.clone(),
+            None,
         )
         .await?;
         Ok(DemoLogIngestReceipt {
@@ -12183,18 +12261,40 @@ async fn log_load_timezone_state(
 async fn log_preview_import(
     state: State<'_, AppState>,
     path: String,
+    diagnostic_id: Option<String>,
 ) -> Result<cd_core::log_analysis::import_preview::ImportPreviewPlan, String> {
+    if let Some(id) = &diagnostic_id {
+        state
+            .import_attempt_reports
+            .lock()
+            .map_err(|_| "import diagnostics unavailable")?
+            .start(id)?;
+    }
+    let mut diagnostic = ImportAttemptDiagnostic::new(
+        cd_core::log_analysis::FailedIngestSourceKind::from_path(std::path::Path::new(&path)),
+    );
     let cancel = cd_core::process_progress::CancelFlag::new();
     let cancel_registration = cancel.inner_arc();
-    {
+    let admission = {
         let mut cancels = state.cancels.lock().expect("cancels");
         register_exclusive_cancel(
             &mut cancels,
             LOG_INGEST_CANCEL_KEY,
             Arc::clone(&cancel_registration),
             "a log import is already running",
-        )?;
+        )
+    };
+    if let Err(error) = admission {
+        diagnostic.finish_failure(false, Default::default());
+        if let Some(id) = &diagnostic_id {
+            if let Ok(mut reports) = state.import_attempt_reports.lock() {
+                reports.finish(id, diagnostic, None);
+            }
+        }
+        return Err(error);
     }
+    let selected_path = PathBuf::from(&path);
+    let cancellation = cancel.clone();
     let result = tokio::task::spawn_blocking(move || {
         cd_core::log_analysis::import_preview::preview_import_plan(
             std::path::Path::new(&path),
@@ -12209,7 +12309,62 @@ async fn log_preview_import(
         LOG_INGEST_CANCEL_KEY,
         &cancel_registration,
     );
-    result?
+    let result = result.and_then(|result| result);
+    let token = match &result {
+        Ok(plan) => {
+            state
+                .import_evidence_grants
+                .lock()
+                .map_err(|_| "supporting document inspection unavailable")?
+                .remember(selected_path, plan);
+            diagnostic.set_preview(plan);
+            Some(plan.plan_token.clone())
+        }
+        Err(_) => {
+            diagnostic.finish_failure(cancellation.is_cancelled(), Default::default());
+            None
+        }
+    };
+    if let Some(id) = &diagnostic_id {
+        state
+            .import_attempt_reports
+            .lock()
+            .map_err(|_| "import diagnostics unavailable")?
+            .finish(id, diagnostic, token);
+    }
+    result
+}
+
+/// Passive supporting-document text only; source and plan must be host-authorized.
+#[tauri::command]
+async fn log_inspect_import_evidence(
+    state: State<'_, AppState>,
+    path: String,
+    plan_token: String,
+    plan_version: u32,
+    identity: String,
+) -> Result<cd_core::log_analysis::import_evidence::ImportEvidenceText, String> {
+    let allowed = state
+        .import_evidence_grants
+        .lock()
+        .map_err(|_| "supporting document inspection unavailable")?
+        .permits(std::path::Path::new(&path), &plan_token, plan_version);
+    if !allowed {
+        return Err("supporting document unavailable; preview the selected source again".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::import_evidence::inspect_import_evidence(
+            std::path::Path::new(&path),
+            &plan_token,
+            plan_version,
+            &identity,
+        )
+        .map_err(|_| {
+            "supporting document unavailable; preview the selected source again".to_string()
+        })
+    })
+    .await
+    .map_err(|_| "supporting document inspection unavailable".to_string())?
 }
 
 /// Run a reviewed, plan-bound import (#751).
@@ -12231,20 +12386,42 @@ async fn log_run_import(
     plan_version: u32,
     selected: Vec<String>,
     correlation_id: Option<String>,
+    diagnostic_id: Option<String>,
 ) -> Result<LogIngestReportDto, ImportCommandErrorDto> {
+    if let Some(id) = &diagnostic_id {
+        state
+            .import_attempt_reports
+            .lock()
+            .map_err(|_| "import diagnostics unavailable".to_string())?
+            .start(id)?;
+    }
+    let mut diagnostic = ImportAttemptDiagnostic::new(
+        cd_core::log_analysis::FailedIngestSourceKind::from_path(std::path::Path::new(&path)),
+    );
+    diagnostic.start_run();
     let invocation = ProcessProgressInvocation::new(correlation_id);
     let cancel_key = format!("{LOG_INGEST_CANCEL_KEY}:{}", invocation.correlation_id);
     let cancel = cd_core::process_progress::CancelFlag::new();
     let cancel_registration = cancel.inner_arc();
-    {
+    let admission = {
         let mut cancels = state.cancels.lock().expect("cancels");
         register_exclusive_cancel(
             &mut cancels,
             &cancel_key,
             Arc::clone(&cancel_registration),
             "a log import is already running",
-        )?;
+        )
+    };
+    if let Err(error) = admission {
+        diagnostic.finish_failure(false, Default::default());
+        if let Some(id) = &diagnostic_id {
+            if let Ok(mut reports) = state.import_attempt_reports.lock() {
+                reports.finish(id, diagnostic, None);
+            }
+        }
+        return Err(error.into());
     }
+    let diagnostic_plan_token = plan_token.clone();
     let verify_path = PathBuf::from(&path);
     let verify_cancel = cancel.clone();
     let selection = tokio::task::spawn_blocking(move || {
@@ -12267,9 +12444,23 @@ async fn log_run_import(
                 &cancel_key,
                 &cancel_registration,
             );
+            diagnostic.finish_failure(cancel.is_cancelled(), Default::default());
+            if let Some(id) = &diagnostic_id {
+                if let Ok(mut reports) = state.import_attempt_reports.lock() {
+                    reports.finish(id, diagnostic, None);
+                }
+            }
             return Err(message.into());
         }
     };
+    // Never attach old preview evidence to a rejected or stale input. Only the
+    // trusted successful verification authorizes this private token lookup.
+    if let Ok(reports) = state.import_attempt_reports.lock() {
+        if let Some(preview) = reports.preview(&diagnostic_plan_token) {
+            diagnostic = preview;
+        }
+    }
+    diagnostic.selected_count(selection.selected.len() as u64);
     let result = run_log_ingest(
         app,
         &state,
@@ -12279,6 +12470,7 @@ async fn log_run_import(
         None,
         Some(selection),
         cancel,
+        Some(&mut diagnostic),
     )
     .await;
     remove_cancel_if_owned(
@@ -12286,6 +12478,11 @@ async fn log_run_import(
         &cancel_key,
         &cancel_registration,
     );
+    if let Some(id) = &diagnostic_id {
+        if let Ok(mut reports) = state.import_attempt_reports.lock() {
+            reports.finish(id, diagnostic, None);
+        }
+    }
     result.map_err(LogIngestRunError::into_command_error)
 }
 
@@ -15590,6 +15787,8 @@ pub fn run() {
         host_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         active_log_corpus: Mutex::new(None),
         log_corpus_handles: Arc::new(LogCorpusHandleCache::default()),
+        import_attempt_reports: Mutex::new(import_attempt_reports::ImportAttemptReports::default()),
+        import_evidence_grants: Mutex::new(import_evidence::EvidencePreviewGrants::default()),
         failed_log_ingest_diagnostic: Mutex::new(
             cd_core::log_analysis::FailedIngestDiagnosticStore::default(),
         ),
@@ -15816,6 +16015,9 @@ pub fn run() {
             discard_log_corpus,
             log_load_timezone_state,
             log_preview_import,
+            log_inspect_import_evidence,
+            begin_import_diagnostic,
+            save_import_diagnostic,
             log_run_import,
             log_apply_source_timezones,
             log_undo_event_revision,

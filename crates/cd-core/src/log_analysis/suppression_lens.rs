@@ -292,6 +292,7 @@ mod tests {
 
     fn event(seq: u64, template_id: u64, level: &str, message: &str) -> LogEvent {
         LogEvent {
+            severity: Default::default(),
             seq,
             ts: 1_700_000_000 + seq as i64,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,

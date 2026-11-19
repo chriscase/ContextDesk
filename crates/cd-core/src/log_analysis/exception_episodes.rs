@@ -4179,6 +4179,7 @@ mod tests {
 
     fn event(seq: u64, ts: i64, source: &str, message: &str) -> ExplorerEvent {
         ExplorerEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -5277,6 +5278,7 @@ mod tests {
         // Simulate concurrent mutation by pushing an event after pin observation.
         corpus
             .push_events(&[crate::log_analysis::LogEvent {
+                severity: Default::default(),
                 seq: 99_999,
                 ts: 1_700_000_999,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -7042,6 +7044,7 @@ mod tests {
             .unwrap();
         corpus
             .push_events(&[LogEvent {
+                severity: Default::default(),
                 seq: 50_000_001,
                 ts: 1_700_000_500,
                 timestamp_provenance: TimestampProvenance::ExplicitWallClock,

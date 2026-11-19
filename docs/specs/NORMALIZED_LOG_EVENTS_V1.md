@@ -331,3 +331,15 @@ readings of this prose.
    source.
 5. **Deduplication** when the same source is supplied both raw and normalized —
    undesigned; today they would import as two independent corpora.
+
+### ContextDesk severity evidence attribute (additive)
+
+ContextDesk normalize emits optional `attributes["contextdesk.severity_evidence"]`
+with the validated stored number, original text, JSON-typed source scalar,
+inference flag and provenance. This preserves distinctions which v1's compact
+severity projection cannot express, including legacy-normalized and ambiguous
+source evidence. It does not add a v1 severity provenance enum or change reader
+version requirements. Legacy/absent/invalid/ambiguous evidence has no raw or canonical
+severity in the projection. Ambiguous source observation and its exact
+`ambiguous` state remain in the attribute without an interpretation claim. Export never reparses
+canonical/original text to reconstruct these fields.

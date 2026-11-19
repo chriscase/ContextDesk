@@ -1,3 +1,5 @@
+import { investigationSearchTerms, matchesInvestigationTerms } from "@cd-collab/contracts/investigation-collection";
+
 /**
  * Finding one investigation among many.
  *
@@ -127,13 +129,10 @@ export function normalizeQuery(raw: string): string {
 
 export function matchesQuery(
   row: SearchableInvestigation,
-  normalizedQuery: string,
+  query: string,
   entityLabels: readonly string[] = [],
 ): boolean {
-  if (!normalizedQuery) return true;
-  return searchableValues(row, entityLabels).some((value) =>
-    value.toLocaleLowerCase().includes(normalizedQuery),
-  );
+  return matchesInvestigationTerms(searchableValues(row, entityLabels), investigationSearchTerms(query));
 }
 
 /**
@@ -170,7 +169,7 @@ export function visibleInvestigations<T extends SearchableInvestigation>(
   entityMembers: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
   entityLabelsFor: (row: T) => readonly string[] = () => [],
 ): VisibleInvestigations<T> {
-  const normalizedQuery = normalizeQuery(filter.query);
+  const terms = investigationSearchTerms(filter.query);
   const showArchived = admitsArchived(filter);
   const visible: T[] = [];
   let hiddenArchived = 0;
@@ -178,7 +177,7 @@ export function visibleInvestigations<T extends SearchableInvestigation>(
   for (const row of rows) {
     if (filter.status !== "all" && row.status !== filter.status) continue;
     if (filter.entityId !== "all" && !entityMembers.get(filter.entityId)?.has(row.id)) continue;
-    if (!matchesQuery(row, normalizedQuery, entityLabelsFor(row))) continue;
+    if (terms.length && !matchesInvestigationTerms(searchableValues(row, entityLabelsFor(row)), terms)) continue;
     if (row.status === ARCHIVED_STATUS && !showArchived) {
       hiddenArchived += 1;
       continue;

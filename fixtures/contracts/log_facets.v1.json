@@ -11,6 +11,22 @@
     "": 171,
     "checkout": 300
   },
+  "sourceSeverityCounts": {
+    "api.log": {
+      "debugTrace": 0,
+      "errorFatal": 30,
+      "info": 200,
+      "unknown": 10,
+      "warn": 60
+    },
+    "worker.log": {
+      "debugTrace": 20,
+      "errorFatal": 0,
+      "info": 120,
+      "unknown": 31,
+      "warn": 0
+    }
+  },
   "sources": {
     "api.log": 300,
     "worker.log": 171

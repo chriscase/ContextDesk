@@ -1208,6 +1208,7 @@ mod tests {
             ),
         ]
         .map(|(seq, ts, event_id, source, marker)| LogEvent {
+            severity: Default::default(),
             seq,
             ts,
             timestamp_provenance: TimestampProvenance::ExplicitWallClock,
@@ -1290,6 +1291,7 @@ mod tests {
         corpus
             .push_events(&[
                 LogEvent {
+                    severity: Default::default(),
                     seq: 1,
                     ts: 100,
                     timestamp_provenance: TimestampProvenance::OrderOnly,
@@ -1305,6 +1307,7 @@ mod tests {
                     source: "api.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 2,
                     ts: 101,
                     timestamp_provenance: TimestampProvenance::OrderOnly,
@@ -1320,6 +1323,7 @@ mod tests {
                     source: "api.log".into(),
                 },
                 LogEvent {
+                    severity: Default::default(),
                     seq: 3,
                     ts: 102,
                     timestamp_provenance: TimestampProvenance::OrderOnly,

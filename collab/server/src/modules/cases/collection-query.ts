@@ -4,6 +4,7 @@
  * Facets are counted over the membership-filtered set, never the current
  * page. Nothing here ranks, scores, or invents urgency, SLA, or completeness.
  */
+import { investigationSearchTerms, matchesInvestigationTerms } from "@cd-collab/contracts/investigation-collection";
 import { createHash } from "node:crypto";
 import {
   CASE_STATUSES,
@@ -207,13 +208,6 @@ function searchableValues(
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
 }
 
-function matchesQuery(row: CaseRow, normalizedQuery: string, entityLabels: readonly string[]): boolean {
-  if (!normalizedQuery) return true;
-  return searchableValues(row, entityLabels).some((value) =>
-    value.toLocaleLowerCase().includes(normalizedQuery),
-  );
-}
-
 function admitsArchived(query: CollectionFilters): boolean {
   return query.includeArchived || query.status.includes(ARCHIVED_STATUS);
 }
@@ -253,15 +247,17 @@ function matchesFilters(
   row: CaseRow,
   query: CollectionFilters,
   graph: InvestigationCollectionGraphSnapshot | null,
-  options: { ignoreArchivedVisibility: boolean },
+  options: { ignoreArchivedVisibility: boolean; terms: readonly string[] },
 ): boolean {
   if (query.status.length > 0 && !query.status.includes(row.status)) return false;
   if (query.entityId !== null && !hasEntity(row.id, query.entityId, graph)) return false;
   if (query.impactIdentity !== null && !hasImpact(row.id, query.impactIdentity, graph)) return false;
   if (query.contributorId !== null && !hasContributor(row, query.contributorId)) return false;
   if (!inRecordedRange(row.createdAt, query)) return false;
-  const entityLabels = graph ? graph.entitiesFor(row.id).map((link) => link.label) : [];
-  if (!matchesQuery(row, query.q.toLocaleLowerCase(), entityLabels)) return false;
+  if (options.terms.length) {
+    const entityLabels = graph ? graph.entitiesFor(row.id).map((link) => link.label) : [];
+    if (!matchesInvestigationTerms(searchableValues(row, entityLabels), options.terms)) return false;
+  }
   if (!options.ignoreArchivedVisibility && row.status === ARCHIVED_STATUS && !admitsArchived(query)) {
     return false;
   }
@@ -404,10 +400,11 @@ export function buildInvestigationCollectionPage(input: {
   }
 
   const matching: CaseRow[] = [];
+  const terms = investigationSearchTerms(query.q);
   let hiddenArchivedCount = 0;
   for (const row of authorized) {
     const matchesExceptArchive = matchesFilters(row, query, graph, {
-      ignoreArchivedVisibility: true,
+      ignoreArchivedVisibility: true, terms,
     });
     if (!matchesExceptArchive) continue;
     if (row.status === ARCHIVED_STATUS && !admitsArchived(query)) {
@@ -481,10 +478,11 @@ export function buildInvestigationOperationsQueuePage(input: {
   }
 
   const commonMatching: CaseCoordinationSnapshotRow[] = [];
+  const terms = investigationSearchTerms(query.q);
   let hiddenArchivedCount = 0;
   for (const row of authorized) {
     const matchesExceptArchive = matchesFilters(row.caseRow, query, graph, {
-      ignoreArchivedVisibility: true,
+      ignoreArchivedVisibility: true, terms,
     });
     if (!matchesExceptArchive) continue;
     if (row.caseRow.status === ARCHIVED_STATUS && !admitsArchived(query)) {

@@ -1,3 +1,4 @@
+import { SourceSeverityGlyph } from "./SourceSeverityGlyph";
 /**
  * Multi-window Log Investigation Workspace (#480–#487).
  * Filters | 1–4 evidence lanes | chat rail · bookmarks · log_nav chips.
@@ -1353,6 +1354,9 @@ export function LogExplorer({ corpusId }: Props) {
   const investigationMetadataStartedRef = useRef(false);
   const investigationLoadRequestRef = useRef(0);
   const findRequestRef = useRef(0);
+  // Cancellation intent suppresses navigation immediately, independently of
+  // whether the host acknowledges before or after retiring its request.
+  const findNavigationCancelledRef = useRef<number | null>(null);
   const activeFindRequestRef = useRef<string | null>(null);
   const findActiveRef = useRef(false);
   const autoStatusLockRef = useRef<
@@ -2096,6 +2100,7 @@ export function LogExplorer({ corpusId }: Props) {
     const facetFilters =
       filtersCorpusId === corpusId ? filters : emptyFilters();
     setFacetsLoading(true);
+    setFacets((previous) => previous ? { ...previous, sourceSeverityCounts: undefined } : null);
     try {
       const f = await hostLogFacets(
         corpusId,
@@ -2207,6 +2212,7 @@ export function LogExplorer({ corpusId }: Props) {
     }
     setTimelineReady(false);
     setFacetsLoading(true);
+    setFacets((previous) => previous ? { ...previous, sourceSeverityCounts: undefined } : null);
     const visibleLanes = lanes.slice(0, laneCount);
     const unloaded = Object.fromEntries(
       visibleLanes.map((lane) => [
@@ -3240,6 +3246,10 @@ export function LogExplorer({ corpusId }: Props) {
       }
       setFindSearching(false);
       setFindCancelling(false);
+      if (findNavigationCancelledRef.current === requestId) {
+        setStatus("Find result ignored after cancellation request · previous visible results preserved");
+        return;
+      }
       if (result.cancelled) {
         setStatus("Find cancelled · previous visible results preserved");
         return;
@@ -3340,6 +3350,7 @@ export function LogExplorer({ corpusId }: Props) {
   const cancelFind = async () => {
     const requestId = activeFindRequestRef.current;
     if (!requestId || findCancelling) return;
+    findNavigationCancelledRef.current = findRequestRef.current;
     setFindCancelling(true);
     setStatus("Find cancellation requested");
     try {
@@ -7280,15 +7291,15 @@ export function LogExplorer({ corpusId }: Props) {
               </div>
               <div className="log-explorer__facet">
                 {topSourceEntries.map(([src, count]) => (
-                  <label key={src} className="log-explorer__facet-row">
-                    <input
-                      type="checkbox"
-                      checked={filters.sources.includes(src)}
-                      onChange={() => toggleSource(src)}
-                    />
-                    <span title={src}>{src}</span>
-                    <span className="count">{count}</span>
-                  </label>
+                  <div key={src} className="source-severity__row">
+                    <label className="log-explorer__facet-row">
+                      <input type="checkbox" checked={filters.sources.includes(src)} onChange={() => toggleSource(src)} />
+                      <span title={src}>{src}</span><span className="count">{count}</span>
+                    </label>
+                    <SourceSeverityGlyph key={`${src}:${facetsLoading}:${!!revealRestore}:${revealSuppressedEvidence}:${JSON.stringify(facets?.sourceSeverityCounts?.[src])}`}
+                      source={src} total={count} counts={facets?.sourceSeverityCounts?.[src]}
+                      unavailableReason={facetsLoading ? "Updating facet scope; prior severity counts are not shown." : revealRestore || revealSuppressedEvidence ? "Severity breakdown unavailable during temporary evidence reveal; restore the prior view to see its scoped counts." : undefined} />
+                  </div>
                 ))}
               </div>
               {allSourcesOpen ? (
@@ -8167,6 +8178,18 @@ export function LogExplorer({ corpusId }: Props) {
                       <dd className={levelClass(detail.level)}>
                         {detail.level}
                       </dd>
+                    </div>
+                    <div>
+                      <dt>Source severity</dt>
+                      <dd>{detail.sourceSeverity == null ? "Not recorded" : JSON.stringify(detail.sourceSeverity)}</dd>
+                    </div>
+                    <div>
+                      <dt>Severity mapping</dt>
+                      <dd>{detail.severityNumber == null ? "No numeric mapping" : `OTel ${detail.severityNumber}`} · {detail.severityText ?? "No source label"}{detail.severityInferred ? " · inferred" : ""}</dd>
+                    </div>
+                    <div>
+                      <dt>Severity provenance</dt>
+                      <dd>{detail.provenance ?? "legacy_unknown"}</dd>
                     </div>
                     <div>
                       <dt>Service</dt>

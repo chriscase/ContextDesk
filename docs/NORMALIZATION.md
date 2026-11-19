@@ -119,7 +119,7 @@ strictly increasing). Full rules: [NORMALIZED_LOG_EVENTS_V1.md](specs/NORMALIZED
 
 ```json
 {"schemaId":"contextdesk.normalized_log_events.v1","minReaderVersion":1,"sourceId":"demo-api","producer":{"name":"contextdesk-normalize","version":"0.1.0"}}
-{"sourceSeq":0,"time":{"resolution":"source_explicit","instant":"2024-06-01T12:00:08.300Z","basis":"wall"},"severity":{"raw":"ERROR","canonical":17,"confidence":"high","provenance":"source_explicit"},"message":"…","canonical":"…"}
+{"sourceSeq":0,"time":{"resolution":"source_explicit","instant":"2024-06-01T12:00:08.300Z","basis":"wall"},"severity":{"raw":"ERROR","canonical":17,"confidence":"high","provenance":"source_declared"},"message":"…","canonical":"…"}
 ```
 
 ## UTC `Z` output behavior
@@ -292,3 +292,20 @@ until a dedicated normalized fast-import ships.
 - [CLI guide](CLI.md) — envelopes, exit codes, import vs normalize
 - [Language integration](LANGUAGE_INTEGRATION.md) — spawn the binary; never re-parse
 - [CLI packaging](CLI_PACKAGING.md) — release archives
+
+## Severity evidence in normalized exports
+
+Normalization uses the stored, validated typed severity evidence, not the legacy
+`level` display band or a reparse of retained originals. Legacy rows therefore
+export honest `absent` severity even if their display band is `info` or their
+canonical text contains a level token. Explicit source values retain their JSON
+type; documented mappings use medium confidence and text inference uses low
+confidence. Unmapped source tokens do not acquire a guessed canonical number.
+
+The optional additive v1 attribute `contextdesk.severity_evidence` preserves
+`severityNumber`, `severityText`, `sourceSeverity`, `severityInferred` and
+`provenance`. Existing v1 consumers can continue using the compact `severity`
+object. `legacy_normalized`, `absent`, `invalid` and `ambiguous` project to v1 `absent`.
+Ambiguous source observations are retained only in the attribute, without a
+high-confidence claim or a guessed canonical number. Invalid typed
+stored evidence fails export rather than being repaired from private originals.

@@ -1,6 +1,16 @@
 # macOS / Windows rust CI lanes
 
-**Status:** on `main` via #910 (four-way shards) and #912 (probe must not
+**Current macOS lane:** A single cold Mac performs one exact workspace warmup,
+native preflight and four serialized, separately timed native shards. It
+requires the original compiled Rust/DuckDB check before every shard. No cache
+or artifact transfers are needed. The original check names remain backed by
+same-run native outcomes; the aggregate still independently checks the full
+plan. The [cold trial](https://github.com/chriscase/ContextDesk/actions/runs/44216499635)
+ran in 76m51s (165/165 units, 4,197 passed, 21 ignored). The 120-minute cap is
+a limit, not a guarantee of speed. Windows remains distributed. The historical
+measurements below explain the previous tradeoff, not the current macOS wiring.
+
+**Historical status:** on `main` via #910 (four-way shards) and #912 (probe must not
 save). This lane preserves macOS/Windows workspace coverage and reduced the
 desktop critical path in run
 [`32008278389`](https://github.com/chriscase/ContextDesk/actions/runs/32008278389).

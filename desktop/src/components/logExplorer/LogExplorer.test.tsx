@@ -2068,6 +2068,23 @@ describe("LogExplorer shell", () => {
     expect(await screen.findByText("current corpus evidence")).toBeTruthy();
   });
 
+  it("clears prior severity aggregates when a filtered facet refresh fails", async () => {
+    vi.mocked(host.hostLogFacets).mockResolvedValue({ sources: { "api.log": 5 },
+      sourceSeverityCounts: { "api.log": { errorFatal: 2, warn: 1, info: 2, debugTrace: 0, unknown: 0 } },
+      levels: {error:2,info:3}, services: {}, hosts: {}, timeQuality: "wall" });
+    render(<LogExplorer corpusId="c1" />);
+    const button = await screen.findByRole("button", { name: "Severity breakdown for api.log" });
+    fireEvent.focus(button);
+    expect(screen.getByTestId("source-severity-tooltip").textContent).toContain("2 · 40.0%");
+    const calls = vi.mocked(host.hostLogFacets).mock.calls.length;
+    vi.mocked(host.hostLogFacets).mockRejectedValue(new Error("fixture facet refresh failure"));
+    const filters = screen.getByTestId("log-explorer-filters");
+    fireEvent.click(within(filters).getByRole("checkbox", {name: /api\.log/}));
+    await waitFor(() => expect(vi.mocked(host.hostLogFacets).mock.calls.length).toBeGreaterThan(calls));
+    await waitFor(() => expect(screen.queryByRole("button", {name:"Severity breakdown for api.log"})).toBeNull());
+    expect(screen.queryByTestId("source-severity-tooltip")).toBeNull();
+  });
+
   it("does not carry a source filter into a replacement corpus", async () => {
     vi.mocked(host.hostLogFacets).mockImplementation(
       async (requestedCorpusId) => {
@@ -3261,6 +3278,21 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(document.activeElement?.getAttribute("data-seq")).toBe("1"),
     );
+  });
+
+  it("shows typed source severity and mapping provenance without replacing the level", async () => {
+    const page = defaultEventPage();
+    page.events[0] = { ...page.events[0]!, sourceSeverity: 30, severityNumber: 13,
+      severityText: null, severityInferred: false, provenance: "schema_mapped" };
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue(page);
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText(/auth failure/));
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    expect(within(inspector).getByText("Source severity")).toBeTruthy();
+    expect(within(inspector).getByText("30")).toBeTruthy();
+    expect(within(inspector).getByText(/OTel 13.*No source label/)).toBeTruthy();
+    expect(within(inspector).getByText("schema_mapped")).toBeTruthy();
+    expect(host.hostLogQueryEventOriginal).not.toHaveBeenCalled();
   });
 
   it("lazily reveals and copies the authoritative redacted original with fidelity notices", async () => {
@@ -9218,6 +9250,33 @@ describe("LogExplorer shell", () => {
     expect(
       await screen.findByText(/Match 2 of 2.*1 result identities resident/),
     ).toBeTruthy();
+  });
+
+  it.each([true, false])("does not locate a late result when cancellation acknowledgement (%s) races backend retirement", async (acknowledged) => {
+    const search = deferred<host.EventSearchResultDto>();
+    const cancel = deferred<boolean>();
+    const neighborhood = deferred<Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>>();
+    const target = nonresidentFindEvent(95, "cancelled race target");
+    vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-cancel-race");
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockReturnValue(search.promise);
+    vi.mocked(host.hostCancelLogSearch).mockReturnValue(cancel.promise);
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(neighborhood.promise);
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {target:{value:"needle"}});
+    await clickFindWhenReady();
+    fireEvent.click(await screen.findByTestId("log-explorer-find-cancel"));
+    await act(async () => { search.resolve(findResultFor(target)); await search.promise; });
+    await act(async () => { cancel.resolve(acknowledged); await cancel.promise; });
+    await act(async () => { neighborhood.resolve(foundNeighborhoodFor(target)); await neighborhood.promise; });
+    expect(screen.queryAllByText(target.message)).toHaveLength(0);
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(host.hostCancelLogSearch).toHaveBeenCalledTimes(1);
+    // Cancellation intent is request-local, not a permanent navigation lock.
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue(findResultFor(defaultEventPage().events[0]!));
+    await clickFindWhenReady();
+    expect(await screen.findByText(/Match 1 of 1.*1 result identities resident/)).toBeTruthy();
   });
 
   it("cancels an in-flight Find without replacing the previous visible results", async () => {

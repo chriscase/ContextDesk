@@ -412,7 +412,7 @@ describe("operations queue service and store", () => {
       const hidden = await service.listOperationsQueuePage(
         ALICE,
         false,
-        queueQuery({ q: "checkout", coordinationScope: "mine", limit: 1 }),
+        queueQuery({ q: "alice checkout", coordinationScope: "mine", limit: 1 }),
       );
       expect(hidden.items.map((item) => item.investigation.id)).toEqual([CASE_A]);
       expect(hidden.hiddenArchivedCount).toBe(1);
@@ -575,7 +575,7 @@ describe("collection query service and store", () => {
         ALICE,
         false,
         query({
-          q: "storefront",
+          q: 'northwind CHECKOUT alice "storefront operators"',
           status: ["open"],
           entityId: "ent-northwind",
           impactIdentity: IMPACT,
@@ -584,6 +584,10 @@ describe("collection query service and store", () => {
           recordedTo: "2026-08-31T00:00:00.000Z",
         }),
       );
+      for (const q of ['"checkout operators"', 'mailer checkout']) {
+        const absent = await service.listCollectionPage(ALICE, false, query({ q }));
+        expect(absent.items).toEqual([]);
+      }
       const parsed = parseInvestigationCollectionPage(page);
       expect(parsed.schemaId).toBe(INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID);
       expect(parsed.items.map((item) => item.id)).toEqual([CASE_A]);
