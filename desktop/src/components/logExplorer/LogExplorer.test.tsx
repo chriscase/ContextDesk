@@ -9252,6 +9252,33 @@ describe("LogExplorer shell", () => {
     ).toBeTruthy();
   });
 
+  it.each([true, false])("does not locate a late result when cancellation acknowledgement (%s) races backend retirement", async (acknowledged) => {
+    const search = deferred<host.EventSearchResultDto>();
+    const cancel = deferred<boolean>();
+    const neighborhood = deferred<Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>>();
+    const target = nonresidentFindEvent(95, "cancelled race target");
+    vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-cancel-race");
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockReturnValue(search.promise);
+    vi.mocked(host.hostCancelLogSearch).mockReturnValue(cancel.promise);
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(neighborhood.promise);
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {target:{value:"needle"}});
+    await clickFindWhenReady();
+    fireEvent.click(await screen.findByTestId("log-explorer-find-cancel"));
+    await act(async () => { search.resolve(findResultFor(target)); await search.promise; });
+    await act(async () => { cancel.resolve(acknowledged); await cancel.promise; });
+    await act(async () => { neighborhood.resolve(foundNeighborhoodFor(target)); await neighborhood.promise; });
+    expect(screen.queryAllByText(target.message)).toHaveLength(0);
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(host.hostCancelLogSearch).toHaveBeenCalledTimes(1);
+    // Cancellation intent is request-local, not a permanent navigation lock.
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue(findResultFor(defaultEventPage().events[0]!));
+    await clickFindWhenReady();
+    expect(await screen.findByText(/Match 1 of 1.*1 result identities resident/)).toBeTruthy();
+  });
+
   it("cancels an in-flight Find without replacing the previous visible results", async () => {
     vi.mocked(host.createLogSearchRequestId)
       .mockReturnValueOnce("find-kept")
