@@ -4,7 +4,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { dialogConfirm } from "../lib/dialogs";
+import { dialogConfirm, dialogMessage } from "../lib/dialogs";
 import {
   hostListChatSessions,
   hostLoadChatSession,
@@ -131,6 +131,7 @@ export function useChatSessions({ hasDraft }: UseChatSessionsArgs = {}) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const persistGenerationRef = useRef(new Map<string, number>());
   const syncGenerationRef = useRef(0);
+  const pendingTrashRef = useRef(new Set<string>());
   const hasDraftRef = useRef(hasDraft);
   hasDraftRef.current = hasDraft;
 
@@ -446,31 +447,54 @@ export function useChatSessions({ hasDraft }: UseChatSessionsArgs = {}) {
     async (id: string) => {
       const cur = sessions.find((s) => s.id === id);
       if (!cur) return;
-      const ok = await dialogConfirm(
-        `Move “${cur.title}” to Trash?\n\nYou can restore it later from Archive.`,
-        { title: "Move to Trash", kind: "warning" },
-      );
-      if (!ok) return;
+      if (pendingTrashRef.current.has(id)) return;
+      pendingTrashRef.current.add(id);
       try {
-        await hostTrashChatSession(id);
-      } catch {
-        /* local */
-      }
-      setSessions((all) => {
-        const next = all.filter((s) => s.id !== id);
-        if (activeSessionId === id) {
-          if (next.length === 0) {
-            // Keep composer usable — open a fresh empty chat.
-            const fresh = newSession("Chat 1", null);
-            setActiveSessionId(fresh.id);
-            return [fresh];
-          }
-          setActiveSessionId(next[0]!.id);
+        // A UI-only draft has no recoverable host record. Do not discard it
+        // (or its composer draft) while promising recovery from Archive.
+        if (!cur.hostRevision && cur.messages.length === 0 && !cur.linkedCorpusId) {
+          await dialogMessage(
+            `“${cur.title}” is an unsaved chat and cannot be moved to recoverable Trash. It and any draft text were kept.`,
+            { title: "Chat not saved", kind: "info" },
+          );
+          return;
         }
-        return next;
-      });
+        const ok = await dialogConfirm(
+          `Move “${cur.title}” to Trash?\n\nYou can restore it later from Archive.`,
+          { title: "Move to Trash", kind: "warning" },
+        );
+        if (!ok) return;
+        const trashed = await hostTrashChatSession(id);
+        if (!trashed || trashed.id !== id || !trashed.trashed) {
+          throw new Error("The host did not confirm the chat is in Trash.");
+        }
+        // React may replay state updaters; mint the fallback identity once.
+        const fresh = newSession("Chat 1", null);
+        setSessions((all) => {
+          let next = all.filter((s) => s.id !== id);
+          let fallback = next.find((s) => !s.archived && !s.trashed);
+          if (!fallback) {
+            fallback = fresh;
+            next = [fallback, ...next];
+          }
+          const fallbackId = fallback.id;
+          // Read current selection at settlement, not before the dialog/IPC.
+          setActiveSessionId((current) => current === id ? fallbackId : current);
+          return next;
+        });
+      } catch (error) {
+        // Keep the local conversation until the host confirms retirement.
+        // A failed follow-up notification may mean the host already moved it;
+        // do not claim success or that no host-side change occurred.
+        await dialogMessage(
+          `Could not confirm moving “${cur.title}” to Trash. The local chat was kept. Refresh Archive to check its saved state.\n\n${String(error)}`,
+          { title: "Move to Trash failed", kind: "error" },
+        );
+      } finally {
+        pendingTrashRef.current.delete(id);
+      }
     },
-    [sessions, activeSessionId],
+    [sessions],
   );
 
   const openSessionById = useCallback(async (id: string) => {

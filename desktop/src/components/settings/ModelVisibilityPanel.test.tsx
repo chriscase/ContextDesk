@@ -540,13 +540,20 @@ describe("honest failures", () => {
 describe("curation reaches the rest of the app", () => {
   it("tells the app to re-list its pickers after a hide", async () => {
     const onCurationChanged = vi.fn();
-    host.list.mockResolvedValue(INVENTORY);
+    let resolveInventory!: (models: ModelOptionDto[]) => void;
+    host.list.mockReturnValueOnce(new Promise<ModelOptionDto[]>((resolve) => {
+      resolveInventory = resolve;
+    })).mockResolvedValue(INVENTORY);
     render(<ModelVisibilityPanel onCurationChanged={onCurationChanged} />);
     await waitFor(() => expect(host.summary).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
     await screen.findByRole("dialog", { name: "Model visibility" });
 
-    const rows = screen.getAllByRole("listitem");
+    // Opening the dialog does not mean asynchronous discovery has settled.
+    expect(screen.getByText("Loading models…")).toBeTruthy();
+    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    await act(async () => resolveInventory(INVENTORY));
+    const rows = await screen.findAllByRole("listitem");
     fireEvent.click(
       within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
     );
@@ -558,13 +565,20 @@ describe("curation reaches the rest of the app", () => {
 
   it("tells the app after a pin too", async () => {
     const onCurationChanged = vi.fn();
-    host.list.mockResolvedValue(INVENTORY);
+    let resolveInventory!: (models: ModelOptionDto[]) => void;
+    host.list.mockReturnValueOnce(new Promise<ModelOptionDto[]>((resolve) => {
+      resolveInventory = resolve;
+    })).mockResolvedValue(INVENTORY);
     render(<ModelVisibilityPanel onCurationChanged={onCurationChanged} />);
     await waitFor(() => expect(host.summary).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
     await screen.findByRole("dialog", { name: "Model visibility" });
 
-    const rows = screen.getAllByRole("listitem");
+    // Opening the dialog does not mean asynchronous discovery has settled.
+    expect(screen.getByText("Loading models…")).toBeTruthy();
+    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    await act(async () => resolveInventory(INVENTORY));
+    const rows = await screen.findAllByRole("listitem");
     fireEvent.click(
       within(rows[0]!).getByRole("button", { name: /^Pin .* from / }),
     );
@@ -574,14 +588,21 @@ describe("curation reaches the rest of the app", () => {
 
   it("does not announce a change that failed", async () => {
     const onCurationChanged = vi.fn();
-    host.list.mockResolvedValue(INVENTORY);
+    let resolveInventory!: (models: ModelOptionDto[]) => void;
+    host.list.mockReturnValueOnce(new Promise<ModelOptionDto[]>((resolve) => {
+      resolveInventory = resolve;
+    })).mockResolvedValue(INVENTORY);
     host.setModelHidden.mockRejectedValue(new Error("config is read-only"));
     render(<ModelVisibilityPanel onCurationChanged={onCurationChanged} />);
     await waitFor(() => expect(host.summary).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
     await screen.findByRole("dialog", { name: "Model visibility" });
 
-    const rows = screen.getAllByRole("listitem");
+    // Opening the dialog does not mean asynchronous discovery has settled.
+    expect(screen.getByText("Loading models…")).toBeTruthy();
+    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    await act(async () => resolveInventory(INVENTORY));
+    const rows = await screen.findAllByRole("listitem");
     fireEvent.click(
       within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
     );
